@@ -294,6 +294,39 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Sets whether video should use aspect-fill (zoom/crop) instead of aspect-fit.
+  Future<void> setUseAspectFill(bool enabled) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setUseAspectFill',
+        <String, Object>{'viewId': primaryPlatformViewId, 'enabled': enabled},
+      );
+    } catch (e) {
+      debugPrint('Error calling setUseAspectFill: $e');
+    }
+  }
+
+  /// Gets current video dimensions if available.
+  Future<Map<String, int>?> getVideoDimensions() async {
+    try {
+      final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+        'getVideoDimensions',
+        <String, Object>{'viewId': primaryPlatformViewId},
+      );
+      if (result is Map) {
+        final width = (result['width'] as num?)?.toInt();
+        final height = (result['height'] as num?)?.toInt();
+        if (width != null && height != null && width > 0 && height > 0) {
+          return <String, int>{'width': width, 'height': height};
+        }
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Error calling getVideoDimensions: $e');
+      return null;
+    }
+  }
+
   /// Checks if AirPlay is available (iOS only)
   Future<bool> isAirPlayAvailable() async {
     try {

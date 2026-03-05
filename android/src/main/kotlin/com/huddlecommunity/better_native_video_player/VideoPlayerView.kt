@@ -18,6 +18,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerMethodHandler
@@ -83,6 +84,7 @@ class VideoPlayerView(
 
     // HDR setting
     private var enableHDR: Boolean = false
+    private var useAspectFill: Boolean = false
 
 
     init {
@@ -97,6 +99,7 @@ class VideoPlayerView(
 
         // Extract native controls setting from args
         showNativeControlsOriginal = args?.get("showNativeControls") as? Boolean ?: true
+        useAspectFill = args?.get("useAspectFill") as? Boolean ?: false
 
         // Extract HDR setting from args
         enableHDR = args?.get("enableHDR") as? Boolean ?: false
@@ -146,6 +149,7 @@ class VideoPlayerView(
         playerView = PlayerView(context).apply {
             this.player = this@VideoPlayerView.player
             useController = showNativeControls
+            resizeMode = resolveResizeMode(useAspectFill)
             controllerShowTimeoutMs = 5000
             controllerHideOnTouch = true
 
@@ -347,6 +351,12 @@ class VideoPlayerView(
             "setShowNativeControls" -> {
                 val show = call.argument<Boolean>("show") ?: true
                 playerView.useController = show
+                result.success(null)
+            }
+            "setUseAspectFill" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                useAspectFill = enabled
+                playerView.resizeMode = resolveResizeMode(enabled)
                 result.success(null)
             }
             "ensureSurfaceConnected" -> {
@@ -658,13 +668,18 @@ class VideoPlayerView(
         if (duration > 0) {
             // Get buffered position
             val bufferedPosition = player.bufferedPosition
+            val videoWidth = player.videoSize.width
+            val videoHeight = player.videoSize.height
 
-            eventHandler.sendEvent("timeUpdate", mapOf(
+            val payload = mutableMapOf<String, Any>(
                 "position" to currentPosition.toInt(),
                 "duration" to duration.toInt(),
                 "bufferedPosition" to bufferedPosition.toInt(),
                 "isBuffering" to (player.playbackState == ExoPlayer.STATE_BUFFERING)
-            ))
+            )
+            addVideoDimensionsToPayload(payload, videoWidth, videoHeight)
+
+            eventHandler.sendEvent("timeUpdate", payload)
             Log.d(TAG, "Emitted timeUpdate with duration: ${duration}ms")
         }
 
@@ -675,6 +690,21 @@ class VideoPlayerView(
         } else if (player.playbackState != ExoPlayer.STATE_IDLE) {
             Log.d(TAG, "Emitting pause state")
             eventHandler.sendEvent("pause")
+        }
+    }
+
+    private fun resolveResizeMode(useAspectFill: Boolean): Int {
+        return if (useAspectFill) {
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        } else {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    private fun addVideoDimensionsToPayload(payload: MutableMap<String, Any>, width: Int, height: Int) {
+        if (width > 0 && height > 0) {
+            payload["videoWidth"] = width
+            payload["videoHeight"] = height
         }
     }
 
@@ -764,4 +794,3 @@ class VideoPlayerView(
         }
     }
 }
-

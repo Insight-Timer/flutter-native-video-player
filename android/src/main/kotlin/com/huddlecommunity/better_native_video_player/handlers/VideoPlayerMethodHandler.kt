@@ -129,6 +129,7 @@ class VideoPlayerMethodHandler(
             "getAvailableQualities" -> handleGetAvailableQualities(result)
             "getAvailableSubtitleTracks" -> handleGetAvailableSubtitleTracks(result)
             "setSubtitleTrack" -> handleSetSubtitleTrack(call, result)
+            "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
             "exitFullScreen" -> handleExitFullScreen(result)
             "isAirPlayAvailable" -> handleIsAirPlayAvailable(result)
@@ -139,6 +140,20 @@ class VideoPlayerMethodHandler(
             "dispose" -> handleDispose(result)
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Returns current decoded video dimensions if available.
+     */
+    private fun handleGetVideoDimensions(result: MethodChannel.Result) {
+        val videoSize = player.videoSize
+        val width = videoSize.width
+        val height = videoSize.height
+        if (width > 0 && height > 0) {
+            result.success(mapOf("width" to width, "height" to height))
+            return
+        }
+        result.success(null)
     }
 
     /**

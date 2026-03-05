@@ -28,6 +28,7 @@ enum PlayerControlState {
   fullscreenEntered,
   fullscreenExited,
   timeUpdated,
+  videoDimensionsUpdated,
 }
 
 /// Activity state event for playback changes
@@ -126,6 +127,8 @@ class PlayerControlEvent {
       case 'timeUpdate':
       case 'timeUpdated': // Native side sends 'timeUpdated' in some cases
         return PlayerControlState.timeUpdated;
+      case 'videoDimensions':
+        return PlayerControlState.videoDimensionsUpdated;
       default:
         return PlayerControlState.none;
     }

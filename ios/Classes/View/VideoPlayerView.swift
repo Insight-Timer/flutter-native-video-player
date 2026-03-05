@@ -91,6 +91,11 @@ import QuartzCore
     // Store looping setting
     var enableLooping: Bool = false
 
+    // Store preferred render mode
+    var useAspectFill: Bool = false
+    var lastEmittedVideoWidth: Int = 0
+    var lastEmittedVideoHeight: Int = 0
+
     // Track if app is in background to keep audio playing on screen lock
     var isInBackground: Bool = false
     var lastKnownRate: Float = 0.0
@@ -175,6 +180,8 @@ import QuartzCore
         let showControls = (args as? [String: Any])?["showNativeControls"] as? Bool ?? true
         playerViewController.showsPlaybackControls = showControls
         playerViewController.delegate = self
+        useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
+        applyVideoGravity(useAspectFill)
 
         // Disable automatic Now Playing updates - we'll handle it manually
         playerViewController.updatesNowPlayingInfoCenter = false
@@ -411,6 +418,10 @@ import QuartzCore
             handleDisableAutomaticInlinePip(result: result)
         case "setShowNativeControls":
             handleSetShowNativeControls(call: call, result: result)
+        case "setUseAspectFill":
+            handleSetUseAspectFill(call: call, result: result)
+        case "getVideoDimensions":
+            handleGetVideoDimensions(result: result)
         case "ensureSurfaceConnected":
             // No-op on iOS; each platform view uses its own AVPlayerViewController when shared.
             result(nil)
@@ -441,6 +452,64 @@ import QuartzCore
         DispatchQueue.main.async {
             self.eventSink?(event)
         }
+    }
+
+    private func handleSetUseAspectFill(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any]
+        let enabled = args?["enabled"] as? Bool ?? false
+        if useAspectFill == enabled {
+            result(nil)
+            return
+        }
+        useAspectFill = enabled
+        applyVideoGravity(enabled)
+        result(nil)
+    }
+
+    private func applyVideoGravity(_ enabled: Bool) {
+        if Thread.isMainThread {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            UIView.performWithoutAnimation {
+                playerViewController.videoGravity = enabled ? .resizeAspectFill : .resizeAspect
+                playerViewController.view.setNeedsLayout()
+                playerViewController.view.layoutIfNeeded()
+            }
+            CATransaction.commit()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.applyVideoGravity(enabled)
+        }
+    }
+
+    func getCurrentVideoDimensions() -> [String: Int]? {
+        guard let currentItem = player?.currentItem else {
+            return nil
+        }
+        let presentationSize = currentItem.presentationSize
+        let width = Int(presentationSize.width.rounded())
+        let height = Int(presentationSize.height.rounded())
+        if width > 0 && height > 0 {
+            return ["width": width, "height": height]
+        }
+        return nil
+    }
+
+    func appendVideoDimensions(to payload: inout [String: Any]) {
+        guard let dimensions = getCurrentVideoDimensions() else {
+            return
+        }
+        payload["videoWidth"] = dimensions["width"]
+        payload["videoHeight"] = dimensions["height"]
+    }
+
+    private func handleGetVideoDimensions(result: @escaping FlutterResult) {
+        if let dimensions = getCurrentVideoDimensions() {
+            result(dimensions)
+            return
+        }
+        result(nil)
     }
 
     /// Cleans up remote command ownership, attempting to transfer to another view if possible
@@ -537,12 +606,14 @@ import QuartzCore
             }
             let bufferedPosition = Int(bufferedSeconds * 1000)
 
-            sendEvent("timeUpdate", data: [
+            var payload: [String: Any] = [
                 "position": position,
                 "duration": duration,
                 "bufferedPosition": bufferedPosition,
                 "isBuffering": player.timeControlStatus == .waitingToPlayAtSpecifiedRate
-            ])
+            ]
+            appendVideoDimensions(to: &payload)
+            sendEvent("timeUpdate", data: payload)
             print("[\(channelName)] Emitted timeUpdate with duration: \(duration)ms")
         }
 
@@ -592,7 +663,9 @@ import QuartzCore
                 } else {
                     let duration = Int(durationSeconds * 1000)
                     let position = Int(currentTimeSeconds * 1000)
-                    sendEvent("timeUpdated", data: ["position": position, "duration": duration])
+                    var payload: [String: Any] = ["position": position, "duration": duration]
+                    appendVideoDimensions(to: &payload)
+                    sendEvent("timeUpdated", data: payload)
                 }
 
                 // Send current playback state
@@ -776,6 +849,7 @@ import QuartzCore
             item.removeObserver(self, forKeyPath: "status")
             item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
             item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
+            item.removeObserver(self, forKeyPath: "presentationSize")
         }
 
         // Remove player observer for timeControlStatus
@@ -998,4 +1072,3 @@ import QuartzCore
         }
     }
 }
-

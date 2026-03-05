@@ -1128,12 +1128,14 @@ extension VideoPlayerView {
                 let totalDuration = Int(durationSeconds * 1000) // milliseconds
                 let bufferedPosition = Int(bufferedSeconds * 1000) // milliseconds
 
-                self.sendEvent("timeUpdate", data: [
+                var payload: [String: Any] = [
                     "position": position,
                     "duration": totalDuration,
                     "bufferedPosition": bufferedPosition,
                     "isBuffering": isBuffering
-                ])
+                ]
+                self.appendVideoDimensions(to: &payload)
+                self.sendEvent("timeUpdate", data: payload)
             }
         }
     }

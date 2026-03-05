@@ -52,6 +52,7 @@ class NativeVideoPlayerController {
     this.enableHDR = true,
     this.enableLooping = false,
     this.showNativeControls = true,
+    this.useAspectFill = false,
     List<DeviceOrientation>? preferredOrientations,
   }) {
     // Set preferred orientations if provided
@@ -141,6 +142,10 @@ class NativeVideoPlayerController {
   /// Whether to show native player controls (default: true)
   /// When set to false, native controls are hidden. Custom overlays automatically hide native controls regardless of this setting.
   final bool showNativeControls;
+
+  /// Whether to render video in aspect-fill mode (zoom/crop to fill).
+  /// When false, uses aspect-fit.
+  final bool useAspectFill;
 
   /// BuildContext getter for showing Dart fullscreen dialog
   /// Returns a mounted context from any registered platform view
@@ -813,6 +818,7 @@ class NativeVideoPlayerController {
     'isFullScreen': _state.isFullScreen,
     'enableHDR': enableHDR,
     'enableLooping': enableLooping,
+    'useAspectFill': useAspectFill,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
 
@@ -2150,6 +2156,16 @@ class NativeVideoPlayerController {
   /// - show: true to show native controls, false to hide them
   Future<void> setShowNativeControls(bool show) async {
     await _methodChannel?.setShowNativeControls(show);
+  }
+
+  /// Sets native render mode to aspect-fill (true) or aspect-fit (false).
+  Future<void> setUseAspectFill(bool enabled) async {
+    await _methodChannel?.setUseAspectFill(enabled);
+  }
+
+  /// Returns native video dimensions if available.
+  Future<Map<String, int>?> getVideoDimensions() async {
+    return await _methodChannel?.getVideoDimensions();
   }
 
   /// Checks if AirPlay is available on the device

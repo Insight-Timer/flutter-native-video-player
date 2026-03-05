@@ -6,6 +6,7 @@ extension VideoPlayerView {
         item.addObserver(self, forKeyPath: "status", options: [.new, .old], context: nil)
         item.addObserver(self, forKeyPath: "playbackBufferEmpty", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "playbackLikelyToKeepUp", options: [.new], context: nil)
+        item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
 
         // Observe player's timeControlStatus to track play/pause state changes
         player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
@@ -76,6 +77,8 @@ extension VideoPlayerView {
                         }
                     }
                 }
+            case "presentationSize":
+                emitVideoDimensionsIfAvailable(from: item)
             default: break
             }
         }
@@ -267,6 +270,17 @@ extension VideoPlayerView {
         } else {
             sendEvent("error", data: ["message": "Unknown error"])
         }
+    }
+
+    private func emitVideoDimensionsIfAvailable(from item: AVPlayerItem) {
+        let size = item.presentationSize
+        let width = Int(size.width.rounded())
+        let height = Int(size.height.rounded())
+        if width <= 0 || height <= 0 { return }
+        if width == lastEmittedVideoWidth && height == lastEmittedVideoHeight { return }
+        lastEmittedVideoWidth = width
+        lastEmittedVideoHeight = height
+        sendEvent("videoDimensions", data: ["videoWidth": width, "videoHeight": height])
     }
 
     @objc func videoDidEnd() {

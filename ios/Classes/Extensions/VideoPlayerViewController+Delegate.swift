@@ -196,7 +196,7 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
     }
     
     // Handle when the user dismisses fullscreen by swiping down or tapping Done
-    @available(iOS 13.0, *)
+    @available(iOS 12.0, *)
     public func playerViewController(_ playerViewController: AVPlayerViewController, willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
         // Store the playback state before dismissing
         let wasPlaying = self.player?.rate != 0

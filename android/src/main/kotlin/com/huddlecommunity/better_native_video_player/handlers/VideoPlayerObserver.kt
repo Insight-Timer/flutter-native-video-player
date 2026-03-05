@@ -31,6 +31,8 @@ class VideoPlayerObserver(
 
     // Track Cast/external playback connection state
     private var wasExternalPlaybackActive = false
+    private var lastVideoWidth = 0
+    private var lastVideoHeight = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private val timeUpdateRunnable = object : Runnable {
@@ -72,14 +74,18 @@ class VideoPlayerObserver(
 
             // Check if currently buffering
             val isBuffering = player.playbackState == Player.STATE_BUFFERING
+            val videoWidth = player.videoSize.width
+            val videoHeight = player.videoSize.height
 
             if (duration > 0) {
-                eventHandler.sendEvent("timeUpdate", mapOf(
+                val payload = mutableMapOf<String, Any>(
                     "position" to position.toInt(),
                     "duration" to duration.toInt(),
                     "bufferedPosition" to bufferedPosition,
                     "isBuffering" to isBuffering
-                ))
+                )
+                addVideoDimensionsToPayload(payload, videoWidth, videoHeight)
+                eventHandler.sendEvent("timeUpdate", payload)
             }
 
             // Schedule next update
@@ -95,6 +101,13 @@ class VideoPlayerObserver(
     fun release() {
         // Stop periodic updates
         handler.removeCallbacks(timeUpdateRunnable)
+    }
+
+    private fun addVideoDimensionsToPayload(payload: MutableMap<String, Any>, width: Int, height: Int) {
+        if (width > 0 && height > 0) {
+            payload["videoWidth"] = width
+            payload["videoHeight"] = height
+        }
     }
 
     override fun onPlaybackStateChanged(playbackState: Int) {
@@ -206,6 +219,19 @@ class VideoPlayerObserver(
         eventHandler.sendEvent(
             "error",
             mapOf("message" to (error.message ?: "Unknown error"))
+        )
+    }
+
+    override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+        val width = videoSize.width
+        val height = videoSize.height
+        if (width <= 0 || height <= 0) return
+        if (width == lastVideoWidth && height == lastVideoHeight) return
+        lastVideoWidth = width
+        lastVideoHeight = height
+        eventHandler.sendEvent(
+            "videoDimensions",
+            mapOf("videoWidth" to width, "videoHeight" to height)
         )
     }
 

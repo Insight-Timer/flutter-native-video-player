@@ -202,6 +202,7 @@ extension VideoPlayerView {
     /// Only registers if this view should be the owner
     private func setupRemoteCommandCenter() {
         let commandCenter = MPRemoteCommandCenter.shared()
+        let showSkipControls = (currentMediaInfo?["showSkipControls"] as? Bool) ?? true
 
         // Check if we've already registered handlers for this view
         // If so, skip the registration to avoid clearing and re-adding targets
@@ -227,6 +228,7 @@ extension VideoPlayerView {
         hasRegisteredRemoteCommands = true
 
         // --- Play ---
+        commandCenter.playCommand.isEnabled = true
         commandCenter.playCommand.addTarget { [weak self] _ in
             guard let self = self else { return .commandFailed }
 
@@ -247,6 +249,7 @@ extension VideoPlayerView {
         }
 
         // --- Pause ---
+        commandCenter.pauseCommand.isEnabled = true
         commandCenter.pauseCommand.addTarget { [weak self] _ in
             guard let self = self else { return .commandFailed }
 
@@ -263,49 +266,53 @@ extension VideoPlayerView {
         }
 
         // --- Skip forward/backward ---
+        commandCenter.skipForwardCommand.isEnabled = showSkipControls
+        commandCenter.skipBackwardCommand.isEnabled = showSkipControls
         commandCenter.skipForwardCommand.preferredIntervals = [15]
         commandCenter.skipBackwardCommand.preferredIntervals = [15]
 
-        commandCenter.skipForwardCommand.addTarget { [weak self] event in
-            guard let self = self,
-                  let skipEvent = event as? MPSkipIntervalCommandEvent,
-                  let player = self.player
-            else {
-                return .commandFailed
+        if showSkipControls {
+            commandCenter.skipForwardCommand.addTarget { [weak self] event in
+                guard let self = self,
+                      let skipEvent = event as? MPSkipIntervalCommandEvent,
+                      let player = self.player
+                else {
+                    return .commandFailed
+                }
+
+                // Only handle if we still own the remote commands
+                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                    print("⚠️ View \(self.viewId) received skip forward command but is not owner")
+                    return .commandFailed
+                }
+
+                let currentTime = player.currentTime()
+                let newTime = CMTimeAdd(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
+                player.seek(to: newTime)
+                self.updateNowPlayingPlaybackTime()
+                return .success
             }
 
-            // Only handle if we still own the remote commands
-            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received skip forward command but is not owner")
-                return .commandFailed
+            commandCenter.skipBackwardCommand.addTarget { [weak self] event in
+                guard let self = self,
+                      let skipEvent = event as? MPSkipIntervalCommandEvent,
+                      let player = self.player
+                else {
+                    return .commandFailed
+                }
+
+                // Only handle if we still own the remote commands
+                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                    print("⚠️ View \(self.viewId) received skip backward command but is not owner")
+                    return .commandFailed
+                }
+
+                let currentTime = player.currentTime()
+                let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
+                player.seek(to: max(newTime, .zero))
+                self.updateNowPlayingPlaybackTime()
+                return .success
             }
-
-            let currentTime = player.currentTime()
-            let newTime = CMTimeAdd(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
-            player.seek(to: newTime)
-            self.updateNowPlayingPlaybackTime()
-            return .success
-        }
-
-        commandCenter.skipBackwardCommand.addTarget { [weak self] event in
-            guard let self = self,
-                  let skipEvent = event as? MPSkipIntervalCommandEvent,
-                  let player = self.player
-            else {
-                return .commandFailed
-            }
-
-            // Only handle if we still own the remote commands
-            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received skip backward command but is not owner")
-                return .commandFailed
-            }
-
-            let currentTime = player.currentTime()
-            let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
-            player.seek(to: max(newTime, .zero))
-            self.updateNowPlayingPlaybackTime()
-            return .success
         }
 
         print("🎛️ View \(viewId) registered remote command handlers")
