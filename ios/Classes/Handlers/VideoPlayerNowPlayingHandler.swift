@@ -54,6 +54,7 @@ class RemoteCommandManager {
         commandCenter.pauseCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
         print("🎛️ Removed all remote command targets")
     }
 
@@ -68,6 +69,7 @@ class RemoteCommandManager {
         commandCenter.pauseCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
+        commandCenter.changePlaybackPositionCommand.removeTarget(nil)
         print("🎛️ Atomically transferred ownership to view \(viewId) and cleared targets")
     }
 }
@@ -268,6 +270,7 @@ extension VideoPlayerView {
         // --- Skip forward/backward ---
         commandCenter.skipForwardCommand.isEnabled = showSkipControls
         commandCenter.skipBackwardCommand.isEnabled = showSkipControls
+        commandCenter.changePlaybackPositionCommand.isEnabled = showSkipControls
         commandCenter.skipForwardCommand.preferredIntervals = [15]
         commandCenter.skipBackwardCommand.preferredIntervals = [15]
 
@@ -310,6 +313,33 @@ extension VideoPlayerView {
                 let currentTime = player.currentTime()
                 let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
                 player.seek(to: max(newTime, .zero))
+                self.updateNowPlayingPlaybackTime()
+                return .success
+            }
+
+            commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+                guard let self = self,
+                      let seekEvent = event as? MPChangePlaybackPositionCommandEvent,
+                      let player = self.player
+                else {
+                    return .commandFailed
+                }
+
+                // Only handle if we still own the remote commands
+                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                    print("⚠️ View \(self.viewId) received change position command but is not owner")
+                    return .commandFailed
+                }
+
+                let durationSeconds = CMTimeGetSeconds(player.currentItem?.duration ?? .zero)
+                let boundedPosition = max(0, seekEvent.positionTime)
+
+                if durationSeconds.isFinite {
+                    player.seek(to: CMTime(seconds: min(boundedPosition, durationSeconds), preferredTimescale: 600))
+                } else {
+                    player.seek(to: CMTime(seconds: boundedPosition, preferredTimescale: 600))
+                }
+
                 self.updateNowPlayingPlaybackTime()
                 return .success
             }

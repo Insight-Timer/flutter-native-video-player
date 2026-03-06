@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.media3.common.C
@@ -229,6 +230,10 @@ class VideoPlayerMethodHandler(
             (mediaInfo["title"] as? String)?.let { metadataBuilder.setTitle(it) }
             (mediaInfo["subtitle"] as? String)?.let { metadataBuilder.setArtist(it) }
             (mediaInfo["album"] as? String)?.let { metadataBuilder.setAlbumTitle(it) }
+            (mediaInfo["artworkUrl"] as? String)?.let { artworkUrl ->
+                runCatching { Uri.parse(artworkUrl) }
+                    .onSuccess { metadataBuilder.setArtworkUri(it) }
+            }
             mediaItemBuilder.setMediaMetadata(metadataBuilder.build())
         }
 

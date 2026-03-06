@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -53,6 +54,30 @@ class VideoPlayerNotificationHandler(
     // Store current metadata separately to avoid reading stale data from player
     private var currentTitle: String = "Video"
     private var currentSubtitle: String = ""
+    private var showSkipControls: Boolean = true
+
+    private val mediaSessionCallback = object : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            val connectionResult = super.onConnect(session, controller)
+            if (showSkipControls) {
+                return connectionResult
+            }
+
+            val filteredPlayerCommands = connectionResult.availablePlayerCommands.buildUpon()
+                .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                .remove(Player.COMMAND_SEEK_BACK)
+                .remove(Player.COMMAND_SEEK_FORWARD)
+                .build()
+
+            return MediaSession.ConnectionResult.accept(
+                connectionResult.availableSessionCommands,
+                filteredPlayerCommands
+            )
+        }
+    }
 
     init {
         createNotificationChannel()
@@ -117,6 +142,10 @@ class VideoPlayerNotificationHandler(
         (mediaInfo["title"] as? String)?.let { metadataBuilder.setTitle(it) }
         (mediaInfo["subtitle"] as? String)?.let { metadataBuilder.setArtist(it) }
         (mediaInfo["album"] as? String)?.let { metadataBuilder.setAlbumTitle(it) }
+        (mediaInfo["artworkUrl"] as? String)?.let { artworkUrl ->
+            runCatching { Uri.parse(artworkUrl) }
+                .onSuccess { metadataBuilder.setArtworkUri(it) }
+        }
 
         // Create updated MediaItem with new metadata
         val updatedItem = currentItem.buildUpon()
@@ -142,14 +171,27 @@ class VideoPlayerNotificationHandler(
         // Extract metadata from the provided info
         val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
         val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
+        val newShowSkipControls = (mediaInfo?.get("showSkipControls") as? Boolean) ?: true
 
         // Check if media info has actually changed to avoid unnecessary updates
         val mediaInfoChanged = (newTitle != currentTitle || newSubtitle != currentSubtitle)
+        val seekPermissionChanged = newShowSkipControls != showSkipControls
 
         // Store the new metadata
         currentTitle = newTitle
         currentSubtitle = newSubtitle
+        showSkipControls = newShowSkipControls
         Log.d(TAG, "📱 Media info - title: $currentTitle, subtitle: $currentSubtitle, changed: $mediaInfoChanged")
+        Log.d(TAG, "📱 showSkipControls: $showSkipControls, seekPermissionChanged: $seekPermissionChanged")
+
+        // Recreate MediaSession when seek permissions change so connected system controllers
+        // receive the new command set (seek/scrub disabled for non-premium).
+        if (seekPermissionChanged && mediaSession != null) {
+            mediaSession?.release()
+            mediaSession = null
+            player.removeListener(playerListener)
+            Log.d(TAG, "📱 Recreating MediaSession due to seek permission change")
+        }
 
         // If MediaSession already exists, only update if media info changed
         if (mediaSession != null) {
@@ -197,9 +239,11 @@ class VideoPlayerNotificationHandler(
         mediaSession = MediaSession.Builder(context, player)
             .setId(sessionId)
             .setSessionActivity(pendingIntent)
+            .setCallback(mediaSessionCallback)
             .build()
 
         // Add listener to track play/pause events
+        player.removeListener(playerListener)
         player.addListener(playerListener)
 
         Log.d(TAG, "MediaSession created - lock screen and notification controls active")
