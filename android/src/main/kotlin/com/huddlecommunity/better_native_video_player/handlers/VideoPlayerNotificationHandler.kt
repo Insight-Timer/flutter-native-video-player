@@ -70,6 +70,12 @@ class VideoPlayerNotificationHandler(
                 .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                 .remove(Player.COMMAND_SEEK_BACK)
                 .remove(Player.COMMAND_SEEK_FORWARD)
+                .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
+                .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
+                .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                .remove(Player.COMMAND_SEEK_TO_NEXT)
+                .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                 .build()
 
             return MediaSession.ConnectionResult.accept(
