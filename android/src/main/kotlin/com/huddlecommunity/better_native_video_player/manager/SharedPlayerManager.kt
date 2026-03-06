@@ -16,6 +16,7 @@ import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventH
  */
 object SharedPlayerManager {
     private const val TAG = "SharedPlayerManager"
+    private const val SEEK_INCREMENT_MS = 15_000L
 
     private val players = mutableMapOf<Int, ExoPlayer>()
     private val notificationHandlers = mutableMapOf<Int, VideoPlayerNotificationHandler>()
@@ -37,6 +38,8 @@ object SharedPlayerManager {
         val player = players.getOrPut(controllerId) {
             ExoPlayer.Builder(context)
                 .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
         return Pair(player, alreadyExisted)

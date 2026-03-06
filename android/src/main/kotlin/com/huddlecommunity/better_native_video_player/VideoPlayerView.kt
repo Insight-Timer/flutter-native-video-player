@@ -44,6 +44,7 @@ class VideoPlayerView(
 
     companion object {
         private const val TAG = "VideoPlayerView"
+        private const val SEEK_INCREMENT_MS = 15_000L
     }
 
     private val playerView: PlayerView
@@ -133,6 +134,8 @@ class VideoPlayerView(
             isSharedPlayer = false
             ExoPlayer.Builder(context)
                 .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
 
