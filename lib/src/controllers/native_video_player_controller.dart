@@ -48,6 +48,7 @@ class NativeVideoPlayerController {
     this.mediaInfo,
     this.allowsPictureInPicture = true,
     this.canStartPictureInPictureAutomatically = true,
+    this.allowsVideoFrameAnalysis = true,
     this.lockToLandscape = true,
     this.enableHDR = true,
     this.enableLooping = false,
@@ -130,6 +131,12 @@ class NativeVideoPlayerController {
 
   /// Whether PiP can start automatically when app goes to background (iOS 14.2+)
   final bool canStartPictureInPictureAutomatically;
+
+  /// Whether iOS video frame analysis features such as Live Text are allowed.
+  ///
+  /// On iOS 16+, `AVPlayerViewController` can show a system analysis button over
+  /// video content when this is enabled.
+  final bool allowsVideoFrameAnalysis;
 
   /// Whether to enable HDR playback (default: false)
   /// When set to false, HDR is disabled to prevent washed-out/too-white video appearance
@@ -812,6 +819,7 @@ class NativeVideoPlayerController {
     'allowsPictureInPicture': allowsPictureInPicture,
     'canStartPictureInPictureAutomatically':
         canStartPictureInPictureAutomatically,
+    'allowsVideoFrameAnalysis': allowsVideoFrameAnalysis,
     'showNativeControls': _hasCustomOverlay
         ? false
         : showNativeControls, // Hide native controls if we have custom overlay, otherwise use parameter

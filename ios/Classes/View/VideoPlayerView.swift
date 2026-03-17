@@ -191,6 +191,7 @@ import QuartzCore
             // PiP configuration from args
             let argsAllowsPiP = args["allowsPictureInPicture"] as? Bool ?? true
             let argsCanStartAutomatically = args["canStartPictureInPictureAutomatically"] as? Bool ?? true
+            let argsAllowsVideoFrameAnalysis = args["allowsVideoFrameAnalysis"] as? Bool ?? true
             let argsShowNativeControls = args["showNativeControls"] as? Bool ?? true
 
             // HDR configuration from args
@@ -234,6 +235,10 @@ import QuartzCore
                 print("✅ PiP configured, automatic PiP will be enabled on play if allowed")
             } else {
                 print("⚠️ Automatic PiP requires iOS 14.2+, current device doesn't support it")
+            }
+
+            if #available(iOS 16.0, *) {
+                playerViewController.allowsVideoFrameAnalysis = argsAllowsVideoFrameAnalysis
             }
 
             // Store media info if provided during initialization
