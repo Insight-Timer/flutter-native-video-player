@@ -709,6 +709,8 @@ extension VideoPlayerView {
 
     func handleDispose(result: @escaping FlutterResult) {
         print("🗑️ [VideoPlayerMethodHandler] handleDispose called for controllerId: \(String(describing: controllerId))")
+        isDisposed = true
+        invalidateEventChannel()
 
         // Pause the player first
         player?.pause()
@@ -734,7 +736,6 @@ extension VideoPlayerView {
         player = nil
         print("🧹 [VideoPlayerMethodHandler] Local player reference cleared")
 
-        sendEvent("stopped")
         result(nil)
     }
 

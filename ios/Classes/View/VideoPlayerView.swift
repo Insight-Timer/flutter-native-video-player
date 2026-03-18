@@ -13,6 +13,8 @@ import QuartzCore
     private var methodChannel: FlutterMethodChannel
     private var channelName: String
     var eventSink: FlutterEventSink?
+    var isEventChannelActive: Bool = false
+    var isDisposed: Bool = false
     var availableQualities: [[String: Any]] = []
     var qualityLevels: [VideoPlayer.QualityLevel] = []
     var isAutoQuality = false
@@ -447,16 +449,39 @@ import QuartzCore
         }
     }
 
+    func invalidateEventChannel() {
+        isEventChannelActive = false
+        eventSink = nil
+    }
+
     public func sendEvent(_ name: String, data: [String: Any]? = nil) {
+        guard isEventChannelActive, !isDisposed else {
+            return
+        }
+
         var event: [String: Any] = ["event": name]
         if let data = data {
             event.merge(data) { (_, new) in
                 new
             }
         }
-        DispatchQueue.main.async {
-            self.eventSink?(event)
+
+        let emitEvent = { [weak self] in
+            guard let self = self,
+                  self.isEventChannelActive,
+                  !self.isDisposed,
+                  let eventSink = self.eventSink else {
+                return
+            }
+            eventSink(event)
         }
+
+        if Thread.isMainThread {
+            emitEvent()
+            return
+        }
+
+        DispatchQueue.main.async(execute: emitEvent)
     }
 
     private func handleSetUseAspectFill(call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -653,6 +678,8 @@ import QuartzCore
     // MARK: - FlutterStreamHandler
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         print("[\(channelName)] Event channel listener attached")
+        isDisposed = false
+        isEventChannelActive = true
         self.eventSink = events
 
         // Send initial state event when listener is attached
@@ -764,38 +791,17 @@ import QuartzCore
 
     public func onCancel(withArguments arguments: Any?) -> FlutterError? {
         print("[\(channelName)] Event channel listener detached")
-        self.eventSink = nil
+        invalidateEventChannel()
         return nil
     }
 
     deinit {
         print("VideoPlayerView deinit for channel: \(channelName), viewId: \(viewId)")
+        isDisposed = true
+        invalidateEventChannel()
 
         // Use the isPipCurrentlyActive flag to check if PiP is active
         let isPipActiveNow = isPipCurrentlyActive
-
-        // ALWAYS emit PiP state on disposal to ensure Flutter side is synchronized
-        // This is important for state management even if PiP is not active
-        if isPipActiveNow {
-            print("⚠️ View being disposed while PiP is active - sending pipStop event")
-        } else {
-            print("ℹ️ View being disposed while PiP is inactive - sending pipStop event for state sync")
-        }
-
-        // Always send pipStop event - either from this view or an alternative
-        if eventSink != nil {
-            // This view still has a listener, send from here
-            sendEvent("pipStop", data: ["isPictureInPicture": false])
-            print("✅ Sent pipStop event from disposing view \(viewId)")
-        } else if let controllerIdValue = controllerId,
-                  let alternativeView = SharedPlayerManager.shared.findAnotherViewForController(controllerIdValue, excluding: viewId),
-                  alternativeView.eventSink != nil {
-            // Send from alternative view if it exists and has a listener
-            alternativeView.sendEvent("pipStop", data: ["isPictureInPicture": false])
-            print("✅ Sent pipStop event from alternative view \(alternativeView.viewId)")
-        } else {
-            print("⚠️ No active view with listener found - pipStop event cannot be sent")
-        }
 
         // Try to stop PiP gracefully if it was active
         if isPipActiveNow {
