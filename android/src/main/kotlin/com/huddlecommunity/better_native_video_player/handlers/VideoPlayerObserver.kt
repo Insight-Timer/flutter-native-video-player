@@ -7,6 +7,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.C
+import androidx.media3.common.Tracks
 
 /**
  * Observes ExoPlayer state changes and reports them via EventHandler
@@ -110,8 +111,43 @@ class VideoPlayerObserver(
         }
     }
 
+    private fun maybeEmitVideoDimensions(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        if (width == lastVideoWidth && height == lastVideoHeight) return
+        lastVideoWidth = width
+        lastVideoHeight = height
+        eventHandler.sendEvent(
+            "videoDimensions",
+            mapOf("videoWidth" to width, "videoHeight" to height)
+        )
+    }
+
+    private fun resolveCurrentVideoDimensions(): Pair<Int, Int>? {
+        val currentVideoSize = player.videoSize
+        if (currentVideoSize.width > 0 && currentVideoSize.height > 0) {
+            return currentVideoSize.width to currentVideoSize.height
+        }
+
+        val currentTracks = player.currentTracks
+        for (group in currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (index in 0 until group.length) {
+                if (!group.isTrackSelected(index)) continue
+                val format = group.getTrackFormat(index)
+                if (format.width > 0 && format.height > 0) {
+                    return format.width to format.height
+                }
+            }
+        }
+
+        return null
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
         Log.d(TAG, "Playback state changed: $playbackState, isLoading: ${player.isLoading}")
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
         when (playbackState) {
             Player.STATE_IDLE -> {
                 // Player is idle
@@ -223,16 +259,19 @@ class VideoPlayerObserver(
     }
 
     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-        val width = videoSize.width
-        val height = videoSize.height
-        if (width <= 0 || height <= 0) return
-        if (width == lastVideoWidth && height == lastVideoHeight) return
-        lastVideoWidth = width
-        lastVideoHeight = height
-        eventHandler.sendEvent(
-            "videoDimensions",
-            mapOf("videoWidth" to width, "videoHeight" to height)
-        )
+        maybeEmitVideoDimensions(videoSize.width, videoSize.height)
+    }
+
+    override fun onTracksChanged(tracks: Tracks) {
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
+    }
+
+    override fun onRenderedFirstFrame() {
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
     }
 
     override fun onDeviceInfoChanged(deviceInfo: androidx.media3.common.DeviceInfo) {

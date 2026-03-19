@@ -15,6 +15,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -303,6 +304,15 @@ class VideoPlayerView(
         // This applies to both new and shared players
         eventHandler.setInitialStateCallback {
             Log.d(TAG, "Sending initial state - isPlaying: ${player.isPlaying}, playbackState: ${player.playbackState}, duration: ${player.duration}")
+
+            resolveCurrentVideoDimensions()?.let { (initialVideoWidth, initialVideoHeight) ->
+                Log.d(TAG, "Sending initial videoDimensions event: ${initialVideoWidth}x${initialVideoHeight}")
+                eventHandler.sendEvent(
+                    "videoDimensions",
+                    mapOf("videoWidth" to initialVideoWidth, "videoHeight" to initialVideoHeight),
+                    synchronous = true
+                )
+            }
 
             // For shared players or players with media already loaded, send loaded event first
             if (player.playbackState != ExoPlayer.STATE_IDLE && player.duration >= 0) {
@@ -657,6 +667,27 @@ class VideoPlayerView(
     // PiP is now handled by the floating package on the Dart side
     // All PiP-related methods have been removed
 
+    private fun resolveCurrentVideoDimensions(): Pair<Int, Int>? {
+        val currentVideoSize = player.videoSize
+        if (currentVideoSize.width > 0 && currentVideoSize.height > 0) {
+            return currentVideoSize.width to currentVideoSize.height
+        }
+
+        val currentTracks = player.currentTracks
+        for (group in currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (index in 0 until group.length) {
+                if (!group.isTrackSelected(index)) continue
+                val format = group.getTrackFormat(index)
+                if (format.width > 0 && format.height > 0) {
+                    return format.width to format.height
+                }
+            }
+        }
+
+        return null
+    }
+
     /**
      * Emits all current player states to ensure UI is in sync
      * This is useful after events like exiting PiP where the UI needs to refresh
@@ -667,12 +698,20 @@ class VideoPlayerView(
         // Emit current time and duration
         val currentPosition = player.currentPosition
         val duration = player.duration
+        val currentVideoDimensions = resolveCurrentVideoDimensions()
+        val videoWidth = currentVideoDimensions?.first ?: 0
+        val videoHeight = currentVideoDimensions?.second ?: 0
+
+        if (videoWidth > 0 && videoHeight > 0) {
+            eventHandler.sendEvent(
+                "videoDimensions",
+                mapOf("videoWidth" to videoWidth, "videoHeight" to videoHeight)
+            )
+        }
 
         if (duration > 0) {
             // Get buffered position
             val bufferedPosition = player.bufferedPosition
-            val videoWidth = player.videoSize.width
-            val videoHeight = player.videoSize.height
 
             val payload = mutableMapOf<String, Any>(
                 "position" to currentPosition.toInt(),
