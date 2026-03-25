@@ -65,9 +65,6 @@ class NativeVideoPlayerController {
     if (!kIsWeb && Platform.isAndroid) {
       WidgetsBinding.instance.addObserver(_AppLifecycleObserver(this));
     }
-
-    // Set up controller-level event channel for persistent events (PiP, AirPlay)
-    _setupControllerEventChannel();
   }
 
   /// Initialize the controller and wait for the platform view to be created
@@ -899,6 +896,8 @@ class NativeVideoPlayerController {
 
     _emitCurrentState();
 
+    unawaited(_setupControllerEventChannelWithRetry());
+
     // ALWAYS notify all event handler listeners about the current state
     // This ensures listeners added via add*Listener methods receive the current state
 
@@ -1038,19 +1037,55 @@ class NativeVideoPlayerController {
   /// This channel receives PiP and AirPlay events independently of platform views.
   /// It persists even when all platform views are disposed, allowing events to
   /// flow after calling releaseResources(). Only disposed when controller.dispose() is called.
-  void _setupControllerEventChannel() {
-    _controllerEventChannel = EventChannel(
+  Future<void> _setupControllerEventChannelWithRetry() async {
+    if (kIsWeb || !Platform.isIOS || _isDisposed) {
+      return;
+    }
+
+    if (_controllerEventSubscription != null) {
+      return;
+    }
+
+    _controllerEventChannel ??= EventChannel(
       'native_video_player_controller_$id',
     );
-    _controllerEventSubscription = _controllerEventChannel!
-        .receiveBroadcastStream()
-        .listen(
-          _handleControllerEvent,
-          onError: (dynamic error) {
-            debugPrint('Controller event channel error: $error');
-          },
-          cancelOnError: false,
-        );
+
+    const List<int> delays = <int>[0, 50, 100, 200, 400];
+
+    for (final delay in delays) {
+      if (_isDisposed || _controllerEventSubscription != null) {
+        return;
+      }
+
+      if (delay > 0) {
+        await Future<void>.delayed(Duration(milliseconds: delay));
+      }
+
+      try {
+        _controllerEventSubscription = _controllerEventChannel!
+            .receiveBroadcastStream()
+            .listen(
+              _handleControllerEvent,
+              onError: (dynamic error) {
+                if (kDebugMode &&
+                    !_isIgnorableControllerChannelSetupError(error)) {
+                  debugPrint('Controller event channel error: $error');
+                }
+              },
+              cancelOnError: false,
+            );
+        return;
+      } catch (e) {
+        if (_isIgnorableControllerChannelSetupError(e)) {
+          continue;
+        }
+
+        if (kDebugMode) {
+          debugPrint('Controller event channel setup error: $e');
+        }
+        return;
+      }
+    }
   }
 
   /// Handles events from the controller-level event channel
@@ -1572,15 +1607,43 @@ class NativeVideoPlayerController {
     }
     try {
       await subscription.cancel();
-    } on MissingPluginException {
-      // Native side has already disposed the EventChannel StreamHandler
-      // This is harmless and safe to ignore
     } catch (e) {
+      if (_isIgnorableStreamCancellationError(e)) {
+        return;
+      }
+
       // Log other exceptions in debug mode for debugging purposes
       if (kDebugMode) {
         debugPrint('Error cancelling subscription: $e');
       }
     }
+  }
+
+  bool _isIgnorableStreamCancellationError(Object error) {
+    if (error is MissingPluginException) {
+      return true;
+    }
+
+    if (error is! PlatformException) {
+      return false;
+    }
+
+    return error.code == 'error' &&
+        (error.message?.contains('No active stream to cancel') ?? false);
+  }
+
+  bool _isIgnorableControllerChannelSetupError(Object error) {
+    if (error is MissingPluginException) {
+      return true;
+    }
+
+    if (error is! PlatformException) {
+      return false;
+    }
+
+    return error.code == 'channel-error' &&
+        (error.message?.contains('Unable to establish connection on channel') ??
+            false);
   }
 
   /// Called when a platform view is disposed
