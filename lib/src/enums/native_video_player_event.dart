@@ -19,6 +19,8 @@ enum PlayerControlState {
   qualityChanged,
   speedChanged,
   seeked,
+  previousTrackRequested,
+  nextTrackRequested,
   pipStarted,
   pipStopped,
   pipAvailabilityChanged,
@@ -104,6 +106,10 @@ class PlayerControlEvent {
         return PlayerControlState.speedChanged;
       case 'seek':
         return PlayerControlState.seeked;
+      case 'previousTrack':
+        return PlayerControlState.previousTrackRequested;
+      case 'nextTrack':
+        return PlayerControlState.nextTrackRequested;
       case 'pipStart':
         return PlayerControlState.pipStarted;
       case 'pipStop':

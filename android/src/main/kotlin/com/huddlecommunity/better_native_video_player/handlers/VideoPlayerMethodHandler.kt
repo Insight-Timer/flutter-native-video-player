@@ -174,6 +174,10 @@ class VideoPlayerMethodHandler(
         val mediaInfo = args["mediaInfo"] as? Map<String, Any>
         val drmConfig = args["drmConfig"] as? Map<*, *>
 
+        // Update track nav flags early so getAvailableCommands() reflects them when
+        // setMediaSource() triggers onAvailableCommandsChanged below.
+        notificationHandler.updateTrackNavFlags(mediaInfo)
+
         // Store media info in the VideoPlayerView
         updateMediaInfo?.invoke(mediaInfo)
         mediaInfo?.let {

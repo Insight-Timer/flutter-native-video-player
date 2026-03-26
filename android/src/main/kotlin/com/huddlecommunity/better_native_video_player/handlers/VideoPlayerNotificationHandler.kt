@@ -16,11 +16,12 @@ import android.util.Log
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
-import androidx.media3.session.SessionToken
+import androidx.media3.session.MediaSession.ConnectionResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -55,33 +56,116 @@ class VideoPlayerNotificationHandler(
     private var currentTitle: String = "Video"
     private var currentSubtitle: String = ""
     private var showSkipControls: Boolean = true
+    private var showSystemPreviousTrackControl: Boolean = false
+    private var showSystemNextTrackControl: Boolean = false
+
+    /**
+     * Wraps the ExoPlayer so that seekBack/seekForward can be intercepted when track-navigation
+     * buttons are active. The system notification always calls seekBack()/seekForward() on the
+     * player regardless of custom session commands, so interception must happen here.
+     */
+    private val wrappedPlayer = object : ForwardingPlayer(player) {
+        /**
+         * Dynamically include/exclude the seek-to-previous and seek-to-next player commands based
+         * on the track navigation flags. ExoPlayer never adds these commands for a single-item
+         * playlist, so the system notification would never show ⏮/⏭ without this override.
+         * The MediaSession calls getAvailableCommands() when pushing updates to controllers, so
+         * updating the flags before setMediaSource() fires onAvailableCommandsChanged is enough
+         * to make the buttons appear/disappear without recreating the session.
+         */
+        override fun getAvailableCommands(): Player.Commands {
+            val builder = super.getAvailableCommands().buildUpon()
+            if (showSystemPreviousTrackControl) {
+                builder.add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                builder.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+            } else {
+                builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+            }
+            if (showSystemNextTrackControl) {
+                builder.add(Player.COMMAND_SEEK_TO_NEXT)
+                builder.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+            } else {
+                builder.remove(Player.COMMAND_SEEK_TO_NEXT)
+                builder.remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+            }
+            return builder.build()
+        }
+
+        override fun seekBack() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                super.seekBack()
+            }
+        }
+
+        override fun seekForward() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                super.seekForward()
+            }
+        }
+
+        // The system notification uses COMMAND_SEEK_TO_PREVIOUS / COMMAND_SEEK_TO_NEXT
+        // (not COMMAND_SEEK_BACK / COMMAND_SEEK_FORWARD) for the ⏮ / ⏭ buttons.
+        // On a single-item ExoPlayer playlist these would seek to position 0 / end of track,
+        // so we must intercept them here as well.
+        override fun seekToPrevious() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                super.seekToPrevious()
+            }
+        }
+
+        override fun seekToPreviousMediaItem() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                super.seekToPreviousMediaItem()
+            }
+        }
+
+        override fun seekToNext() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                super.seekToNext()
+            }
+        }
+
+        override fun seekToNextMediaItem() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                super.seekToNextMediaItem()
+            }
+        }
+    }
 
     private val mediaSessionCallback = object : MediaSession.Callback {
         override fun onConnect(
             session: MediaSession,
-            controller: MediaSession.ControllerInfo
-        ): MediaSession.ConnectionResult {
-            val connectionResult = super.onConnect(session, controller)
-            if (showSkipControls) {
-                return connectionResult
+            controller: MediaSession.ControllerInfo,
+        ): ConnectionResult {
+            val base = super.onConnect(session, controller)
+            if (!showSkipControls) {
+                val playerCommands = base.availablePlayerCommands.buildUpon()
+                    .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                    .remove(Player.COMMAND_SEEK_BACK)
+                    .remove(Player.COMMAND_SEEK_FORWARD)
+                    .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
+                    .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
+                    .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                    .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+                    .remove(Player.COMMAND_SEEK_TO_NEXT)
+                    .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+                    .build()
+                return ConnectionResult.accept(base.availableSessionCommands, playerCommands)
             }
-
-            val filteredPlayerCommands = connectionResult.availablePlayerCommands.buildUpon()
-                .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
-                .remove(Player.COMMAND_SEEK_BACK)
-                .remove(Player.COMMAND_SEEK_FORWARD)
-                .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
-                .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
-                .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
-                .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                .remove(Player.COMMAND_SEEK_TO_NEXT)
-                .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
-                .build()
-
-            return MediaSession.ConnectionResult.accept(
-                connectionResult.availableSessionCommands,
-                filteredPlayerCommands
-            )
+            return base
         }
     }
 
@@ -124,6 +208,19 @@ class VideoPlayerNotificationHandler(
             notificationManager.createNotificationChannel(channel)
             Log.d(TAG, "Notification channel created")
         }
+    }
+
+    /**
+     * Updates track navigation flags early (called from handleLoad before setMediaSource).
+     * This ensures getAvailableCommands() returns the correct result when ExoPlayer fires
+     * onAvailableCommandsChanged during media source preparation, so the system notification
+     * shows ⏮/⏭ without requiring a session recreation.
+     */
+    fun updateTrackNavFlags(mediaInfo: Map<String, Any>?) {
+        val newShowPrev = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
+        val newShowNext = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
+        showSystemPreviousTrackControl = newShowPrev
+        showSystemNextTrackControl = newShowNext
     }
 
     /**
@@ -178,20 +275,25 @@ class VideoPlayerNotificationHandler(
         val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
         val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
         val newShowSkipControls = (mediaInfo?.get("showSkipControls") as? Boolean) ?: true
+        val newShowSystemPreviousTrackControl = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
+        val newShowSystemNextTrackControl = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
 
         // Check if media info has actually changed to avoid unnecessary updates
         val mediaInfoChanged = (newTitle != currentTitle || newSubtitle != currentSubtitle)
         val seekPermissionChanged = newShowSkipControls != showSkipControls
 
-        // Store the new metadata
+        // Store the new metadata (wrappedPlayer reads these fields live, so no session restart needed)
         currentTitle = newTitle
         currentSubtitle = newSubtitle
         showSkipControls = newShowSkipControls
+        showSystemPreviousTrackControl = newShowSystemPreviousTrackControl
+        showSystemNextTrackControl = newShowSystemNextTrackControl
         Log.d(TAG, "📱 Media info - title: $currentTitle, subtitle: $currentSubtitle, changed: $mediaInfoChanged")
         Log.d(TAG, "📱 showSkipControls: $showSkipControls, seekPermissionChanged: $seekPermissionChanged")
+        Log.d(TAG, "📱 showPrevTrack: $showSystemPreviousTrackControl, showNextTrack: $showSystemNextTrackControl")
 
         // Recreate MediaSession when seek permissions change so connected system controllers
-        // receive the new command set (seek/scrub disabled for non-premium).
+        // receive the new command set via onConnect.
         if (seekPermissionChanged && mediaSession != null) {
             mediaSession?.release()
             mediaSession = null
@@ -242,7 +344,7 @@ class VideoPlayerNotificationHandler(
 
         // Create MediaSession with unique session ID and activity (opens app when notification is tapped)
         val sessionId = "huddle_video_player_${++sessionCounter}"
-        mediaSession = MediaSession.Builder(context, player)
+        mediaSession = MediaSession.Builder(context, wrappedPlayer)
             .setId(sessionId)
             .setSessionActivity(pendingIntent)
             .setCallback(mediaSessionCallback)

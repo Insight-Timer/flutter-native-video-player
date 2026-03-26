@@ -52,6 +52,8 @@ class RemoteCommandManager {
         let commandCenter = MPRemoteCommandCenter.shared()
         commandCenter.playCommand.removeTarget(nil)
         commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.previousTrackCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
@@ -67,6 +69,8 @@ class RemoteCommandManager {
         let commandCenter = MPRemoteCommandCenter.shared()
         commandCenter.playCommand.removeTarget(nil)
         commandCenter.pauseCommand.removeTarget(nil)
+        commandCenter.previousTrackCommand.removeTarget(nil)
+        commandCenter.nextTrackCommand.removeTarget(nil)
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
@@ -205,6 +209,9 @@ extension VideoPlayerView {
     private func setupRemoteCommandCenter() {
         let commandCenter = MPRemoteCommandCenter.shared()
         let showSkipControls = (currentMediaInfo?["showSkipControls"] as? Bool) ?? true
+        let showSystemNextTrackControl = (currentMediaInfo?["showSystemNextTrackControl"] as? Bool) ?? false
+        let showSystemPreviousTrackControl = (currentMediaInfo?["showSystemPreviousTrackControl"] as? Bool) ?? false
+        let shouldShowTrackNavigation = showSystemNextTrackControl || showSystemPreviousTrackControl
 
         // Check if we've already registered handlers for this view
         // If so, skip the registration to avoid clearing and re-adding targets
@@ -267,82 +274,105 @@ extension VideoPlayerView {
             return .success
         }
 
-        // --- Skip forward/backward ---
-        commandCenter.skipForwardCommand.isEnabled = showSkipControls
-        commandCenter.skipBackwardCommand.isEnabled = showSkipControls
+        // --- Track navigation and seek controls ---
+        // When track navigation is active, a disabled direction falls back to the corresponding seek button
+        commandCenter.previousTrackCommand.isEnabled = shouldShowTrackNavigation && showSystemPreviousTrackControl
+        commandCenter.nextTrackCommand.isEnabled = shouldShowTrackNavigation && showSystemNextTrackControl
+        commandCenter.skipBackwardCommand.isEnabled = shouldShowTrackNavigation ? (!showSystemPreviousTrackControl && showSkipControls) : showSkipControls
+        commandCenter.skipForwardCommand.isEnabled = shouldShowTrackNavigation ? (!showSystemNextTrackControl && showSkipControls) : showSkipControls
         commandCenter.changePlaybackPositionCommand.isEnabled = showSkipControls
         commandCenter.skipForwardCommand.preferredIntervals = [15]
         commandCenter.skipBackwardCommand.preferredIntervals = [15]
 
-        if showSkipControls {
-            commandCenter.skipForwardCommand.addTarget { [weak self] event in
-                guard let self = self,
-                      let skipEvent = event as? MPSkipIntervalCommandEvent,
-                      let player = self.player
-                else {
-                    return .commandFailed
-                }
+        // Always register all handlers so they're available when controls are toggled via isEnabled
+        commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
 
-                // Only handle if we still own the remote commands
-                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                    print("⚠️ View \(self.viewId) received skip forward command but is not owner")
-                    return .commandFailed
-                }
-
-                let currentTime = player.currentTime()
-                let newTime = CMTimeAdd(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
-                player.seek(to: newTime)
-                self.updateNowPlayingPlaybackTime()
-                return .success
+            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                print("⚠️ View \(self.viewId) received previous track command but is not owner")
+                return .commandFailed
             }
 
-            commandCenter.skipBackwardCommand.addTarget { [weak self] event in
-                guard let self = self,
-                      let skipEvent = event as? MPSkipIntervalCommandEvent,
-                      let player = self.player
-                else {
-                    return .commandFailed
-                }
+            self.sendEvent("previousTrack")
+            return .success
+        }
 
-                // Only handle if we still own the remote commands
-                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                    print("⚠️ View \(self.viewId) received skip backward command but is not owner")
-                    return .commandFailed
-                }
+        commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            guard let self = self else { return .commandFailed }
 
-                let currentTime = player.currentTime()
-                let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
-                player.seek(to: max(newTime, .zero))
-                self.updateNowPlayingPlaybackTime()
-                return .success
+            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                print("⚠️ View \(self.viewId) received next track command but is not owner")
+                return .commandFailed
             }
 
-            commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
-                guard let self = self,
-                      let seekEvent = event as? MPChangePlaybackPositionCommandEvent,
-                      let player = self.player
-                else {
-                    return .commandFailed
-                }
+            self.sendEvent("nextTrack")
+            return .success
+        }
 
-                // Only handle if we still own the remote commands
-                guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                    print("⚠️ View \(self.viewId) received change position command but is not owner")
-                    return .commandFailed
-                }
-
-                let durationSeconds = CMTimeGetSeconds(player.currentItem?.duration ?? .zero)
-                let boundedPosition = max(0, seekEvent.positionTime)
-
-                if durationSeconds.isFinite {
-                    player.seek(to: CMTime(seconds: min(boundedPosition, durationSeconds), preferredTimescale: 600))
-                } else {
-                    player.seek(to: CMTime(seconds: boundedPosition, preferredTimescale: 600))
-                }
-
-                self.updateNowPlayingPlaybackTime()
-                return .success
+        commandCenter.skipForwardCommand.addTarget { [weak self] event in
+            guard let self = self,
+                  let skipEvent = event as? MPSkipIntervalCommandEvent,
+                  let player = self.player
+            else {
+                return .commandFailed
             }
+
+            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                print("⚠️ View \(self.viewId) received skip forward command but is not owner")
+                return .commandFailed
+            }
+
+            let currentTime = player.currentTime()
+            let newTime = CMTimeAdd(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
+            player.seek(to: newTime)
+            self.updateNowPlayingPlaybackTime()
+            return .success
+        }
+
+        commandCenter.skipBackwardCommand.addTarget { [weak self] event in
+            guard let self = self,
+                  let skipEvent = event as? MPSkipIntervalCommandEvent,
+                  let player = self.player
+            else {
+                return .commandFailed
+            }
+
+            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                print("⚠️ View \(self.viewId) received skip backward command but is not owner")
+                return .commandFailed
+            }
+
+            let currentTime = player.currentTime()
+            let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
+            player.seek(to: max(newTime, .zero))
+            self.updateNowPlayingPlaybackTime()
+            return .success
+        }
+
+        commandCenter.changePlaybackPositionCommand.addTarget { [weak self] event in
+            guard let self = self,
+                  let seekEvent = event as? MPChangePlaybackPositionCommandEvent,
+                  let player = self.player
+            else {
+                return .commandFailed
+            }
+
+            guard RemoteCommandManager.shared.isOwner(self.viewId) else {
+                print("⚠️ View \(self.viewId) received change position command but is not owner")
+                return .commandFailed
+            }
+
+            let durationSeconds = CMTimeGetSeconds(player.currentItem?.duration ?? .zero)
+            let boundedPosition = max(0, seekEvent.positionTime)
+
+            if durationSeconds.isFinite {
+                player.seek(to: CMTime(seconds: min(boundedPosition, durationSeconds), preferredTimescale: 600))
+            } else {
+                player.seek(to: CMTime(seconds: boundedPosition, preferredTimescale: 600))
+            }
+
+            self.updateNowPlayingPlaybackTime()
+            return .success
         }
 
         print("🎛️ View \(viewId) registered remote command handlers")
@@ -350,6 +380,8 @@ extension VideoPlayerView {
         // Verify remote commands are enabled
         print("   → Play command enabled: \(commandCenter.playCommand.isEnabled)")
         print("   → Pause command enabled: \(commandCenter.pauseCommand.isEnabled)")
+        print("   → Previous track enabled: \(commandCenter.previousTrackCommand.isEnabled)")
+        print("   → Next track enabled: \(commandCenter.nextTrackCommand.isEnabled)")
         print("   → Skip forward enabled: \(commandCenter.skipForwardCommand.isEnabled)")
         print("   → Skip backward enabled: \(commandCenter.skipBackwardCommand.isEnabled)")
     }

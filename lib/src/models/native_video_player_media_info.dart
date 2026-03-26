@@ -5,6 +5,8 @@ class NativeVideoPlayerMediaInfo {
     this.album,
     this.artworkUrl,
     this.showSkipControls,
+    this.showSystemNextTrackControl,
+    this.showSystemPreviousTrackControl,
   });
 
   final String? title;
@@ -12,6 +14,8 @@ class NativeVideoPlayerMediaInfo {
   final String? album;
   final String? artworkUrl;
   final bool? showSkipControls;
+  final bool? showSystemNextTrackControl;
+  final bool? showSystemPreviousTrackControl;
 
   Map<String, dynamic> toMap() => <String, dynamic>{
     if (title != null) 'title': title,
@@ -19,5 +23,7 @@ class NativeVideoPlayerMediaInfo {
     if (album != null) 'album': album,
     if (artworkUrl != null) 'artworkUrl': artworkUrl,
     if (showSkipControls != null) 'showSkipControls': showSkipControls,
+    if (showSystemNextTrackControl != null) 'showSystemNextTrackControl': showSystemNextTrackControl,
+    if (showSystemPreviousTrackControl != null) 'showSystemPreviousTrackControl': showSystemPreviousTrackControl,
   };
 }
