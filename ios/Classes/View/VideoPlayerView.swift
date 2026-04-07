@@ -600,10 +600,15 @@ import QuartzCore
                 RemoteCommandManager.shared.clearOwner(viewId)
                 // Do NOT clear nowPlayingInfo or remove targets while PiP is active or restoring
             } else {
-                print("🗑️ No transfer possible and PiP is not active - clearing ownership and Now Playing info")
+                print("🗑️ No transfer possible and PiP is not active - clearing ownership only")
                 RemoteCommandManager.shared.clearOwner(viewId)
-                RemoteCommandManager.shared.removeAllTargets()
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                // Do NOT remove targets or clear nowPlayingInfo here.
+                // In a mixed video/audio playlist, the audio player may have already re-registered
+                // its command handlers and set its nowPlayingInfo. Clearing them here creates a race
+                // condition where the audio player's setup gets wiped, resulting in "Not Playing".
+                // The stale video handlers are harmless: they check RemoteCommandManager.isOwner()
+                // (now cleared) and hold a [weak self] that becomes nil after deallocation — both
+                // guards cause them to return .commandFailed without side effects.
             }
         }
     }
