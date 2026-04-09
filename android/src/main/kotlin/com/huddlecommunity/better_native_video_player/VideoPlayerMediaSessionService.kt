@@ -59,12 +59,19 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
         // Configure Media3's notification provider so it knows which channel and
         // notification ID to use when building the real media notification.
         // Without this, Media3 never replaces the placeholder posted in onStartCommand().
-        setMediaNotificationProvider(
-            DefaultMediaNotificationProvider.Builder(this)
-                .setChannelId(CHANNEL_ID)
-                .setNotificationId(NOTIFICATION_ID)
-                .build()
-        )
+        val notificationProvider = DefaultMediaNotificationProvider.Builder(this)
+            .setChannelId(CHANNEL_ID)
+            .setNotificationId(NOTIFICATION_ID)
+            .build()
+        notificationProvider.setSmallIcon(applicationInfo.icon)
+        setMediaNotificationProvider(notificationProvider)
+
+        // Handle Android 12+ background start restrictions gracefully
+        setListener(object : Listener {
+            override fun onForegroundServiceStartNotAllowedException() {
+                Log.w(TAG, "Foreground service start not allowed (Android 12+ background restriction)")
+            }
+        })
 
         Log.d(TAG, "VideoPlayerMediaSessionService onCreate, mediaSession=${mediaSession != null}")
     }
@@ -101,15 +108,25 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
                     description = "Controls for video playback"
+                    setSound(null, null)
                 }
-                val manager = getSystemService(NotificationManager::class.java)
-                manager.createNotificationChannel(channel)
+                (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                    .createNotificationChannel(channel)
             }
 
+            // Build a launch intent so tapping the placeholder opens the app
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+                ?: Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER).setPackage(packageName)
+            val pendingIntent = PendingIntent.getActivity(
+                this, 0, launchIntent, PendingIntent.FLAG_IMMUTABLE
+            )
+
             val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Video Player")
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentTitle("Playing")
+                .setSmallIcon(applicationInfo.icon)
+                .setContentIntent(pendingIntent)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
                 .setSilent(true)
                 .build()
 
