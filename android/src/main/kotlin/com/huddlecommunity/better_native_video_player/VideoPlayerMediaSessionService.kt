@@ -1,9 +1,13 @@
 package com.huddlecommunity.better_native_video_player
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
 import androidx.media3.session.MediaSession
@@ -27,6 +31,8 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
 
     companion object {
         private const val TAG = "VideoPlayerMSS"
+        private const val NOTIFICATION_ID = 1001
+        private const val CHANNEL_ID = "video_player_channel"
 
         // The MediaSession is stored here so it can be accessed by the service
         private var mediaSession: MediaSession? = null
@@ -54,7 +60,12 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand called, mediaSession=${mediaSession != null}, player=${mediaSession?.player != null}")
 
-        // Important: Call super to trigger the Media3 notification framework
+        // Immediately promote to foreground with a placeholder notification to satisfy
+        // Android's 5-second startForeground() deadline. Media3's super.onStartCommand()
+        // will replace this with the real media notification once it processes the session.
+        startForegroundWithPlaceholder()
+
+        // Now let Media3 do its work — it will replace the placeholder notification
         val result = super.onStartCommand(intent, flags, startId)
 
         // Log player state for debugging
@@ -63,6 +74,38 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
         }
 
         return result
+    }
+
+    /**
+     * Posts a minimal foreground notification so the service satisfies Android's
+     * startForeground() contract before Media3 builds the real media notification.
+     */
+    private fun startForegroundWithPlaceholder() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "Video Playback",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Controls for video playback"
+                }
+                val manager = getSystemService(NotificationManager::class.java)
+                manager.createNotificationChannel(channel)
+            }
+
+            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Video Player")
+                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setSilent(true)
+                .build()
+
+            startForeground(NOTIFICATION_ID, notification)
+            Log.d(TAG, "Placeholder foreground notification posted")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground: ${e.message}", e)
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
