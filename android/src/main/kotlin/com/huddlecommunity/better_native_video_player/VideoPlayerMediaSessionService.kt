@@ -10,7 +10,6 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
-import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -55,24 +54,6 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-
-        // Configure Media3's notification provider so it knows which channel and
-        // notification ID to use when building the real media notification.
-        // Without this, Media3 never replaces the placeholder posted in onStartCommand().
-        val notificationProvider = DefaultMediaNotificationProvider.Builder(this)
-            .setChannelId(CHANNEL_ID)
-            .setNotificationId(NOTIFICATION_ID)
-            .build()
-        notificationProvider.setSmallIcon(applicationInfo.icon)
-        setMediaNotificationProvider(notificationProvider)
-
-        // Handle Android 12+ background start restrictions gracefully
-        setListener(object : Listener {
-            override fun onForegroundServiceStartNotAllowedException() {
-                Log.w(TAG, "Foreground service start not allowed (Android 12+ background restriction)")
-            }
-        })
-
         Log.d(TAG, "VideoPlayerMediaSessionService onCreate, mediaSession=${mediaSession != null}")
     }
 
