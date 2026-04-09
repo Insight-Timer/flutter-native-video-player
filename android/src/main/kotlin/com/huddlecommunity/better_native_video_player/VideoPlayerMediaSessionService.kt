@@ -10,6 +10,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.media3.common.Player
 import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -54,6 +55,17 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+
+        // Configure Media3's notification provider so it knows which channel and
+        // notification ID to use when building the real media notification.
+        // Without this, Media3 never replaces the placeholder posted in onStartCommand().
+        setMediaNotificationProvider(
+            DefaultMediaNotificationProvider.Builder(this)
+                .setChannelId(CHANNEL_ID)
+                .setNotificationId(NOTIFICATION_ID)
+                .build()
+        )
+
         Log.d(TAG, "VideoPlayerMediaSessionService onCreate, mediaSession=${mediaSession != null}")
     }
 
