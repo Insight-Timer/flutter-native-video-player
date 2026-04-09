@@ -188,6 +188,27 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Disables or enables the video track in the native player.
+  ///
+  /// When [disabled] is true, the native player stops downloading video segments
+  /// from HLS demuxed streams, saving bandwidth during background playback.
+  /// Audio continues uninterrupted.
+  ///
+  /// When [disabled] is false, video segment downloads resume from the current position.
+  Future<void> setVideoTrackDisabled(bool disabled) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setVideoTrackDisabled',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'disabled': disabled,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setVideoTrackDisabled: $e');
+    }
+  }
+
   /// Checks if Picture-in-Picture is available
   Future<bool> isPictureInPictureAvailable() async {
     try {

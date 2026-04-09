@@ -26,6 +26,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
 import java.net.URL
 
 /**
@@ -366,6 +367,19 @@ class VideoPlayerNotificationHandler(
         mediaInfo?.let { info ->
             updateMediaMetadata(info)
         }
+
+        // Store the session for the service to access and start as foreground service.
+        // When MediaSessionService receives onStartCommand() and onGetSession() returns
+        // a non-null MediaSession with active media, Media3 internally calls startForeground()
+        // with the notification it constructs.
+        VideoPlayerMediaSessionService.setMediaSession(mediaSession)
+        val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(serviceIntent)
+        } else {
+            context.startService(serviceIntent)
+        }
+        Log.d(TAG, "Started VideoPlayerMediaSessionService as foreground service")
 
         // Start periodic position updates
         startPositionUpdates()

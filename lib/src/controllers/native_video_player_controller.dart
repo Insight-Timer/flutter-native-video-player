@@ -1878,6 +1878,18 @@ class NativeVideoPlayerController {
     await _methodChannel?.setSubtitleTrack(track);
   }
 
+  /// Disables or enables the video track in the native player.
+  ///
+  /// When [disabled] is true, only audio segments are downloaded from HLS
+  /// demuxed streams. This is designed for background audio-only playback
+  /// to save bandwidth.
+  ///
+  /// Call with `true` when the app goes to background,
+  /// `false` when returning to foreground.
+  Future<void> setVideoTrackDisabled(bool disabled) async {
+    await _methodChannel?.setVideoTrackDisabled(disabled);
+  }
+
   /// Returns whether Picture-in-Picture is available on this device
   /// Checks the actual device capabilities rather than just the platform
   /// PiP is available on iOS 14+ and Android 8+ (if the device supports it)

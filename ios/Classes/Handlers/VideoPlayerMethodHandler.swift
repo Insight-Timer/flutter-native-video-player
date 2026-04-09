@@ -1285,4 +1285,66 @@ extension VideoPlayerView {
 
         result(nil)
     }
+
+    // MARK: - Video Track Disabling (Background Audio-Only)
+
+    /// Disables or enables the video track for HLS background audio-only streaming.
+    ///
+    /// Uses a two-strategy approach:
+    /// - Strategy 1 (AVMediaSelectionGroup): Deselects the visual media selection group.
+    ///   With demuxed HLS, AVPlayer stops downloading video segments.
+    /// - Strategy 2 (preferredPeakBitRate): Fallback that restricts bitrate to exclude video variants.
+    ///
+    /// When re-enabling, restores default video rendition and clears bitrate restriction.
+    func handleSetVideoTrackDisabled(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let disabled = args["disabled"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'disabled' parameter",
+                details: nil
+            ))
+            return
+        }
+
+        guard let player = player, let playerItem = player.currentItem else {
+            print("[VideoPlayer] No current player item for video track disable")
+            result(nil)
+            return
+        }
+
+        if disabled {
+            // Strategy 1: Deselect the visual media selection group (demuxed HLS)
+            if let asset = playerItem.asset as? AVURLAsset,
+               let videoGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .visual
+               ) {
+                playerItem.select(nil, in: videoGroup)
+                print("[VideoPlayer] Video track disabled via AVMediaSelectionGroup")
+            }
+
+            // Strategy 2: Restrict bitrate to audio-only threshold (fallback)
+            playerItem.preferredPeakBitRate = 1.0
+            print("[VideoPlayer] preferredPeakBitRate set to 1.0 (audio-only)")
+        } else {
+            // Re-enable: restore video rendition selection
+            if let asset = playerItem.asset as? AVURLAsset,
+               let videoGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .visual
+               ) {
+                if let defaultOption = videoGroup.defaultOption {
+                    playerItem.select(defaultOption, in: videoGroup)
+                } else if let firstOption = videoGroup.options.first {
+                    playerItem.select(firstOption, in: videoGroup)
+                }
+                print("[VideoPlayer] Video track re-enabled via AVMediaSelectionGroup")
+            }
+
+            // Clear bitrate restriction (0 = no limit)
+            playerItem.preferredPeakBitRate = 0
+            print("[VideoPlayer] preferredPeakBitRate cleared (no limit)")
+        }
+
+        result(nil)
+    }
 }

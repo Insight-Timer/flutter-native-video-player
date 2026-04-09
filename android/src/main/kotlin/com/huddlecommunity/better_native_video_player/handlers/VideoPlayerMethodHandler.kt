@@ -130,6 +130,7 @@ class VideoPlayerMethodHandler(
             "getAvailableQualities" -> handleGetAvailableQualities(result)
             "getAvailableSubtitleTracks" -> handleGetAvailableSubtitleTracks(result)
             "setSubtitleTrack" -> handleSetSubtitleTrack(call, result)
+            "setVideoTrackDisabled" -> handleSetVideoTrackDisabled(call, result)
             "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
             "exitFullScreen" -> handleExitFullScreen(result)
@@ -868,6 +869,38 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting subtitle track: ${e.message}", e)
             result.error("ERROR", "Failed to set subtitle track: ${e.message}", null)
+        }
+    }
+
+    /**
+     * Disables or enables the video track.
+     *
+     * When disabled on a demuxed HLS stream, ExoPlayer stops selecting video renditions
+     * and only fetches audio segments — saving bandwidth during background playback.
+     *
+     * When re-enabled, ExoPlayer resumes video segment downloads from the current position.
+     *
+     * Uses the same trackSelectionParameters API as subtitle disabling.
+     */
+    private fun handleSetVideoTrackDisabled(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val disabled = args?.get("disabled") as? Boolean ?: false
+
+            Log.d(TAG, "Setting video track disabled: $disabled")
+
+            val newParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
+                .build()
+
+            player.trackSelectionParameters = newParameters
+
+            Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
+            result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
         }
     }
 }

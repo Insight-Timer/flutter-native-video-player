@@ -409,6 +409,8 @@ import QuartzCore
             handleGetAvailableSubtitleTracks(result: result)
         case "setSubtitleTrack":
             handleSetSubtitleTrack(call: call, result: result)
+        case "setVideoTrackDisabled":
+            handleSetVideoTrackDisabled(call: call, result: result)
         case "enterFullScreen":
             handleEnterFullScreen(result: result)
         case "exitFullScreen":
