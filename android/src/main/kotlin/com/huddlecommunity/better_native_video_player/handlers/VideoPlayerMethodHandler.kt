@@ -896,6 +896,13 @@ class VideoPlayerMethodHandler(
 
             player.trackSelectionParameters = newParameters
 
+            // Start/stop the foreground service based on audio-only mode.
+            if (disabled) {
+                notificationHandler.startForegroundPlayback()
+            } else {
+                notificationHandler.stopForegroundPlayback()
+            }
+
             Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
             result.success(null)
         } catch (e: Exception) {

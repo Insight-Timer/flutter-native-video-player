@@ -177,18 +177,23 @@ class VideoPlayerNotificationHandler(
     private val playerListener = object : Player.Listener {
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (playWhenReady) {
-                showNotification()
                 eventHandler.sendEvent("play")
             } else {
-                updateNotification()
                 eventHandler.sendEvent("pause")
             }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
-                Player.STATE_ENDED, Player.STATE_IDLE -> hideNotification()
-                Player.STATE_READY -> if (player.playWhenReady) showNotification()
+                Player.STATE_ENDED, Player.STATE_IDLE -> {
+                    try {
+                        val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
+                        context.stopService(serviceIntent)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error stopping service: ${e.message}")
+                    }
+                }
+                else -> { /* Media3 handles notification updates */ }
             }
         }
     }
@@ -368,21 +373,44 @@ class VideoPlayerNotificationHandler(
             updateMediaMetadata(info)
         }
 
-        // Store the session for the service to access and start as foreground service.
-        // When MediaSessionService receives onStartCommand() and onGetSession() returns
-        // a non-null MediaSession with active media, Media3 internally calls startForeground()
-        // with the notification it constructs.
         VideoPlayerMediaSessionService.setMediaSession(mediaSession)
+        Log.d(TAG, "===== setupMediaSession: MediaSession created (foreground service NOT started)")
+
+        // Start periodic position updates
+        startPositionUpdates()
+    }
+
+    /**
+     * Starts the foreground service with media notification.
+     * Call this ONLY when switching to audio-only playback (background or manual audio mode).
+     * NOT when video is playing in the foreground.
+     */
+    fun startForegroundPlayback() {
+        if (mediaSession == null) {
+            Log.w(TAG, "===== startForegroundPlayback: no MediaSession, skipping")
+            return
+        }
+        Log.d(TAG, "===== startForegroundPlayback: starting foreground service")
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
         } else {
             context.startService(serviceIntent)
         }
-        Log.d(TAG, "Started VideoPlayerMediaSessionService as foreground service")
+    }
 
-        // Start periodic position updates
-        startPositionUpdates()
+    /**
+     * Stops the foreground service and removes the notification.
+     * Call when switching back to video mode from audio mode.
+     */
+    fun stopForegroundPlayback() {
+        Log.d(TAG, "===== stopForegroundPlayback: stopping foreground service")
+        try {
+            val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
+            context.stopService(serviceIntent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping service: ${e.message}")
+        }
     }
 
     /**
@@ -409,8 +437,7 @@ class VideoPlayerNotificationHandler(
      * Hides the notification
      */
     private fun hideNotification() {
-        notificationManager.cancel(NOTIFICATION_ID)
-        Log.d(TAG, "Notification hidden")
+        stopForegroundPlayback()
     }
 
     /**
@@ -574,7 +601,9 @@ class VideoPlayerNotificationHandler(
     fun release() {
         stopPositionUpdates()
         player.removeListener(playerListener)
-        hideNotification()
+
+        stopForegroundPlayback()
+        VideoPlayerMediaSessionService.setMediaSession(null)
 
         mediaSession?.release()
         mediaSession = null
