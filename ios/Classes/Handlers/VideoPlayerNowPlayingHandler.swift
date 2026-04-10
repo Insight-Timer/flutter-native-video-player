@@ -81,6 +81,11 @@ class RemoteCommandManager {
 extension VideoPlayerView {
     /// Sets up the Now Playing info for the Control Center and Lock Screen
     func setupNowPlayingInfo(mediaInfo: [String: Any]) {
+        // Only show Now Playing info in audio-only mode (background/manual audio switch).
+        guard isAudioOnlyMode else {
+            print("🎵 setupNowPlayingInfo skipped – not in audio-only mode")
+            return
+        }
         print("🎵 setupNowPlayingInfo called for view \(viewId)")
         print("   → Media title: \(mediaInfo["title"] ?? "Unknown")")
         print("   → Current Now Playing info before update: \(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String ?? "nil")")
