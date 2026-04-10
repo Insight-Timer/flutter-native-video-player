@@ -897,6 +897,8 @@ class VideoPlayerMethodHandler(
             player.trackSelectionParameters = newParameters
 
             // Start/stop the foreground service based on audio-only mode.
+            // When video track is disabled → audio-only → show notification.
+            // When video track is re-enabled → video mode → remove notification.
             if (disabled) {
                 notificationHandler.startForegroundPlayback()
             } else {

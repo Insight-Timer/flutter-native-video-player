@@ -12,7 +12,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import android.support.v4.media.session.MediaSessionCompat
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
@@ -39,7 +38,6 @@ class VideoPlayerNotificationHandler(
     private var eventHandler: VideoPlayerEventHandler
 ) {
     companion object {
-        private const val TAG = "VideoPlayerNotification"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "video_player_channel"
         private var sessionCounter = 0
@@ -181,17 +179,17 @@ class VideoPlayerNotificationHandler(
             } else {
                 eventHandler.sendEvent("pause")
             }
+            // Media3's MediaSessionService handles notification updates automatically.
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
                 Player.STATE_ENDED, Player.STATE_IDLE -> {
+                    // Stop the foreground service when playback ends
                     try {
                         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
                         context.stopService(serviceIntent)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error stopping service: ${e.message}")
-                    }
+                    } catch (_: Exception) { }
                 }
                 else -> { /* Media3 handles notification updates */ }
             }
@@ -212,7 +210,6 @@ class VideoPlayerNotificationHandler(
                 setShowBadge(false)
             }
             notificationManager.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created")
         }
     }
 
@@ -234,7 +231,6 @@ class VideoPlayerNotificationHandler(
      */
     fun updateEventHandler(newEventHandler: VideoPlayerEventHandler) {
         eventHandler = newEventHandler
-        Log.d(TAG, "Event handler updated for shared notification handler")
     }
 
     /**
@@ -267,8 +263,6 @@ class VideoPlayerNotificationHandler(
         player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
         player.seekTo(position)
         if (wasPlaying) player.play()
-
-        Log.d(TAG, "Updated player MediaItem metadata - title: ${mediaInfo["title"]}, subtitle: ${mediaInfo["subtitle"]}")
     }
 
     /**
@@ -294,9 +288,6 @@ class VideoPlayerNotificationHandler(
         showSkipControls = newShowSkipControls
         showSystemPreviousTrackControl = newShowSystemPreviousTrackControl
         showSystemNextTrackControl = newShowSystemNextTrackControl
-        Log.d(TAG, "📱 Media info - title: $currentTitle, subtitle: $currentSubtitle, changed: $mediaInfoChanged")
-        Log.d(TAG, "📱 showSkipControls: $showSkipControls, seekPermissionChanged: $seekPermissionChanged")
-        Log.d(TAG, "📱 showPrevTrack: $showSystemPreviousTrackControl, showNextTrack: $showSystemNextTrackControl")
 
         // Recreate MediaSession when seek permissions change so connected system controllers
         // receive the new command set via onConnect.
@@ -304,14 +295,12 @@ class VideoPlayerNotificationHandler(
             mediaSession?.release()
             mediaSession = null
             player.removeListener(playerListener)
-            Log.d(TAG, "📱 Recreating MediaSession due to seek permission change")
         }
 
         // If MediaSession already exists, only update if media info changed
         if (mediaSession != null) {
             // Only update MediaItem if the info actually changed to avoid playback interruptions
             if (mediaInfoChanged) {
-                Log.d(TAG, "📱 MediaSession exists - media info changed, updating metadata")
                 currentArtwork = null // Clear old artwork
                 currentArtworkUrl = null // Clear artwork URL to ignore pending loads
 
@@ -327,11 +316,8 @@ class VideoPlayerNotificationHandler(
                 handler.post {
                     if (player.playWhenReady) {
                         updateNotification()
-                        Log.d(TAG, "✅ Notification updated with new media info")
                     }
                 }
-            } else {
-                Log.d(TAG, "📱 MediaSession exists - media info unchanged, skipping update to avoid interruption")
             }
             return
         }
@@ -360,12 +346,9 @@ class VideoPlayerNotificationHandler(
         player.removeListener(playerListener)
         player.addListener(playerListener)
 
-        Log.d(TAG, "MediaSession created - lock screen and notification controls active")
-
         // Set metadata on the player's MediaItem first (for MediaSession to use)
         mediaInfo?.let { info ->
             updatePlayerMediaItemMetadata(info)
-            Log.d(TAG, "Initial MediaItem metadata set for new MediaSession")
         }
 
         // Load artwork asynchronously if provided
@@ -373,8 +356,11 @@ class VideoPlayerNotificationHandler(
             updateMediaMetadata(info)
         }
 
+        // Store the session so it's available when the foreground service is started later.
+        // The service is NOT started here — it's started only when:
+        // 1. setVideoTrackDisabled(true) is called (audio mode or background)
+        // 2. Via startForegroundPlayback() below
         VideoPlayerMediaSessionService.setMediaSession(mediaSession)
-        Log.d(TAG, "===== setupMediaSession: MediaSession created (foreground service NOT started)")
 
         // Start periodic position updates
         startPositionUpdates()
@@ -386,11 +372,7 @@ class VideoPlayerNotificationHandler(
      * NOT when video is playing in the foreground.
      */
     fun startForegroundPlayback() {
-        if (mediaSession == null) {
-            Log.w(TAG, "===== startForegroundPlayback: no MediaSession, skipping")
-            return
-        }
-        Log.d(TAG, "===== startForegroundPlayback: starting foreground service")
+        if (mediaSession == null) return
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
@@ -404,38 +386,20 @@ class VideoPlayerNotificationHandler(
      * Call when switching back to video mode from audio mode.
      */
     fun stopForegroundPlayback() {
-        Log.d(TAG, "===== stopForegroundPlayback: stopping foreground service")
         try {
             val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
             context.stopService(serviceIntent)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping service: ${e.message}")
-        }
+        } catch (_: Exception) { }
     }
 
-    /**
-     * Shows or updates the media notification
-     */
     private fun showNotification() {
-        try {
-            val notification = buildNotification()
-            notificationManager.notify(NOTIFICATION_ID, notification)
-            Log.d(TAG, "Notification shown/updated")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error showing notification: ${e.message}", e)
-        }
+        // No-op: Media3 handles notification via the foreground service.
     }
 
-    /**
-     * Updates the existing notification
-     */
     private fun updateNotification() {
-        showNotification()
+        // No-op: Media3 handles notification updates.
     }
 
-    /**
-     * Hides the notification
-     */
     private fun hideNotification() {
         stopForegroundPlayback()
     }
@@ -464,11 +428,9 @@ class VideoPlayerNotificationHandler(
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        Log.d(TAG, "Building notification - title: $title, subtitle: $artist (from player: ${mediaMetadata != null})")
-
-        // Get notification icon from the app's resources
-        val appInfo = context.applicationInfo
-        val iconResId = appInfo.icon
+        // Use a system drawable for the small icon — adaptive/mipmap launcher icons
+        // are silently suppressed by Android's notification system.
+        val iconResId = android.R.drawable.ic_media_play
 
         // Convert Media3 SessionToken to MediaSessionCompat.Token for notification
         // Media3 1.4.0+ requires us to extract the token differently
@@ -476,9 +438,7 @@ class VideoPlayerNotificationHandler(
             // Use reflection to access the session compat token
             val method = session.javaClass.getMethod("getSessionCompatToken")
             method.invoke(session) as? MediaSessionCompat.Token
-        } catch (e: Exception) {
-            // If reflection fails (Media3 1.4.0+), create a token from the session's underlying binder
-            Log.w(TAG, "getSessionCompatToken not available, using alternative method")
+        } catch (_: Exception) {
             null
         }
 
@@ -498,10 +458,6 @@ class VideoPlayerNotificationHandler(
                 MediaNotificationCompat.MediaStyle()
                     .setMediaSession(token)
             )
-        } else {
-            // Fallback: create notification without media session integration
-            // Controls will still work through MediaSession, just not integrated in notification
-            Log.w(TAG, "Creating notification without MediaSession token integration")
         }
 
         return builder.build()
@@ -519,10 +475,7 @@ class VideoPlayerNotificationHandler(
             currentArtworkUrl = artworkUrl // Track the current artwork URL
             loadArtwork(artworkUrl) { bitmap ->
                 // Only use this artwork if it's still the current one (prevent race conditions)
-                if (artworkUrl != currentArtworkUrl) {
-                    Log.d(TAG, "Ignoring outdated artwork for $artworkUrl")
-                    return@loadArtwork
-                }
+                if (artworkUrl != currentArtworkUrl) return@loadArtwork
 
                 bitmap?.let {
                     currentArtwork = it
@@ -531,18 +484,12 @@ class VideoPlayerNotificationHandler(
                     // DO NOT call replaceMediaItem here as it can interrupt playback
                     // The notification will use currentArtwork automatically
                     if (player.playWhenReady) {
-                        handler.post {
-                            updateNotification()
-                            Log.d(TAG, "Artwork loaded and notification updated for $artworkUrl")
-                        }
-                    } else {
-                        Log.d(TAG, "Artwork loaded but player not ready, will show on next play")
+                        handler.post { updateNotification() }
                     }
                 }
             }
         }
 
-        Log.d(TAG, "Media metadata setup complete")
     }
 
     /**
@@ -556,8 +503,7 @@ class VideoPlayerNotificationHandler(
                 withContext(Dispatchers.Main) {
                     callback(bitmap)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error loading artwork: ${e.message}", e)
+            } catch (_: Exception) {
                 withContext(Dispatchers.Main) {
                     callback(null)
                 }
@@ -604,13 +550,11 @@ class VideoPlayerNotificationHandler(
 
         stopForegroundPlayback()
         VideoPlayerMediaSessionService.setMediaSession(null)
-
         mediaSession?.release()
         mediaSession = null
         currentArtwork = null
         currentArtworkUrl = null
         currentTitle = "Video"
         currentSubtitle = ""
-        Log.d(TAG, "MediaSession released")
     }
 }
