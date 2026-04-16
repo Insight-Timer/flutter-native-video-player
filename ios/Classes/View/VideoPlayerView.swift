@@ -90,6 +90,17 @@ import QuartzCore
     // Store HDR setting
     var enableHDR: Bool = false
 
+    // MARK: - Native Layout (orientation transition workaround)
+    // When true, the player view has been reparented to the root view with Auto Layout
+    // constraints so it stays centered during iOS orientation animations, bypassing
+    // Flutter's layout which looks broken during transitions.
+    var isUsingNativeLayout: Bool = false
+    // Snapshot overlay placed on the root view during rotation to cover
+    // Flutter's broken layout.  The actual platform view stays untouched.
+    var nativeLayoutSnapshotView: UIView?
+    // Remembered portrait video rect so landscape→portrait can animate back.
+    var portraitVideoRectInRoot: CGRect?
+
     // Store looping setting
     var enableLooping: Bool = false
 
@@ -356,6 +367,91 @@ import QuartzCore
         return playerViewController.view
     }
 
+    // MARK: - Native Layout Overlay
+
+    /// Places a snapshot of the current video frame on the root view, pinned
+    /// edge-to-edge with Auto Layout.  The snapshot rotates smoothly with iOS
+    /// orientation animations while Flutter re-layouts underneath.
+    /// The actual platform view is never moved — no reparenting, no flicker.
+    func handleUseNativeLayout(result: @escaping FlutterResult) {
+        guard !isUsingNativeLayout else {
+            result(nil)
+            return
+        }
+
+        let playerView = playerViewController.view!
+        guard let rootView = UIApplication.shared.delegate?.window??.rootViewController?.view else {
+            print("⚠️ [NativeLayout] Could not find root view — skipping")
+            result(FlutterError(code: "NO_ROOT_VIEW", message: "Could not find root view controller", details: nil))
+            return
+        }
+
+        // Get the actual video rect (excludes letterbox bars) from the player layer.
+        let videoRect: CGRect
+        if let playerLayer = findPlayerLayer(), playerLayer.videoRect != .zero {
+            videoRect = playerLayer.videoRect
+        } else {
+            videoRect = playerView.bounds
+        }
+
+        // Render only the video content area into an image (no letterbox bars).
+        let renderer = UIGraphicsImageRenderer(size: videoRect.size)
+        let image = renderer.image { ctx in
+            ctx.cgContext.translateBy(x: -videoRect.origin.x, y: -videoRect.origin.y)
+            playerView.drawHierarchy(in: playerView.bounds, afterScreenUpdates: false)
+        }
+
+        // Video's exact position in root-view coordinates.
+        let videoRectInRoot = playerView.convert(videoRect, to: rootView)
+
+        // Remember the portrait position for the reverse rotation.
+        let isCurrentlyPortrait = rootView.bounds.height > rootView.bounds.width
+        if isCurrentlyPortrait {
+            portraitVideoRectInRoot = videoRectInRoot
+        }
+
+        // Custom container that starts the image at the exact video position
+        // and animates to the appropriate target when iOS rotates.
+        let container = RotationSnapshotContainer(
+            image: image,
+            initialVideoRect: videoRectInRoot,
+            portraitVideoRect: portraitVideoRectInRoot
+        )
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        rootView.addSubview(container)
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            container.topAnchor.constraint(equalTo: rootView.topAnchor),
+            container.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+        ])
+
+        nativeLayoutSnapshotView = container
+        isUsingNativeLayout = true
+        print("✅ [NativeLayout] Snapshot overlay added to root view")
+        result(nil)
+    }
+
+    /// Removes the snapshot overlay.  The real platform view was never moved,
+    /// so Flutter's layout is already correct underneath — no flicker.
+    func handleUseFlutterLayout(result: @escaping FlutterResult) {
+        guard isUsingNativeLayout else {
+            result(nil)
+            return
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        nativeLayoutSnapshotView?.removeFromSuperview()
+        nativeLayoutSnapshotView = nil
+        CATransaction.commit()
+
+        isUsingNativeLayout = false
+        print("✅ [NativeLayout] Snapshot overlay removed")
+        result(nil)
+    }
+
     // MARK: - Audio Session Management
 
     /// Prepares and activates the audio session for video playback
@@ -429,6 +525,10 @@ import QuartzCore
             handleSetUseAspectFill(call: call, result: result)
         case "getVideoDimensions":
             handleGetVideoDimensions(result: result)
+        case "useNativeLayout":
+            handleUseNativeLayout(result: result)
+        case "useFlutterLayout":
+            handleUseFlutterLayout(result: result)
         case "ensureSurfaceConnected":
             // No-op on iOS; each platform view uses its own AVPlayerViewController when shared.
             result(nil)
@@ -1086,5 +1186,69 @@ import QuartzCore
         @unknown default:
             break
         }
+    }
+}
+
+// MARK: - Rotation Snapshot Container
+
+/// A full-screen black container that holds a video snapshot image.
+/// The image starts at the video's exact screen position and animates to
+/// the correct target when iOS rotation changes the container's bounds.
+/// Because `layoutSubviews` is called inside iOS's rotation animation block,
+/// the frame change is automatically animated.
+///
+/// - Portrait → Landscape: animates from portrait video rect to fullscreen.
+/// - Landscape → Portrait: animates from fullscreen to portrait video rect.
+private class RotationSnapshotContainer: UIView {
+    private let imageView: UIImageView
+    private let initialVideoRect: CGRect
+    private let portraitVideoRect: CGRect?
+    private var previousBoundsSize: CGSize = .zero
+    private var hasRotated = false
+
+    init(image: UIImage, initialVideoRect: CGRect, portraitVideoRect: CGRect?) {
+        self.imageView = UIImageView(image: image)
+        self.initialVideoRect = initialVideoRect
+        self.portraitVideoRect = portraitVideoRect
+        super.init(frame: .zero)
+
+        backgroundColor = .black
+        clipsToBounds = true
+        imageView.contentMode = .scaleAspectFit
+        addSubview(imageView)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        if !hasRotated {
+            if previousBoundsSize == .zero {
+                // First layout pass — place image at exact video position.
+                imageView.frame = initialVideoRect
+            } else if bounds.size != previousBoundsSize {
+                // Bounds changed → rotation is happening inside the animation
+                // block.  Pick the right target based on new orientation.
+                hasRotated = true
+                let isRotatingToPortrait = bounds.height > bounds.width
+                if isRotatingToPortrait, let portraitRect = portraitVideoRect {
+                    imageView.frame = portraitRect
+                } else {
+                    // Landscape — fill the screen.
+                    imageView.frame = bounds
+                }
+            }
+        } else {
+            // Already rotated — maintain the target.
+            let isPortrait = bounds.height > bounds.width
+            if isPortrait, let portraitRect = portraitVideoRect {
+                imageView.frame = portraitRect
+            } else {
+                imageView.frame = bounds
+            }
+        }
+
+        previousBoundsSize = bounds.size
     }
 }

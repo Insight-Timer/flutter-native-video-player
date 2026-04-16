@@ -2239,6 +2239,19 @@ class NativeVideoPlayerController {
     return await _methodChannel?.getVideoDimensions();
   }
 
+  /// Reparents the native player view to the root UIViewController with
+  /// edge-pinned Auto Layout constraints so iOS orientation animations
+  /// keep the video centered.  Call before an orientation transition.
+  Future<void> useNativeLayout() async {
+    await _methodChannel?.useNativeLayout();
+  }
+
+  /// Returns the native player view to Flutter's layout control.
+  /// Call after the orientation transition has settled.
+  Future<void> useFlutterLayout() async {
+    await _methodChannel?.useFlutterLayout();
+  }
+
   /// Checks if AirPlay is available on the device
   ///
   /// This is only available on iOS. On Android, this always returns false.

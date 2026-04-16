@@ -922,7 +922,7 @@ extension VideoPlayerView {
     }
     
     /// Finds the AVPlayerLayer in the view hierarchy
-    private func findPlayerLayer() -> AVPlayerLayer? {
+    func findPlayerLayer() -> AVPlayerLayer? {
         // Get the player layer from the AVPlayerViewController's view
         if let playerView = playerViewController.view {
             return findPlayerLayerInView(playerView)
@@ -931,7 +931,7 @@ extension VideoPlayerView {
     }
     
     /// Recursively searches for AVPlayerLayer in view hierarchy
-    private func findPlayerLayerInView(_ view: UIView) -> AVPlayerLayer? {
+    func findPlayerLayerInView(_ view: UIView) -> AVPlayerLayer? {
         // Check if this view's layer is an AVPlayerLayer
         if let playerLayer = view.layer as? AVPlayerLayer {
             return playerLayer
