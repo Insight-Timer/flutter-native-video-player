@@ -1346,12 +1346,6 @@ extension VideoPlayerView {
 
             // Strategy 2: Restrict bitrate to audio-only threshold (fallback)
             playerItem.preferredPeakBitRate = 1.0
-
-            // Enable Now Playing info for lock screen / Control Center
-            isAudioOnlyMode = true
-            if let mediaInfo = currentMediaInfo {
-                setupNowPlayingInfo(mediaInfo: mediaInfo)
-            }
         } else {
             // Re-enable: restore video rendition selection
             if let asset = playerItem.asset as? AVURLAsset,
@@ -1365,19 +1359,8 @@ extension VideoPlayerView {
                 }
             }
 
-            // Use a high bitrate first for smoother transition while AVPlayer
-            // starts selecting video variants again.
-            playerItem.preferredPeakBitRate = 10_000_000
-
-            // Defer cleanup/removal of the cap slightly to reduce audible gaps
-            // while the video pipeline is being re-established.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak playerItem] in
-                guard let self = self, let playerItem = playerItem else { return }
-                self.isAudioOnlyMode = false
-                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-                self.hasRegisteredRemoteCommands = false
-                playerItem.preferredPeakBitRate = 0
-            }
+            // Clear bitrate restriction (0 = no limit)
+            playerItem.preferredPeakBitRate = 0
         }
 
         result(nil)

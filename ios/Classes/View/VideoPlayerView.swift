@@ -35,9 +35,6 @@ import QuartzCore
     // This prevents re-registering and clearing targets unnecessarily
     var hasRegisteredRemoteCommands: Bool = false
 
-    /// When true, Now Playing info and remote commands are active (audio-only/background mode).
-    var isAudioOnlyMode: Bool = false
-
     /// Force re-registration of remote commands
     /// Call this when you know the targets might have been removed externally
     func forceReregisterRemoteCommands() {
