@@ -1314,6 +1314,29 @@ extension VideoPlayerView {
         }
 
         if disabled {
+            // Check if HLS has demuxed (separate) audio tracks.
+            // AVMediaSelectionGroup for .audible is non-nil only when
+            // #EXT-X-MEDIA:TYPE=AUDIO is present with separate audio renditions.
+            // If nil/empty, audio is muxed inside video segments, so skip.
+            let hasDemuxedAudio: Bool
+            if let asset = playerItem.asset as? AVURLAsset,
+               let audioGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .audible
+               ),
+               !audioGroup.options.isEmpty {
+                hasDemuxedAudio = true
+            } else {
+                hasDemuxedAudio = false
+            }
+
+            if !hasDemuxedAudio {
+                result([
+                    "skipped": true,
+                    "reason": "no_demuxed_audio"
+                ])
+                return
+            }
+
             // Strategy 1: Deselect the visual media selection group (demuxed HLS)
             if let asset = playerItem.asset as? AVURLAsset,
                let videoGroup = asset.mediaSelectionGroup(

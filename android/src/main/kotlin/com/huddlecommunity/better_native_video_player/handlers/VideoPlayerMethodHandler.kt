@@ -889,6 +889,19 @@ class VideoPlayerMethodHandler(
 
             Log.d(TAG, "Setting video track disabled: $disabled")
 
+            if (disabled) {
+                // Check if HLS has demuxed (separate) audio tracks.
+                // If audio is muxed inside video segments, disabling video
+                // will not save bandwidth, so skip.
+                val hasDemuxedAudio = player.currentTracks.groups.any {
+                    it.type == C.TRACK_TYPE_AUDIO
+                }
+                if (!hasDemuxedAudio) {
+                    result.success(mapOf("skipped" to true, "reason" to "no_demuxed_audio"))
+                    return
+                }
+            }
+
             val newParameters = player.trackSelectionParameters
                 .buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
