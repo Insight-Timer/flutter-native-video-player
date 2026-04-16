@@ -375,6 +375,14 @@ class VideoPlayerNotificationHandler(
      */
     fun startForegroundPlayback() {
         if (mediaSession == null) return
+
+        // Cancel any pending deferred stop — user switched back to audio mode
+        // before the previous stopWhenReady completed.
+        pendingStopWhenReadyListener?.let { player.removeListener(it) }
+        pendingStopWhenReadyTimeout?.let { handler.removeCallbacks(it) }
+        pendingStopWhenReadyListener = null
+        pendingStopWhenReadyTimeout = null
+
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(serviceIntent)
