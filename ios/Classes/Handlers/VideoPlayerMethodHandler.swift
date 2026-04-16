@@ -1308,7 +1308,6 @@ extension VideoPlayerView {
         }
 
         guard let player = player, let playerItem = player.currentItem else {
-            print("[VideoPlayer] No current player item for video track disable")
             result(nil)
             return
         }
@@ -1343,12 +1342,10 @@ extension VideoPlayerView {
                    forMediaCharacteristic: .visual
                ) {
                 playerItem.select(nil, in: videoGroup)
-                print("[VideoPlayer] Video track disabled via AVMediaSelectionGroup")
             }
 
             // Strategy 2: Restrict bitrate to audio-only threshold (fallback)
             playerItem.preferredPeakBitRate = 1.0
-            print("[VideoPlayer] preferredPeakBitRate set to 1.0 (audio-only)")
 
             // Enable Now Playing info for lock screen / Control Center
             isAudioOnlyMode = true
@@ -1366,18 +1363,21 @@ extension VideoPlayerView {
                 } else if let firstOption = videoGroup.options.first {
                     playerItem.select(firstOption, in: videoGroup)
                 }
-                print("[VideoPlayer] Video track re-enabled via AVMediaSelectionGroup")
             }
 
-            // Clear bitrate restriction (0 = no limit)
-            playerItem.preferredPeakBitRate = 0
-            print("[VideoPlayer] preferredPeakBitRate cleared (no limit)")
+            // Use a high bitrate first for smoother transition while AVPlayer
+            // starts selecting video variants again.
+            playerItem.preferredPeakBitRate = 10_000_000
 
-            // Clear Now Playing info when returning to video mode
-            isAudioOnlyMode = false
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            hasRegisteredRemoteCommands = false
-            print("[VideoPlayer] Now Playing info cleared")
+            // Defer cleanup/removal of the cap slightly to reduce audible gaps
+            // while the video pipeline is being re-established.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self, weak playerItem] in
+                guard let self = self, let playerItem = playerItem else { return }
+                self.isAudioOnlyMode = false
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                self.hasRegisteredRemoteCommands = false
+                playerItem.preferredPeakBitRate = 0
+            }
         }
 
         result(nil)

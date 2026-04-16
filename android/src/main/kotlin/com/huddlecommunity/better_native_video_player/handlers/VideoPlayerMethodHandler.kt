@@ -915,7 +915,7 @@ class VideoPlayerMethodHandler(
             if (disabled) {
                 notificationHandler.startForegroundPlayback()
             } else {
-                notificationHandler.stopForegroundPlayback()
+                notificationHandler.stopForegroundPlaybackWhenReady()
             }
 
             Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")

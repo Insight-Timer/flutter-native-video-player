@@ -46,6 +46,8 @@ class VideoPlayerNotificationHandler(
     private var mediaSession: MediaSession? = null
     private val handler = Handler(Looper.getMainLooper())
     private var positionUpdateRunnable: Runnable? = null
+    private var pendingStopWhenReadyListener: Player.Listener? = null
+    private var pendingStopWhenReadyTimeout: Runnable? = null
     private val notificationManager: NotificationManager =
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
     private var currentArtwork: Bitmap? = null
@@ -386,10 +388,55 @@ class VideoPlayerNotificationHandler(
      * Call when switching back to video mode from audio mode.
      */
     fun stopForegroundPlayback() {
+        pendingStopWhenReadyListener?.let { player.removeListener(it) }
+        pendingStopWhenReadyTimeout?.let { handler.removeCallbacks(it) }
+        pendingStopWhenReadyListener = null
+        pendingStopWhenReadyTimeout = null
+
         try {
             val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
             context.stopService(serviceIntent)
         } catch (_: Exception) { }
+    }
+
+    /**
+     * Stops the foreground service only after playback returns to STATE_READY.
+     * This keeps process priority elevated while video is being re-enabled.
+     */
+    fun stopForegroundPlaybackWhenReady() {
+        if (player.playbackState == Player.STATE_READY && player.playWhenReady) {
+            stopForegroundPlayback()
+            return
+        }
+
+        pendingStopWhenReadyListener?.let { player.removeListener(it) }
+        pendingStopWhenReadyTimeout?.let { handler.removeCallbacks(it) }
+        pendingStopWhenReadyListener = null
+        pendingStopWhenReadyTimeout = null
+
+        val readyListener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY) {
+                    pendingStopWhenReadyListener?.let { player.removeListener(it) }
+                    pendingStopWhenReadyTimeout?.let { handler.removeCallbacks(it) }
+                    pendingStopWhenReadyListener = null
+                    pendingStopWhenReadyTimeout = null
+                    stopForegroundPlayback()
+                }
+            }
+        }
+
+        val timeoutRunnable = Runnable {
+            pendingStopWhenReadyListener?.let { player.removeListener(it) }
+            pendingStopWhenReadyListener = null
+            pendingStopWhenReadyTimeout = null
+            stopForegroundPlayback()
+        }
+
+        pendingStopWhenReadyListener = readyListener
+        pendingStopWhenReadyTimeout = timeoutRunnable
+        player.addListener(readyListener)
+        handler.postDelayed(timeoutRunnable, 5000)
     }
 
     private fun showNotification() {
