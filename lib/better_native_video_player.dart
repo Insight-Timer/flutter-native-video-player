@@ -20,5 +20,6 @@ export 'src/models/native_video_player_quality.dart';
 export 'src/models/native_video_player_state.dart';
 export 'src/models/native_video_player_subtitle_track.dart';
 export 'src/native_video_player_widget.dart';
+export 'src/platform/native_video_player_system_ui.dart';
 export 'src/platform/platform_utils.dart';
 export 'src/services/airplay_state_manager.dart';
