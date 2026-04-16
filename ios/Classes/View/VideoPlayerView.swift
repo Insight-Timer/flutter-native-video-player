@@ -914,6 +914,15 @@ import QuartzCore
         isDisposed = true
         invalidateEventChannel()
 
+        // Clean up rotation container if still on root view.
+        if isUsingNativeLayout {
+            let playerView = playerViewController.view!
+            let container = playerView.superview
+            playerView.removeFromSuperview()
+            container?.removeFromSuperview()
+            isUsingNativeLayout = false
+        }
+
         // Use the isPipCurrentlyActive flag to check if PiP is active
         let isPipActiveNow = isPipCurrentlyActive
 

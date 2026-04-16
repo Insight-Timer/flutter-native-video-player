@@ -712,6 +712,17 @@ extension VideoPlayerView {
         isDisposed = true
         invalidateEventChannel()
 
+        // Clean up rotation container if still on root view.
+        if isUsingNativeLayout {
+            let playerView = playerViewController.view!
+            let container = playerView.superview
+            playerView.removeFromSuperview()
+            container?.removeFromSuperview()
+            isUsingNativeLayout = false
+            flutterParentView = nil
+            print("🧹 [VideoPlayerMethodHandler] Cleaned up rotation container")
+        }
+
         // Pause the player first
         player?.pause()
         print("⏸️ [VideoPlayerMethodHandler] Player paused")
