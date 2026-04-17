@@ -28,6 +28,16 @@ extension VideoPlayerView {
             name: .AVPlayerItemFailedToPlayToEndTime,
             object: item
         )
+
+        // Register end-of-media observer on every view (including shared/Dart-fullscreen views)
+        // so the notification is handled even when the view that originally called handleLoad
+        // has been disposed or no longer has an active Flutter listener.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(videoDidEnd),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: item
+        )
     }
 
     public override func observeValue(
@@ -284,20 +294,46 @@ extension VideoPlayerView {
     }
 
     @objc func videoDidEnd() {
-        if enableLooping {
-            // For smooth looping, seek to beginning and continue playing
+        // Read looping state from shared storage so it stays consistent across
+        // the inline and Dart-fullscreen views (setLooping on one view must
+        // affect whichever view actually handles end-of-media).
+        let isLooping: Bool
+        if let controllerIdValue = controllerId {
+            isLooping = SharedPlayerManager.shared.isLoopingEnabled(for: controllerIdValue)
+        } else {
+            isLooping = enableLooping
+        }
+
+        if isLooping {
+            // For smooth looping, seek to beginning and continue playing.
+            // iOS AVPlayer does not auto-resume after seeking, so play()
+            // must be called explicitly from the seek completion handler.
+            // Calls from multiple views for the same shared player are idempotent.
             player?.seek(to: .zero) { [weak self] finished in
                 if finished {
-                    // Continue playing for seamless loop
                     self?.player?.play()
                 }
             }
             // Don't send completed event when looping to match Android behavior
             // (Android with REPEAT_MODE_ONE doesn't reach STATE_ENDED)
         } else {
-            // Reset video to the beginning and pause
+            // Reset video to the beginning and pause. These are idempotent on a
+            // shared player so letting every registered view run them is safe.
             player?.seek(to: .zero)
             player?.pause()
+
+            // Emit `completed` from a view whose event channel is live. Views
+            // whose channel has been torn down (e.g. inline view whose widget
+            // is currently hidden behind a Dart fullscreen route) skip emission
+            // so the event lands on the view Dart is actually subscribed to.
+            guard isEventChannelActive, !isDisposed else { return }
+
+            // Dedupe in the rare case that multiple views for the same controller
+            // both have active listeners; only the first claimer emits.
+            if let controllerIdValue = controllerId,
+               !SharedPlayerManager.shared.claimCompletionEmission(for: controllerIdValue) {
+                return
+            }
             sendEvent("completed")
         }
     }

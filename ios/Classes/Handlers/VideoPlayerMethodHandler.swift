@@ -214,18 +214,17 @@ extension VideoPlayerView {
         }
 
         // --- Set up observers for buffer status and player state ---
+        // Note: addObservers also registers the AVPlayerItemDidPlayToEndTime
+        // notification so shared/Dart-fullscreen views receive end-of-media too.
         addObservers(to: playerItem)
 
         // --- Set up periodic time observer for Now Playing elapsed time updates ---
         setupPeriodicTimeObserver()
 
-        // --- Listen for end of playback ---
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(videoDidEnd),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem
-        )
+        // New playback session – clear any stale completion claim from a prior item.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+        }
 
         // --- Observe status (wait for ready) ---
         var statusObserver: NSKeyValueObservation?
@@ -364,6 +363,12 @@ extension VideoPlayerView {
         // Prepare audio session, Now Playing info, and PiP before playback
         prepareForPlayback()
 
+        // User-initiated play starts a new window where `completed` should be
+        // able to fire again when the item reaches end-of-media.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+        }
+
         print("Playing with speed: \(desiredPlaybackSpeed)")
         player?.play()
         // Apply the desired playback speed
@@ -395,6 +400,11 @@ extension VideoPlayerView {
     func handleSeekTo(call: FlutterMethodCall, result: @escaping FlutterResult) {
         if let args = call.arguments as? [String: Any],
            let milliseconds = args["milliseconds"] as? Int {
+            // A user-initiated seek (typically away from end-of-media) re-opens
+            // the window for a future `completed` emission.
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+            }
             let seconds = Double(milliseconds) / 1000.0
             player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 1000)) { _ in
                 self.sendEvent("seek", data: ["position": milliseconds])
@@ -442,8 +452,15 @@ extension VideoPlayerView {
            let looping = args["looping"] as? Bool {
             print("Setting looping to: \(looping)")
 
-            // Update the enableLooping property
+            // Update the per-view flag for backward compatibility.
             enableLooping = looping
+
+            // Mirror into shared storage so whichever view actually handles the
+            // end-of-media notification sees the live value, even if setLooping
+            // was called on a different view for the same controller.
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setLoopingEnabled(for: controllerIdValue, enabled: looping)
+            }
 
             result(nil)
         } else {
@@ -711,6 +728,17 @@ extension VideoPlayerView {
         print("🗑️ [VideoPlayerMethodHandler] handleDispose called for controllerId: \(String(describing: controllerId))")
         isDisposed = true
         invalidateEventChannel()
+
+        // Clean up rotation container if still on root view.
+        if isUsingNativeLayout {
+            let playerView = playerViewController.view!
+            let container = playerView.superview
+            playerView.removeFromSuperview()
+            container?.removeFromSuperview()
+            isUsingNativeLayout = false
+            flutterParentView = nil
+            print("🧹 [VideoPlayerMethodHandler] Cleaned up rotation container")
+        }
 
         // Pause the player first
         player?.pause()

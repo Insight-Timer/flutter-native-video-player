@@ -442,6 +442,31 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Reparents the native player view from Flutter's container to the root
+  /// UIViewController's view with Auto Layout constraints (edge-pinned).
+  /// Use this before an orientation change so iOS animates the view smoothly.
+  Future<void> useNativeLayout() async {
+    try {
+      await _methodChannel.invokeMethod<void>('useNativeLayout', <String, Object>{
+        'viewId': primaryPlatformViewId,
+      });
+    } catch (e) {
+      debugPrint('Error calling useNativeLayout: $e');
+    }
+  }
+
+  /// Returns the native player view to Flutter's layout control.
+  /// Call this after the orientation transition settles.
+  Future<void> useFlutterLayout() async {
+    try {
+      await _methodChannel.invokeMethod<void>('useFlutterLayout', <String, Object>{
+        'viewId': primaryPlatformViewId,
+      });
+    } catch (e) {
+      debugPrint('Error calling useFlutterLayout: $e');
+    }
+  }
+
   /// Asks the native side to ensure the player surface is connected to this view.
   /// Called when reconnecting after all platform views were disposed (e.g. list→detail→back).
   Future<void> ensureSurfaceConnected() async {
