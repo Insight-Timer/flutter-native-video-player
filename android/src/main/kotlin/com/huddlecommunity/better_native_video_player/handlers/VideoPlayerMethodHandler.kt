@@ -2,11 +2,7 @@ package com.huddlecommunity.better_native_video_player.handlers
 
 import android.app.Activity
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.net.Uri
-import android.os.Build
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -45,25 +41,6 @@ class VideoPlayerMethodHandler(
         private const val TAG = "VideoPlayerMethod"
     }
 
-    private val audioManager: AudioManager =
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private var audioFocusRequest: AudioFocusRequest? = null
-    private val legacyAudioFocusListener = AudioManager.OnAudioFocusChangeListener { }
-
-    private val audioFocusPlaybackListener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) {
-                requestAudioFocusForPlayback()
-            } else {
-                abandonAudioFocusForPlayback()
-            }
-        }
-    }
-
-    init {
-        player.addListener(audioFocusPlaybackListener)
-    }
-
     private var availableQualities: List<Map<String, Any>> = emptyList()
     private var isAutoQuality = false
     private var lastBitrateCheck = 0L
@@ -72,45 +49,6 @@ class VideoPlayerMethodHandler(
 
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
-
-    private fun requestAudioFocusForPlayback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (audioFocusRequest == null) {
-                val attrs = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .build()
-                audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(attrs)
-                    .build()
-            }
-            audioFocusRequest?.let { request ->
-                val result = audioManager.requestAudioFocus(request)
-                if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    Log.d(TAG, "Audio focus requested and granted")
-                }
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                legacyAudioFocusListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN
-            )
-        }
-    }
-
-    private fun abandonAudioFocusForPlayback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { request ->
-                audioManager.abandonAudioFocusRequest(request)
-                audioFocusRequest = null
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(legacyAudioFocusListener)
-        }
-    }
 
     /**
      * Handles incoming method calls from Flutter
@@ -351,7 +289,6 @@ class VideoPlayerMethodHandler(
                     // Auto play if requested - MUST be done after player is ready
                     if (autoPlay) {
                         Log.d(TAG, "Auto-playing video after ready")
-                        requestAudioFocusForPlayback()
                         player.play()
                         // Play event will be sent automatically by VideoPlayerObserver
                     }
@@ -372,7 +309,6 @@ class VideoPlayerMethodHandler(
      * Starts playback
      */
     private fun handlePlay(result: MethodChannel.Result) {
-        requestAudioFocusForPlayback()
         player.play()
         result.success(null)
     }
@@ -382,7 +318,6 @@ class VideoPlayerMethodHandler(
      */
     private fun handlePause(result: MethodChannel.Result) {
         player.pause()
-        abandonAudioFocusForPlayback()
         result.success(null)
     }
 
@@ -585,8 +520,6 @@ class VideoPlayerMethodHandler(
      * Disposes the player
      */
     private fun handleDispose(result: MethodChannel.Result) {
-        player.removeListener(audioFocusPlaybackListener)
-        abandonAudioFocusForPlayback()
         player.stop()
 
         // Remove from shared manager if this is a shared player
