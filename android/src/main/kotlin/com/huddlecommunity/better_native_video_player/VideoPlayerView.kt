@@ -134,7 +134,13 @@ class VideoPlayerView(
             Log.d(TAG, "No controller ID provided, creating new player")
             isSharedPlayer = false
             ExoPlayer.Builder(context)
-                .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    true
+                )
                 .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()

@@ -3,6 +3,7 @@ package com.huddlecommunity.better_native_video_player.manager
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.AudioAttributes
 import androidx.media3.exoplayer.ExoPlayer
 import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
@@ -37,7 +38,13 @@ object SharedPlayerManager {
         val alreadyExisted = players.containsKey(controllerId)
         val player = players.getOrPut(controllerId) {
             ExoPlayer.Builder(context)
-                .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    true
+                )
                 .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
@@ -175,7 +182,10 @@ object SharedPlayerManager {
      * Stops the MediaSessionService
      */
     private fun stopMediaSessionService(context: Context) {
-        VideoPlayerMediaSessionService.setMediaSession(null)
+        // Nuclear reset — clearAll() / last-player-removed code paths only.
+        // Per-handler cleanup is handled by VideoPlayerNotificationHandler.release()
+        // via clearActiveSessionIfMatches().
+        VideoPlayerMediaSessionService.setActiveSession(null)
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         context.stopService(serviceIntent)
     }

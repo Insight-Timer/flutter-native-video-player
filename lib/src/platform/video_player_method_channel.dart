@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../models/native_video_player_quality.dart';
 import '../models/native_video_player_subtitle_track.dart';
+import '../models/native_video_player_track_disable_result.dart';
 
 /// Handles all method channel communication with the native platform
 class VideoPlayerMethodChannel {
@@ -186,6 +187,40 @@ class VideoPlayerMethodChannel {
     } catch (e) {
       debugPrint('Error calling setSubtitleTrack: $e');
     }
+  }
+
+  /// Disables or enables the video track in the native player.
+  ///
+  /// When [disabled] is true, the native player stops downloading video segments
+  /// from HLS demuxed streams, saving bandwidth during background playback.
+  /// Audio continues uninterrupted.
+  ///
+  /// When [disabled] is false, video segment downloads resume from the current position.
+  ///
+  /// Returns a [VideoTrackDisableResult] describing what happened:
+  /// - [VideoTrackDisableStatus.ok] — the toggle was applied.
+  /// - [VideoTrackDisableStatus.skippedNoDemuxedAudio] — the stream has no
+  ///   separate audio rendition, so disabling video would kill audio too.
+  ///   The caller should either pick a different stream or not disable.
+  /// Propagates [PlatformException] on native errors so callers can react.
+  Future<VideoTrackDisableResult> setVideoTrackDisabled(bool disabled) async {
+    final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+      'setVideoTrackDisabled',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'disabled': disabled,
+      },
+    );
+    if (result is Map && result['skipped'] == true) {
+      final reason = result['reason'];
+      if (reason == 'no_demuxed_audio') {
+        return const VideoTrackDisableResult(
+          VideoTrackDisableStatus.skippedNoDemuxedAudio,
+        );
+      }
+      return const VideoTrackDisableResult(VideoTrackDisableStatus.skipped);
+    }
+    return const VideoTrackDisableResult(VideoTrackDisableStatus.ok);
   }
 
   /// Checks if Picture-in-Picture is available

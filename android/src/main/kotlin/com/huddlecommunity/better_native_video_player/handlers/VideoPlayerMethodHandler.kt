@@ -2,11 +2,7 @@ package com.huddlecommunity.better_native_video_player.handlers
 
 import android.app.Activity
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.net.Uri
-import android.os.Build
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -45,25 +41,6 @@ class VideoPlayerMethodHandler(
         private const val TAG = "VideoPlayerMethod"
     }
 
-    private val audioManager: AudioManager =
-        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private var audioFocusRequest: AudioFocusRequest? = null
-    private val legacyAudioFocusListener = AudioManager.OnAudioFocusChangeListener { }
-
-    private val audioFocusPlaybackListener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) {
-                requestAudioFocusForPlayback()
-            } else {
-                abandonAudioFocusForPlayback()
-            }
-        }
-    }
-
-    init {
-        player.addListener(audioFocusPlaybackListener)
-    }
-
     private var availableQualities: List<Map<String, Any>> = emptyList()
     private var isAutoQuality = false
     private var lastBitrateCheck = 0L
@@ -72,45 +49,6 @@ class VideoPlayerMethodHandler(
 
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
-
-    private fun requestAudioFocusForPlayback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (audioFocusRequest == null) {
-                val attrs = AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .build()
-                audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(attrs)
-                    .build()
-            }
-            audioFocusRequest?.let { request ->
-                val result = audioManager.requestAudioFocus(request)
-                if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    Log.d(TAG, "Audio focus requested and granted")
-                }
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                legacyAudioFocusListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN
-            )
-        }
-    }
-
-    private fun abandonAudioFocusForPlayback() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { request ->
-                audioManager.abandonAudioFocusRequest(request)
-                audioFocusRequest = null
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(legacyAudioFocusListener)
-        }
-    }
 
     /**
      * Handles incoming method calls from Flutter
@@ -130,6 +68,7 @@ class VideoPlayerMethodHandler(
             "getAvailableQualities" -> handleGetAvailableQualities(result)
             "getAvailableSubtitleTracks" -> handleGetAvailableSubtitleTracks(result)
             "setSubtitleTrack" -> handleSetSubtitleTrack(call, result)
+            "setVideoTrackDisabled" -> handleSetVideoTrackDisabled(call, result)
             "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
             "exitFullScreen" -> handleExitFullScreen(result)
@@ -350,7 +289,6 @@ class VideoPlayerMethodHandler(
                     // Auto play if requested - MUST be done after player is ready
                     if (autoPlay) {
                         Log.d(TAG, "Auto-playing video after ready")
-                        requestAudioFocusForPlayback()
                         player.play()
                         // Play event will be sent automatically by VideoPlayerObserver
                     }
@@ -371,7 +309,6 @@ class VideoPlayerMethodHandler(
      * Starts playback
      */
     private fun handlePlay(result: MethodChannel.Result) {
-        requestAudioFocusForPlayback()
         player.play()
         result.success(null)
     }
@@ -381,7 +318,6 @@ class VideoPlayerMethodHandler(
      */
     private fun handlePause(result: MethodChannel.Result) {
         player.pause()
-        abandonAudioFocusForPlayback()
         result.success(null)
     }
 
@@ -584,14 +520,18 @@ class VideoPlayerMethodHandler(
      * Disposes the player
      */
     private fun handleDispose(result: MethodChannel.Result) {
-        player.removeListener(audioFocusPlaybackListener)
-        abandonAudioFocusForPlayback()
         player.stop()
 
-        // Remove from shared manager if this is a shared player
         if (controllerId != null) {
+            // Shared player: SharedPlayerManager.removePlayer() releases the
+            // notification handler, stops the service, and releases the player.
             SharedPlayerManager.removePlayer(context, controllerId)
             Log.d(TAG, "Removed shared player for controller ID: $controllerId")
+        } else {
+            // Non-shared player: tear down the foreground service and MediaSession
+            // here rather than relying on PlatformView.dispose() running first.
+            // release() is idempotent, so a later dispose call is safe.
+            notificationHandler.release()
         }
 
         eventHandler.sendEvent("stopped")
@@ -868,6 +808,60 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting subtitle track: ${e.message}", e)
             result.error("ERROR", "Failed to set subtitle track: ${e.message}", null)
+        }
+    }
+
+    /**
+     * Disables or enables the video track.
+     *
+     * When disabled on a demuxed HLS stream, ExoPlayer stops selecting video renditions
+     * and only fetches audio segments — saving bandwidth during background playback.
+     *
+     * When re-enabled, ExoPlayer resumes video segment downloads from the current position.
+     *
+     * Uses the same trackSelectionParameters API as subtitle disabling.
+     */
+    private fun handleSetVideoTrackDisabled(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val disabled = args?.get("disabled") as? Boolean ?: false
+
+            Log.d(TAG, "Setting video track disabled: $disabled")
+
+            if (disabled) {
+                // Check if HLS has demuxed (separate) audio tracks.
+                // If audio is muxed inside video segments, disabling video
+                // will not save bandwidth, so skip.
+                val hasDemuxedAudio = player.currentTracks.groups.any {
+                    it.type == C.TRACK_TYPE_AUDIO
+                }
+                if (!hasDemuxedAudio) {
+                    result.success(mapOf("skipped" to true, "reason" to "no_demuxed_audio"))
+                    return
+                }
+            }
+
+            val newParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
+                .build()
+
+            player.trackSelectionParameters = newParameters
+
+            // Start/stop the foreground service based on audio-only mode.
+            // When video track is disabled → audio-only → show notification.
+            // When video track is re-enabled → video mode → remove notification.
+            if (disabled) {
+                notificationHandler.startForegroundPlayback()
+            } else {
+                notificationHandler.stopForegroundPlayback()
+            }
+
+            Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
+            result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
         }
     }
 }
