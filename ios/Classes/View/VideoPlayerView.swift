@@ -90,6 +90,16 @@ import QuartzCore
     // Store HDR setting
     var enableHDR: Bool = false
 
+    // MARK: - Native Layout (orientation transition workaround)
+    // When true, the player view has been reparented to the root view with Auto Layout
+    // constraints so it stays centered during iOS orientation animations, bypassing
+    // Flutter's layout which looks broken during transitions.
+    var isUsingNativeLayout: Bool = false
+    var nativeLayoutConstraints: [NSLayoutConstraint] = []
+    weak var flutterParentView: UIView?
+    var flutterFrame: CGRect = .zero
+    var portraitPlayerRectInRoot: CGRect?
+
     // Store looping setting
     var enableLooping: Bool = false
 
@@ -356,6 +366,101 @@ import QuartzCore
         return playerViewController.view
     }
 
+    // MARK: - Native Layout Overlay
+
+    /// Reparents the player view from Flutter's container to the root view
+    /// with edge-pinned Auto Layout constraints. The live video rotates
+    /// smoothly with iOS while Flutter re-layouts underneath.
+    func handleUseNativeLayout(result: @escaping FlutterResult) {
+        guard !isUsingNativeLayout else {
+            result(nil)
+            return
+        }
+
+        let playerView = playerViewController.view!
+        guard let rootView = UIApplication.shared.delegate?.window??.rootViewController?.view else {
+            print("⚠️ [NativeLayout] Could not find root view — skipping")
+            result(FlutterError(code: "NO_ROOT_VIEW", message: "Could not find root view controller", details: nil))
+            return
+        }
+
+        flutterParentView = playerView.superview
+        flutterFrame = playerView.frame
+
+        // Get player's exact screen position before reparenting.
+        let currentRectInRoot = playerView.convert(playerView.bounds, to: rootView)
+
+        // Remember portrait position for the reverse rotation.
+        let isCurrentlyPortrait = rootView.bounds.height > rootView.bounds.width
+        if isCurrentlyPortrait {
+            portraitPlayerRectInRoot = currentRectInRoot
+        }
+
+        // Reparent into a container on the root view. The container is
+        // edge-pinned; the player view starts at its exact screen position
+        // and animates to fullscreen (or back to portrait rect) when iOS
+        // rotation changes the bounds.
+        let container = RotationReparentContainer(
+            childView: playerView,
+            initialRect: currentRectInRoot,
+            portraitRect: portraitPlayerRectInRoot
+        )
+        container.translatesAutoresizingMaskIntoConstraints = false
+        rootView.addSubview(container)
+
+        nativeLayoutConstraints = [
+            container.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
+            container.topAnchor.constraint(equalTo: rootView.topAnchor),
+            container.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(nativeLayoutConstraints)
+
+        isUsingNativeLayout = true
+        print("✅ [NativeLayout] Player view reparented to root view")
+        result(nil)
+    }
+
+    /// Returns the player view to Flutter's container.
+    func handleUseFlutterLayout(result: @escaping FlutterResult) {
+        guard isUsingNativeLayout else {
+            result(nil)
+            return
+        }
+
+        let playerView = playerViewController.view!
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+
+        // Remove the container (which holds the player view) from root.
+        let container = playerView.superview
+        NSLayoutConstraint.deactivate(nativeLayoutConstraints)
+        nativeLayoutConstraints = []
+
+        // Move player view back to Flutter's container.
+        playerView.removeFromSuperview()
+        playerView.translatesAutoresizingMaskIntoConstraints = true
+
+        if let parent = flutterParentView {
+            parent.addSubview(playerView)
+            playerView.frame = parent.bounds
+            playerView.layoutIfNeeded()
+        } else {
+            print("⚠️ [NativeLayout] Flutter parent was deallocated")
+        }
+
+        // Clean up the container.
+        container?.removeFromSuperview()
+
+        CATransaction.commit()
+
+        isUsingNativeLayout = false
+        flutterParentView = nil
+        print("✅ [NativeLayout] Player view returned to Flutter layout")
+        result(nil)
+    }
+
     // MARK: - Audio Session Management
 
     /// Prepares and activates the audio session for video playback
@@ -429,6 +534,10 @@ import QuartzCore
             handleSetUseAspectFill(call: call, result: result)
         case "getVideoDimensions":
             handleGetVideoDimensions(result: result)
+        case "useNativeLayout":
+            handleUseNativeLayout(result: result)
+        case "useFlutterLayout":
+            handleUseFlutterLayout(result: result)
         case "ensureSurfaceConnected":
             // No-op on iOS; each platform view uses its own AVPlayerViewController when shared.
             result(nil)
@@ -805,6 +914,15 @@ import QuartzCore
         isDisposed = true
         invalidateEventChannel()
 
+        // Clean up rotation container if still on root view.
+        if isUsingNativeLayout {
+            let playerView = playerViewController.view!
+            let container = playerView.superview
+            playerView.removeFromSuperview()
+            container?.removeFromSuperview()
+            isUsingNativeLayout = false
+        }
+
         // Use the isPipCurrentlyActive flag to check if PiP is active
         let isPipActiveNow = isPipCurrentlyActive
 
@@ -1086,5 +1204,62 @@ import QuartzCore
         @unknown default:
             break
         }
+    }
+}
+
+// MARK: - Rotation Reparent Container
+
+/// Edge-pinned container on the root view that holds the reparented player view.
+/// Starts the child at its exact screen position (matching Flutter's layout)
+/// and animates to fullscreen when iOS rotation changes the bounds.
+/// `layoutSubviews` is called inside iOS's rotation animation block,
+/// so the frame change is automatically animated.
+private class RotationReparentContainer: UIView {
+    private let initialRect: CGRect
+    private let portraitRect: CGRect?
+    private var previousBoundsSize: CGSize = .zero
+    private var hasRotated = false
+
+    init(childView: UIView, initialRect: CGRect, portraitRect: CGRect?) {
+        self.initialRect = initialRect
+        self.portraitRect = portraitRect
+        super.init(frame: .zero)
+
+        backgroundColor = .black
+        clipsToBounds = true
+
+        childView.removeFromSuperview()
+        childView.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(childView)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let child = subviews.first else { return }
+
+        if !hasRotated {
+            if previousBoundsSize == .zero {
+                child.frame = initialRect
+            } else if bounds.size != previousBoundsSize {
+                hasRotated = true
+                let isRotatingToPortrait = bounds.height > bounds.width
+                if isRotatingToPortrait, let pRect = portraitRect {
+                    child.frame = pRect
+                } else {
+                    child.frame = bounds
+                }
+            }
+        } else {
+            let isPortrait = bounds.height > bounds.width
+            if isPortrait, let pRect = portraitRect {
+                child.frame = pRect
+            } else {
+                child.frame = bounds
+            }
+        }
+
+        previousBoundsSize = bounds.size
     }
 }
