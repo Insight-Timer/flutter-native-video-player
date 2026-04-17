@@ -210,7 +210,20 @@ import QuartzCore
             enableHDR = args["enableHDR"] as? Bool ?? false
 
             // Looping configuration from args
-            enableLooping = args["enableLooping"] as? Bool ?? false
+            let argsEnableLooping = args["enableLooping"] as? Bool ?? false
+            // Prefer any live value another view already stored for this controller;
+            // otherwise seed the shared state from this view's args so both inline
+            // and Dart-fullscreen views agree.
+            if let controllerIdValue = controllerId {
+                if let shared = SharedPlayerManager.shared.storedLoopingValue(for: controllerIdValue) {
+                    enableLooping = shared
+                } else {
+                    enableLooping = argsEnableLooping
+                    SharedPlayerManager.shared.setLoopingEnabled(for: controllerIdValue, enabled: argsEnableLooping)
+                }
+            } else {
+                enableLooping = argsEnableLooping
+            }
 
             // For shared players, try to get PiP settings from SharedPlayerManager
             // This ensures PiP settings persist across all views using the same controller

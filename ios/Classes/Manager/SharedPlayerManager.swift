@@ -57,6 +57,16 @@ class SharedPlayerManager: NSObject {
     /// These persist to send PiP and AirPlay events even when all views are disposed
     private var controllerEventSinks: [Int: FlutterEventSink] = [:]
 
+    /// Track looping state per controller so all views (inline + fullscreen) agree.
+    /// Without this, setLooping(true) on one view would not affect the other view
+    /// that actually receives the end-of-media notification.
+    private var loopingByController: [Int: Bool] = [:]
+
+    /// Track whether the end-of-media `completed` event has already been emitted
+    /// for the current playback session. Used to dedupe when multiple views
+    /// (e.g. inline + Dart fullscreen) observe the same AVPlayerItem.
+    private var completionClaimed: [Int: Bool] = [:]
+
     struct PipSettings {
         let allowsPictureInPicture: Bool
         let canStartPictureInPictureAutomatically: Bool
@@ -167,6 +177,41 @@ class SharedPlayerManager: NSObject {
     /// Returns nil if no media info has been stored for this controller
     func getMediaInfo(for controllerId: Int) -> [String: Any]? {
         return mediaInfoCache[controllerId]
+    }
+
+    // MARK: - Looping State
+
+    /// Sets the looping flag for a controller so all views share the same value.
+    func setLoopingEnabled(for controllerId: Int, enabled: Bool) {
+        loopingByController[controllerId] = enabled
+    }
+
+    /// Returns the looping flag for a controller (defaults to false).
+    func isLoopingEnabled(for controllerId: Int) -> Bool {
+        return loopingByController[controllerId] ?? false
+    }
+
+    /// Returns the stored looping flag, or nil if nothing has been stored yet.
+    /// Lets callers distinguish "explicitly set to false" from "never seeded".
+    func storedLoopingValue(for controllerId: Int) -> Bool? {
+        return loopingByController[controllerId]
+    }
+
+    // MARK: - End-of-Media Completion Claim
+
+    /// Atomically claims the right to emit `completed` for this controller's
+    /// current playback session. Returns true the first time it is called
+    /// per session; subsequent calls return false until the flag is reset.
+    func claimCompletionEmission(for controllerId: Int) -> Bool {
+        if completionClaimed[controllerId] == true { return false }
+        completionClaimed[controllerId] = true
+        return true
+    }
+
+    /// Clears the completion claim so the next end-of-media can emit again.
+    /// Called when a new item is loaded, the user resumes playback, or seeks.
+    func resetCompletionClaim(for controllerId: Int) {
+        completionClaimed.removeValue(forKey: controllerId)
     }
 
     // MARK: - Controller Event Channel Methods
@@ -303,6 +348,10 @@ class SharedPlayerManager: NSObject {
         // Clear manual PiP flag
         controllersWithManualPiP.remove(controllerId)
 
+        // Clear looping and completion-claim state
+        loopingByController.removeValue(forKey: controllerId)
+        completionClaimed.removeValue(forKey: controllerId)
+
         print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
 
@@ -324,6 +373,8 @@ class SharedPlayerManager: NSObject {
         mediaInfoCache.removeAll()
         controllerWithAutomaticPiP = nil
         controllersWithManualPiP.removeAll()
+        loopingByController.removeAll()
+        completionClaimed.removeAll()
     }
 
     // MARK: - AirPlay Route Detection
