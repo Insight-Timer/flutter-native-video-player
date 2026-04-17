@@ -522,10 +522,16 @@ class VideoPlayerMethodHandler(
     private fun handleDispose(result: MethodChannel.Result) {
         player.stop()
 
-        // Remove from shared manager if this is a shared player
         if (controllerId != null) {
+            // Shared player: SharedPlayerManager.removePlayer() releases the
+            // notification handler, stops the service, and releases the player.
             SharedPlayerManager.removePlayer(context, controllerId)
             Log.d(TAG, "Removed shared player for controller ID: $controllerId")
+        } else {
+            // Non-shared player: tear down the foreground service and MediaSession
+            // here rather than relying on PlatformView.dispose() running first.
+            // release() is idempotent, so a later dispose call is safe.
+            notificationHandler.release()
         }
 
         eventHandler.sendEvent("stopped")

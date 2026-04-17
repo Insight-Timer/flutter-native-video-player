@@ -182,7 +182,10 @@ object SharedPlayerManager {
      * Stops the MediaSessionService
      */
     private fun stopMediaSessionService(context: Context) {
-        VideoPlayerMediaSessionService.setMediaSession(null)
+        // Nuclear reset — clearAll() / last-player-removed code paths only.
+        // Per-handler cleanup is handled by VideoPlayerNotificationHandler.release()
+        // via clearActiveSessionIfMatches().
+        VideoPlayerMediaSessionService.setActiveSession(null)
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         context.stopService(serviceIntent)
     }

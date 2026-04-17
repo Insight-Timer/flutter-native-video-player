@@ -13,6 +13,7 @@ import '../models/native_video_player_media_info.dart';
 import '../models/native_video_player_quality.dart';
 import '../models/native_video_player_state.dart';
 import '../models/native_video_player_subtitle_track.dart';
+import '../models/native_video_player_track_disable_result.dart';
 import '../platform/platform_utils.dart';
 import '../platform/video_player_method_channel.dart';
 import '../services/airplay_state_manager.dart';
@@ -1878,16 +1879,29 @@ class NativeVideoPlayerController {
     await _methodChannel?.setSubtitleTrack(track);
   }
 
-  /// Disables or enables the video track in the native player.
+  /// Disables or enables the video track for background audio-only playback.
   ///
-  /// When [disabled] is true, only audio segments are downloaded from HLS
-  /// demuxed streams. This is designed for background audio-only playback
-  /// to save bandwidth.
+  /// When [disabled] is true, the native player stops downloading video
+  /// segments from demuxed HLS streams while audio continues uninterrupted.
+  /// On Android this also promotes a foreground MediaSessionService so audio
+  /// keeps playing with a lock-screen notification when the app is backgrounded.
   ///
-  /// Call with `true` when the app goes to background,
-  /// `false` when returning to foreground.
-  Future<void> setVideoTrackDisabled(bool disabled) async {
-    await _methodChannel?.setVideoTrackDisabled(disabled);
+  /// Contract:
+  /// - The caller owns lifecycle: toggle from a `WidgetsBindingObserver` /
+  ///   `AppLifecycleState` listener — this plugin does not watch app state.
+  /// - On iOS, the host app must include `audio` in `UIBackgroundModes` for
+  ///   playback to survive backgrounding.
+  /// - If the stream has no demuxed audio rendition (audio is muxed into video
+  ///   segments), disabling video would kill audio too, so the call is a
+  ///   no-op and returns [VideoTrackDisableStatus.skippedNoDemuxedAudio].
+  ///
+  /// Throws [PlatformException] on native errors so callers can react.
+  Future<VideoTrackDisableResult> setVideoTrackDisabled(bool disabled) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return const VideoTrackDisableResult(VideoTrackDisableStatus.skipped);
+    }
+    return channel.setVideoTrackDisabled(disabled);
   }
 
   /// Returns whether Picture-in-Picture is available on this device
