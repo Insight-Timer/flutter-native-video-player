@@ -22,7 +22,8 @@ import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionSer
 class VideoPlayerNotificationHandler(
     private val context: Context,
     private val player: ExoPlayer,
-    private var eventHandler: VideoPlayerEventHandler
+    private var eventHandler: VideoPlayerEventHandler,
+    private val disableMediaSession: Boolean = false
 ) {
     companion object {
         private var sessionCounter = 0
@@ -175,6 +176,9 @@ class VideoPlayerNotificationHandler(
      * shows ⏮/⏭ without requiring a session recreation.
      */
     fun updateTrackNavFlags(mediaInfo: Map<String, Any>?) {
+        if (disableMediaSession) {
+            return
+        }
         val newShowPrev = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
         val newShowNext = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
         showSystemPreviousTrackControl = newShowPrev
@@ -224,6 +228,9 @@ class VideoPlayerNotificationHandler(
      * [startForegroundPlayback] when switching to audio-only or background mode.
      */
     fun setupMediaSession(mediaInfo: Map<String, Any>?) {
+        if (disableMediaSession) {
+            return
+        }
         val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
         val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
         val newShowSkipControls = (mediaInfo?.get("showSkipControls") as? Boolean) ?: true
@@ -289,6 +296,9 @@ class VideoPlayerNotificationHandler(
      * contract is "audio-only playback in the background" with a single visible player.
      */
     fun startForegroundPlayback() {
+        if (disableMediaSession) {
+            return
+        }
         if (foregroundRequested) return
         val session = mediaSession ?: return
 

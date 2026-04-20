@@ -20,6 +20,7 @@ class VideoPlayerMethodChannel {
     Map<String, String>? headers,
     Map<String, dynamic>? mediaInfo,
     Map<String, dynamic>? drmConfig,
+    bool disableMediaSession = false,
   }) async {
     final Map<String, Object> params = <String, Object>{
       'url': url,
@@ -38,6 +39,8 @@ class VideoPlayerMethodChannel {
     if (drmConfig != null) {
       params['drmConfig'] = drmConfig;
     }
+
+    params['disableMediaSession'] = disableMediaSession;
 
     await _methodChannel.invokeMethod<void>('load', params);
   }

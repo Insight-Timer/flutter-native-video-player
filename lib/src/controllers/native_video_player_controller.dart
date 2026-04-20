@@ -55,6 +55,8 @@ class NativeVideoPlayerController {
     this.enableLooping = false,
     this.showNativeControls = true,
     this.useAspectFill = false,
+    this.disableMediaSession = false,
+    this.useExternalPlayer = false,
     List<DeviceOrientation>? preferredOrientations,
   }) {
     // Set preferred orientations if provided
@@ -147,6 +149,27 @@ class NativeVideoPlayerController {
   /// Whether to show native player controls (default: true)
   /// When set to false, native controls are hidden. Custom overlays automatically hide native controls regardless of this setting.
   final bool showNativeControls;
+
+  /// When true, suppresses the native MediaSession (Android) and
+  /// MPNowPlayingInfoCenter/MPRemoteCommandCenter setup (iOS) for this
+  /// player instance. Use this when an outer layer (e.g. the app's own
+  /// audio media-session service) will drive the system notification
+  /// and transport commands instead of this player.
+  final bool disableMediaSession;
+
+  /// When true, the fork skips creating its own ExoPlayer (Android) and
+  /// fetches the player from SharedPlayerManager — which, when the host
+  /// app's audio MediaSessionService is running, will return an
+  /// externally-owned ExoPlayer. Also skips MediaSession / NowPlaying
+  /// / foreground-service setup entirely. Used by the unified-player
+  /// architecture where one player drives both audio and video.
+  ///
+  /// Implies [disableMediaSession] on Android — you don't need to set both.
+  /// On iOS this flag is currently ignored (iOS keeps the existing
+  /// two-player model; iOS work is out of scope for this refactor).
+  ///
+  /// Default false preserves existing behavior (fork owns its own player).
+  final bool useExternalPlayer;
 
   /// Whether to render video in aspect-fill mode (zoom/crop to fill).
   /// When false, uses aspect-fit.
@@ -825,6 +848,8 @@ class NativeVideoPlayerController {
     'enableHDR': enableHDR,
     'enableLooping': enableLooping,
     'useAspectFill': useAspectFill,
+    'disableMediaSession': disableMediaSession,
+    'useExternalPlayer': useExternalPlayer,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
 
@@ -1721,6 +1746,7 @@ class NativeVideoPlayerController {
         headers: headers,
         mediaInfo: mediaInfo?.toMap(),
         drmConfig: drmConfig,
+        disableMediaSession: disableMediaSession,
       );
 
       // Fetch available qualities after loading

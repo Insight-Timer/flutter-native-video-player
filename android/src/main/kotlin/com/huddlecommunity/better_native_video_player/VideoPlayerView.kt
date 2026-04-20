@@ -5,6 +5,8 @@ import android.app.Dialog
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
@@ -49,8 +51,29 @@ class VideoPlayerView(
     }
 
     private val playerView: PlayerView
-    private val player: ExoPlayer
+    private var player: ExoPlayer
     private val controllerId: Int?
+
+    // When true, this view created its own ExoPlayer (the external-player
+    // fallback path) and must release it on dispose. False when the player
+    // is externally-owned (fork never releases) or shared via
+    // SharedPlayerManager (the manager handles lifecycle).
+    private var ownsPlayerLifecycle: Boolean = false
+
+    // Mirrors the local isSharedPlayer flag computed in init so that
+    // rebindToExternalPlayer can flip ownership semantics when we swap the
+    // fallback for the host-registered external player.
+    private var isSharedPlayer: Boolean = false
+
+    // Listener registered with SharedPlayerManager when the init block used the
+    // internal-fallback path instead of the external player. Invoked once, from
+    // setExternalPlayer, to trigger rebind. Null if fallback wasn't used.
+    private var pendingExternalRebindListener: ((ExoPlayer) -> Unit)? = null
+
+    // Handler bound to the main looper, used to post rebind work back to the
+    // main thread from SharedPlayerManager's listener invocation (which may
+    // occur on whatever thread registered the external player).
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // Container that holds the player view
     // This is what Flutter sees - the player view can be moved in/out of it
@@ -95,6 +118,14 @@ class VideoPlayerView(
         // Extract controller ID from args
         controllerId = args?.get("controllerId") as? Int
 
+        // Extract disableMediaSession flag from args (host-app opt-out for fork's own MediaSession)
+        val disableMediaSession = (args?.get("disableMediaSession") as? Boolean) ?: false
+
+        // When true, skip internal ExoPlayer creation and fetch from SharedPlayerManager,
+        // which — when the host app's audio service has registered an external player — returns
+        // that external ExoPlayer. Also skip MediaSession / foreground-service setup.
+        val useExternalPlayer = (args?.get("useExternalPlayer") as? Boolean) ?: false
+
         // Extract initial fullscreen state from args
         isFullScreen = args?.get("isFullScreen") as? Boolean ?: false
         Log.d(TAG, "Initial fullscreen state: $isFullScreen")
@@ -120,10 +151,51 @@ class VideoPlayerView(
         }
 
         // Get or create shared player
-        val isSharedPlayer: Boolean
-        player = if (controllerId != null) {
+        player = if (useExternalPlayer) {
+            // useExternalPlayer=true: prefer the externally-registered ExoPlayer
+            // (registered by the host app's audio MediaSessionService). If the
+            // host hasn't registered one yet (e.g. audio service not started),
+            // log a warning and build a fresh internal ExoPlayer instead of
+            // hard-crashing — the widget may mount before the audio service
+            // finishes initializing.
+            val external = SharedPlayerManager.getExternalPlayer()
+            if (external != null) {
+                isSharedPlayer = true
+                ownsPlayerLifecycle = false
+                external
+            } else {
+                Log.w(
+                    TAG,
+                    "external player not yet registered (likely audio service startup race); " +
+                        "using internal fallback for viewId=$viewId"
+                )
+                isSharedPlayer = false
+                ownsPlayerLifecycle = true
+                val fallbackPlayer = ExoPlayer.Builder(context)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(C.USAGE_MEDIA)
+                            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                            .build(),
+                        false // host audio service owns focus; fallback must not fight for it
+                    )
+                    .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+                    .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
+                    .build()
+                // Register rebind listener — when the host audio service eventually
+                // registers its external player, we swap our fallback for the external
+                // one so this view's rendering surface attaches to the correct player.
+                val listener: (ExoPlayer) -> Unit = { newPlayer ->
+                    mainHandler.post { rebindToExternalPlayer(newPlayer) }
+                }
+                pendingExternalRebindListener = listener
+                SharedPlayerManager.addExternalPlayerListener(listener)
+                fallbackPlayer
+            }
+        } else if (controllerId != null) {
             val (sharedPlayer, alreadyExisted) = SharedPlayerManager.getOrCreatePlayer(context, controllerId)
             isSharedPlayer = alreadyExisted
+            ownsPlayerLifecycle = false
             if (alreadyExisted) {
                 Log.d(TAG, "Using existing shared player for controller ID: $controllerId")
             } else {
@@ -133,7 +205,8 @@ class VideoPlayerView(
         } else {
             Log.d(TAG, "No controller ID provided, creating new player")
             isSharedPlayer = false
-            ExoPlayer.Builder(context)
+            ownsPlayerLifecycle = true
+            val internalPlayer = ExoPlayer.Builder(context)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
@@ -144,6 +217,7 @@ class VideoPlayerView(
                 .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
+            internalPlayer
         }
 
         // Set repeat mode for looping
@@ -251,13 +325,28 @@ class VideoPlayerView(
         eventHandler = VideoPlayerEventHandler(isSharedPlayer = isSharedPlayer)
 
         // Setup notification handler (shared for shared players)
+        // Note: the first view to request a handler for a given controllerId
+        // wins on disableMediaSession. Callers must pass a consistent value
+        // for all views sharing a controller.
+        //
+        // When useExternalPlayer is true, the host app's audio service owns the
+        // MediaSession / foreground-service / NowPlaying surface for the external
+        // ExoPlayer, so we force-disable the fork's own MediaSession setup. This
+        // gates every downstream setupMediaSession() / startForegroundPlayback()
+        // call (which the observer and method handler issue reactively) because
+        // VideoPlayerNotificationHandler short-circuits those when the flag is set.
+        val effectiveDisableMediaSession = disableMediaSession || useExternalPlayer
+        // When effectiveDisableMediaSession is true, the handler short-circuits
+        // setupMediaSession() / startForegroundPlayback() internally. The handler
+        // object is still constructed (non-null) because methodHandler and observer
+        // reference it; the guards make every setup call a no-op.
         notificationHandler = if (controllerId != null) {
-            val handler = SharedPlayerManager.getOrCreateNotificationHandler(context, controllerId, player, eventHandler)
+            val handler = SharedPlayerManager.getOrCreateNotificationHandler(context, controllerId, player, eventHandler, effectiveDisableMediaSession)
             // Update event handler for shared notification handler (in case it's being reused)
             handler.updateEventHandler(eventHandler)
             handler
         } else {
-            VideoPlayerNotificationHandler(context, player, eventHandler)
+            VideoPlayerNotificationHandler(context, player, eventHandler, effectiveDisableMediaSession)
         }
 
         // Setup method handler with callback to update media info
@@ -354,6 +443,39 @@ class VideoPlayerView(
         // No need to set up individual method channels for each view
 
         Log.d(TAG, "VideoPlayerView initialized")
+    }
+
+    private fun rebindToExternalPlayer(newPlayer: ExoPlayer) {
+        val oldPlayer = player
+        if (oldPlayer === newPlayer) {
+            return
+        }
+
+        // Detach observer from the old player before swapping.
+        oldPlayer.removeListener(observer)
+
+        // Swap the player field + rendering surface.
+        player = newPlayer
+        playerView.player = newPlayer
+
+        // Attach observer to the new player so events flow into the existing
+        // methodHandler/eventHandler stack.
+        newPlayer.addListener(observer)
+
+        // Release the old fallback player — we owned it, and now nothing is
+        // rendering through it.
+        if (ownsPlayerLifecycle) {
+            oldPlayer.release()
+        }
+
+        // Update ownership semantics: external is not ours to release.
+        ownsPlayerLifecycle = false
+        isSharedPlayer = true
+
+        // Listener already self-removes (setExternalPlayer clears the list
+        // before invoking). Clear our reference so dispose doesn't try to
+        // unregister a gone listener.
+        pendingExternalRebindListener = null
     }
 
     override fun getView(): View {
@@ -786,6 +908,13 @@ class VideoPlayerView(
         // Mark as disposed to prevent any further events
         isDisposed = true
 
+        // Unregister rebind listener if we never rebound (e.g. view disposed
+        // before host audio service came up).
+        pendingExternalRebindListener?.let {
+            SharedPlayerManager.removeExternalPlayerListener(it)
+            pendingExternalRebindListener = null
+        }
+
         // Exit fullscreen if active
         if (isFullScreen) {
             val activity = getActivity(context)
@@ -838,7 +967,14 @@ class VideoPlayerView(
         } else {
             // Only release if not shared (for non-shared players, fully clean up media session)
             notificationHandler.release()
-            player.release()
+            if (ownsPlayerLifecycle) {
+                player.release()
+            } else {
+                // Externally-owned player (e.g. useExternalPlayer=true with registered external):
+                // host app owns the lifecycle. Detach this PlayerView's surface but don't release.
+                playerView.player = null
+                Log.d(TAG, "Externally-owned player; skipping release on dispose for viewId=$viewId")
+            }
         }
     }
 }

@@ -22,6 +22,79 @@ object SharedPlayerManager {
     private val players = mutableMapOf<Int, ExoPlayer>()
     private val notificationHandlers = mutableMapOf<Int, VideoPlayerNotificationHandler>()
 
+    // External ExoPlayer reference supplied by the host app. Accessed ONLY via
+    // getExternalPlayer() — never returned silently from getOrCreatePlayer().
+    // Intended use: a caller who explicitly wants the host-owned player (e.g.
+    // fork VideoPlayerView constructed with useExternalPlayer=true) fetches
+    // the reference here and attaches its rendering surface. Internal-player
+    // callers are unaffected by this reference.
+    //
+    // Lifecycle: the OWNER of the external player is responsible for release().
+    // SharedPlayerManager must never call release() on an external player.
+    @Volatile
+    private var externalPlayer: ExoPlayer? = null
+
+    // Listeners registered by VideoPlayerViews that fell back to an internal
+    // ExoPlayer because the external wasn't registered yet. When setExternalPlayer
+    // is called with a non-null value, every listener is invoked synchronously
+    // with the new external player so views can rebind their surfaces.
+    private val externalPlayerListeners = mutableListOf<(ExoPlayer) -> Unit>()
+
+    /**
+     * Registers an externally-owned ExoPlayer. Subsequent calls to
+     * [getExternalPlayer] return this instance. This method does NOT touch
+     * the internally-managed [players] map — existing internal players keep
+     * functioning independently.
+     *
+     * Pass null to detach.
+     *
+     * The caller retains ownership — SharedPlayerManager will never call
+     * release() on this player.
+     */
+    fun setExternalPlayer(player: ExoPlayer?) {
+        externalPlayer = player
+        if (player != null) {
+            // Snapshot + clear + invoke so a listener that registers another
+            // listener (shouldn't happen, but defensively) doesn't deadlock.
+            val listeners = externalPlayerListeners.toList()
+            externalPlayerListeners.clear()
+            listeners.forEach { it(player) }
+        }
+    }
+
+    /**
+     * Returns the currently-registered external ExoPlayer, or null if none.
+     * Use this to branch on external-player availability without going through
+     * getOrCreatePlayer(), which has map-caching side effects.
+     */
+    fun getExternalPlayer(): ExoPlayer? {
+        return externalPlayer
+    }
+
+    /**
+     * Register a callback to be invoked when an external ExoPlayer is registered.
+     * If an external player is already present, the callback fires IMMEDIATELY
+     * on the caller's thread and is NOT added to the list. Otherwise the callback
+     * is added and will be invoked from [setExternalPlayer] when a non-null
+     * player arrives.
+     */
+    fun addExternalPlayerListener(callback: (ExoPlayer) -> Unit) {
+        val existing = externalPlayer
+        if (existing != null) {
+            callback(existing)
+        } else {
+            externalPlayerListeners.add(callback)
+        }
+    }
+
+    /**
+     * Remove a previously registered listener. Safe to call even if the listener
+     * has already fired (no-op in that case).
+     */
+    fun removeExternalPlayerListener(callback: (ExoPlayer) -> Unit) {
+        externalPlayerListeners.remove(callback)
+    }
+
     // Track active platform views for each controller
     // Map<ControllerId, Map<ViewId, SurfaceReconnectCallback>>
     private val activeViews = mutableMapOf<Int, MutableMap<Long, () -> Unit>>()
@@ -31,8 +104,12 @@ object SharedPlayerManager {
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
 
     /**
-     * Gets or creates a player for the given controller ID
-     * Returns a Pair<ExoPlayer, Boolean> where the Boolean indicates if the player already existed (true) or was newly created (false)
+     * Gets or creates an INTERNAL player for the given controller ID.
+     * Returns a Pair<ExoPlayer, Boolean> where the Boolean indicates if the
+     * player already existed (true) or was newly created (false).
+     *
+     * This method NEVER returns the external player. Callers who want the
+     * host-owned external ExoPlayer must call [getExternalPlayer] directly.
      */
     fun getOrCreatePlayer(context: Context, controllerId: Int): Pair<ExoPlayer, Boolean> {
         val alreadyExisted = players.containsKey(controllerId)
@@ -59,10 +136,11 @@ object SharedPlayerManager {
         context: Context,
         controllerId: Int,
         player: ExoPlayer,
-        eventHandler: VideoPlayerEventHandler
+        eventHandler: VideoPlayerEventHandler,
+        disableMediaSession: Boolean = false
     ): VideoPlayerNotificationHandler {
         return notificationHandlers.getOrPut(controllerId) {
-            VideoPlayerNotificationHandler(context, player, eventHandler)
+            VideoPlayerNotificationHandler(context, player, eventHandler, disableMediaSession)
         }
     }
 
@@ -141,8 +219,11 @@ object SharedPlayerManager {
         notificationHandlers[controllerId]?.release()
         notificationHandlers.remove(controllerId)
 
-        // Release player
-        players[controllerId]?.release()
+        // Release player (unless it's an externally-owned player — owner handles teardown)
+        val playerToRelease = players[controllerId]
+        if (playerToRelease != null && playerToRelease !== externalPlayer) {
+            playerToRelease.release()
+        }
         players.remove(controllerId)
 
         // Remove qualities cache
@@ -167,8 +248,12 @@ object SharedPlayerManager {
         notificationHandlers.values.forEach { it.release() }
         notificationHandlers.clear()
 
-        // Release all players
-        players.values.forEach { it.release() }
+        // Release all players (skip externally-owned player — owner handles teardown)
+        players.values.forEach { player ->
+            if (player !== externalPlayer) {
+                player.release()
+            }
+        }
         players.clear()
 
         // Clear qualities cache
