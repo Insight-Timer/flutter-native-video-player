@@ -31,6 +31,11 @@ object SharedPlayerManager {
     //
     // Lifecycle: the OWNER of the external player is responsible for release().
     // SharedPlayerManager must never call release() on an external player.
+    //
+    // Thread-safety: reads of externalPlayer are volatile. All mutations AND
+    // all listener-list operations go through externalPlayerLock so the
+    // check-then-act in addExternalPlayerListener is atomic with respect to
+    // setExternalPlayer's snapshot+clear.
     @Volatile
     private var externalPlayer: ExoPlayer? = null
 
@@ -38,7 +43,14 @@ object SharedPlayerManager {
     // ExoPlayer because the external wasn't registered yet. When setExternalPlayer
     // is called with a non-null value, every listener is invoked synchronously
     // with the new external player so views can rebind their surfaces.
+    //
+    // Guarded by externalPlayerLock.
     private val externalPlayerListeners = mutableListOf<(ExoPlayer) -> Unit>()
+
+    // Single lock guarding externalPlayer writes and all externalPlayerListeners
+    // operations. Listener invocations happen OUTSIDE this lock to avoid
+    // reentrant deadlocks (callbacks may call other SharedPlayerManager APIs).
+    private val externalPlayerLock = Any()
 
     /**
      * Registers an externally-owned ExoPlayer. Subsequent calls to
@@ -50,15 +62,28 @@ object SharedPlayerManager {
      *
      * The caller retains ownership — SharedPlayerManager will never call
      * release() on this player.
+     *
+     * Thread-safe: may be called from any thread (typically the host app's
+     * audio service thread). Registered listeners are invoked outside the
+     * internal lock on the caller's thread.
      */
     fun setExternalPlayer(player: ExoPlayer?) {
-        externalPlayer = player
-        if (player != null) {
-            // Snapshot + clear + invoke so a listener that registers another
-            // listener (shouldn't happen, but defensively) doesn't deadlock.
-            val listeners = externalPlayerListeners.toList()
-            externalPlayerListeners.clear()
-            listeners.forEach { it(player) }
+        // Atomically update the reference and drain the listener list. Drain
+        // only happens for non-null registrations (null = detach).
+        val listenersToNotify: List<(ExoPlayer) -> Unit> = synchronized(externalPlayerLock) {
+            externalPlayer = player
+            if (player != null) {
+                val snapshot = externalPlayerListeners.toList()
+                externalPlayerListeners.clear()
+                snapshot
+            } else {
+                emptyList()
+            }
+        }
+        // Invoke listeners outside the lock. `player` is non-null here because
+        // we only populated listenersToNotify in the non-null branch above.
+        if (listenersToNotify.isNotEmpty() && player != null) {
+            listenersToNotify.forEach { it(player) }
         }
     }
 
@@ -77,13 +102,23 @@ object SharedPlayerManager {
      * on the caller's thread and is NOT added to the list. Otherwise the callback
      * is added and will be invoked from [setExternalPlayer] when a non-null
      * player arrives.
+     *
+     * Thread-safe: the check-then-add is performed atomically against
+     * setExternalPlayer, so a listener cannot be lost to a race where the
+     * player arrives between the check and the add.
      */
     fun addExternalPlayerListener(callback: (ExoPlayer) -> Unit) {
-        val existing = externalPlayer
+        val existing: ExoPlayer? = synchronized(externalPlayerLock) {
+            val current = externalPlayer
+            if (current == null) {
+                externalPlayerListeners.add(callback)
+            }
+            current
+        }
+        // Invoke outside the lock so callbacks can't re-enter into a locked
+        // section and deadlock.
         if (existing != null) {
             callback(existing)
-        } else {
-            externalPlayerListeners.add(callback)
         }
     }
 
@@ -92,7 +127,9 @@ object SharedPlayerManager {
      * has already fired (no-op in that case).
      */
     fun removeExternalPlayerListener(callback: (ExoPlayer) -> Unit) {
-        externalPlayerListeners.remove(callback)
+        synchronized(externalPlayerLock) {
+            externalPlayerListeners.remove(callback)
+        }
     }
 
     // Track active platform views for each controller
@@ -139,6 +176,19 @@ object SharedPlayerManager {
         eventHandler: VideoPlayerEventHandler,
         disableMediaSession: Boolean = false
     ): VideoPlayerNotificationHandler {
+        // Existence check BEFORE getOrPut so we can log when a subsequent
+        // caller requests a different disableMediaSession than the first
+        // caller — the existing handler's behavior wins (getOrPut keeps the
+        // first), so mismatches silently apply the first caller's setup.
+        val existing = notificationHandlers[controllerId]
+        if (existing != null && existing.disableMediaSession != disableMediaSession) {
+            Log.w(
+                TAG,
+                "disableMediaSession mismatch on shared handler for controllerId=$controllerId: " +
+                    "existing=${existing.disableMediaSession}, requested=$disableMediaSession. " +
+                    "Keeping existing. Callers sharing a controllerId must pass a consistent flag."
+            )
+        }
         return notificationHandlers.getOrPut(controllerId) {
             VideoPlayerNotificationHandler(context, player, eventHandler, disableMediaSession)
         }

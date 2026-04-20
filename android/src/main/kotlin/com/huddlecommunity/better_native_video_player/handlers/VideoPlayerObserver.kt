@@ -14,13 +14,32 @@ import androidx.media3.common.Tracks
  * Equivalent to iOS VideoPlayerObserver
  */
 class VideoPlayerObserver(
-    private val player: Player,
+    player: Player,
     private val eventHandler: VideoPlayerEventHandler,
     private val notificationHandler: com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler? = null,
     private val getMediaInfo: (() -> Map<String, Any>?)? = null,
     private val controllerId: Int? = null,
     private val viewId: Long? = null
 ) : Player.Listener {
+
+    // var (not val) so the fork's rebindToExternalPlayer path can swap the
+    // player reference after construction when the host-owned external
+    // ExoPlayer arrives late. The periodic time-update Runnable and all
+    // overrides read through this field, so observer state always reflects
+    // the currently-attached player.
+    private var player: Player = player
+
+    /**
+     * Swap the observed player. Used by [VideoPlayerView.rebindToExternalPlayer]
+     * when the fallback is replaced by the externally-registered ExoPlayer.
+     *
+     * The caller is responsible for detaching/attaching this observer as a
+     * Player.Listener on the respective players — this method only updates
+     * the internal reference used by time updates and state queries.
+     */
+    fun updatePlayer(newPlayer: Player) {
+        this.player = newPlayer
+    }
 
     companion object {
         private const val TAG = "VideoPlayerObserver"

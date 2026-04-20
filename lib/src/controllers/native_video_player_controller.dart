@@ -168,6 +168,23 @@ class NativeVideoPlayerController {
   /// On iOS this flag is currently ignored (iOS keeps the existing
   /// two-player model; iOS work is out of scope for this refactor).
   ///
+  /// ### Fallback behavior when host registers the external player late
+  ///
+  /// If the widget mounts before the host audio service has registered its
+  /// external ExoPlayer, the fork creates a temporary internal "fallback"
+  /// ExoPlayer so the view has something to render. When the host eventually
+  /// registers its player, the fork transparently swaps the rendering surface
+  /// onto the external player and releases the fallback.
+  ///
+  /// State transfer on swap:
+  /// - If the external player has **no media** at swap time, the fallback's
+  ///   media, position, and playWhenReady are copied to the external so a
+  ///   preceding Dart-side `load()` / `play()` continues seamlessly.
+  /// - If the external player **already has media** (host audio service was
+  ///   already playing), the fallback's state is discarded — the host's
+  ///   playback wins. Any Dart-side `load()` into the fallback before the
+  ///   swap is effectively a no-op from the user's perspective.
+  ///
   /// Default false preserves existing behavior (fork owns its own player).
   final bool useExternalPlayer;
 

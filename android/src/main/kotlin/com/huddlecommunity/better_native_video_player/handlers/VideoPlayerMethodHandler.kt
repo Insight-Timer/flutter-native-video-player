@@ -30,7 +30,7 @@ import com.huddlecommunity.better_native_video_player.manager.SharedPlayerManage
 @UnstableApi
 class VideoPlayerMethodHandler(
     private val context: Context,
-    private val player: ExoPlayer,
+    player: ExoPlayer,
     private val eventHandler: VideoPlayerEventHandler,
     private val notificationHandler: VideoPlayerNotificationHandler,
     private val updateMediaInfo: ((Map<String, Any>?) -> Unit)? = null,
@@ -41,6 +41,18 @@ class VideoPlayerMethodHandler(
         private const val TAG = "VideoPlayerMethod"
     }
 
+    // var (not val) so VideoPlayerView.rebindToExternalPlayer can swap in the
+    // host-owned ExoPlayer. All method-call handling reads through this field,
+    // so post-rebind calls (load/play/pause/seek) target the new player rather
+    // than a released fallback.
+    private var player: ExoPlayer = player
+
+    // Tracks the one-shot Listener registered by handleLoad that awaits
+    // STATE_READY to complete the Flutter-side result. If a rebind happens
+    // mid-load, updatePlayer migrates this listener to the new player so the
+    // Dart-side Future doesn't hang.
+    private var pendingLoadListener: Player.Listener? = null
+
     private var availableQualities: List<Map<String, Any>> = emptyList()
     private var isAutoQuality = false
     private var lastBitrateCheck = 0L
@@ -49,6 +61,26 @@ class VideoPlayerMethodHandler(
 
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
+
+    /**
+     * Swap the underlying player. Used by rebindToExternalPlayer when the
+     * fallback ExoPlayer is replaced by the host-registered external one.
+     *
+     * If a load() call is in-flight (a pendingLoadListener is attached to the
+     * old player), move it to the new player so STATE_READY on the new player
+     * still resolves the Dart-side result. The caller is responsible for
+     * releasing the old player only after this method returns.
+     */
+    fun updatePlayer(newPlayer: ExoPlayer) {
+        val oldPlayer = this.player
+        if (oldPlayer === newPlayer) return
+
+        pendingLoadListener?.let { listener ->
+            runCatching { oldPlayer.removeListener(listener) }
+            newPlayer.addListener(listener)
+        }
+        this.player = newPlayer
+    }
 
     /**
      * Handles incoming method calls from Flutter
@@ -276,12 +308,19 @@ class VideoPlayerMethodHandler(
         // NOTE: Media session will be set up when playback starts (in VideoPlayerObserver)
         // This ensures the correct video's metadata is displayed even when switching between videos
 
+        // Clear any previously-pending listener so updatePlayer (rebind) doesn't
+        // migrate a stale listener from a prior in-flight load.
+        pendingLoadListener?.let { runCatching { player.removeListener(it) } }
+
         // Wait for player to be ready
         val listener = object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == androidx.media3.common.Player.STATE_READY) {
                     eventHandler.sendEvent("loaded")
-                    player.removeListener(this)
+                    // Read `player` through the outer class so rebind-migrated
+                    // listeners detach from the currently-attached player.
+                    this@VideoPlayerMethodHandler.player.removeListener(this)
+                    if (pendingLoadListener === this) pendingLoadListener = null
 
                     // Send AirPlay availability (always false on Android)
                     checkAndSendAirPlayAvailability()
@@ -289,7 +328,7 @@ class VideoPlayerMethodHandler(
                     // Auto play if requested - MUST be done after player is ready
                     if (autoPlay) {
                         Log.d(TAG, "Auto-playing video after ready")
-                        player.play()
+                        this@VideoPlayerMethodHandler.player.play()
                         // Play event will be sent automatically by VideoPlayerObserver
                     }
 
@@ -298,10 +337,12 @@ class VideoPlayerMethodHandler(
             }
 
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-                player.removeListener(this)
+                this@VideoPlayerMethodHandler.player.removeListener(this)
+                if (pendingLoadListener === this) pendingLoadListener = null
                 result.error("LOAD_ERROR", error.message ?: "Unknown error", null)
             }
         }
+        pendingLoadListener = listener
         player.addListener(listener)
     }
 

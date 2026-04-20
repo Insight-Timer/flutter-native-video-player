@@ -21,12 +21,35 @@ import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionSer
  */
 class VideoPlayerNotificationHandler(
     private val context: Context,
-    private val player: ExoPlayer,
+    player: ExoPlayer,
     private var eventHandler: VideoPlayerEventHandler,
-    private val disableMediaSession: Boolean = false
+    // Exposed as a read-only property so SharedPlayerManager can detect callers
+    // passing inconsistent flags when sharing a handler across views.
+    val disableMediaSession: Boolean = false
 ) {
     companion object {
         private var sessionCounter = 0
+    }
+
+    // var (not val) so VideoPlayerView.rebindToExternalPlayer can swap the
+    // player reference when the fallback is replaced by the externally-owned
+    // ExoPlayer. wrappedPlayer still wraps the original reference, which is
+    // safe here because disableMediaSession is always true on the rebind path
+    // (useExternalPlayer=true forces it), so wrappedPlayer / mediaSession are
+    // never instantiated or used.
+    private var player: ExoPlayer = player
+
+    /**
+     * Swap the underlying player. Used by rebindToExternalPlayer. Safe to call
+     * only when [disableMediaSession] is true — the MediaSession + wrappedPlayer
+     * plumbing is not hot-swappable at runtime and is never constructed in that
+     * mode. No-op if newPlayer is the same instance.
+     */
+    fun updatePlayer(newPlayer: ExoPlayer) {
+        if (this.player === newPlayer) return
+        // playerListener was never registered when disableMediaSession=true,
+        // so no listener migration is required here.
+        this.player = newPlayer
     }
 
     private var mediaSession: MediaSession? = null

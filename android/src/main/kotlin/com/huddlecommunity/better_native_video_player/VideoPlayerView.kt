@@ -206,7 +206,7 @@ class VideoPlayerView(
             Log.d(TAG, "No controller ID provided, creating new player")
             isSharedPlayer = false
             ownsPlayerLifecycle = true
-            val internalPlayer = ExoPlayer.Builder(context)
+            ExoPlayer.Builder(context)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
@@ -217,7 +217,6 @@ class VideoPlayerView(
                 .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
-            internalPlayer
         }
 
         // Set repeat mode for looping
@@ -446,10 +445,35 @@ class VideoPlayerView(
     }
 
     private fun rebindToExternalPlayer(newPlayer: ExoPlayer) {
+        // Guard against dispose-then-rebind race: the listener post to
+        // mainHandler may land after dispose has already run. Re-attaching the
+        // observer to external here would leak the observer onto the host
+        // player forever, and racing oldPlayer.release() with dispose can free
+        // the same player twice. Bail cleanly if the view is gone.
+        if (isDisposed) {
+            Log.d(TAG, "rebindToExternalPlayer: view already disposed, ignoring")
+            return
+        }
+
         val oldPlayer = player
         if (oldPlayer === newPlayer) {
             return
         }
+
+        // Best-effort state transfer: if the host's external player has no
+        // media loaded (e.g. registered empty, waiting for first load) AND the
+        // fallback had media loaded via Dart `load()`, carry the fallback's
+        // media + position + playWhenReady over so the Dart-side contract
+        // ("I called load() and got success, playback should continue") holds.
+        //
+        // If external ALREADY has media (host audio service was already
+        // playing), leave it alone — the host's state wins, as documented in
+        // NativeVideoPlayerController.useExternalPlayer.
+        val fallbackMedia = oldPlayer.currentMediaItem
+        val shouldTransferState =
+            fallbackMedia != null && newPlayer.currentMediaItem == null
+        val transferPosition = if (shouldTransferState) oldPlayer.currentPosition else 0L
+        val transferPlayWhenReady = if (shouldTransferState) oldPlayer.playWhenReady else false
 
         // Detach observer from the old player before swapping.
         oldPlayer.removeListener(observer)
@@ -458,19 +482,44 @@ class VideoPlayerView(
         player = newPlayer
         playerView.player = newPlayer
 
+        // Update every collaborator so in-flight + future method calls target
+        // the new player. Without this, methodHandler/observer/notificationHandler
+        // keep constructor-captured references to the released fallback and
+        // the first post-rebind load()/play()/seek hits a disposed ExoPlayer.
+        methodHandler.updatePlayer(newPlayer)
+        observer.updatePlayer(newPlayer)
+        notificationHandler.updatePlayer(newPlayer)
+
         // Attach observer to the new player so events flow into the existing
         // methodHandler/eventHandler stack.
         newPlayer.addListener(observer)
 
-        // Release the old fallback player — we owned it, and now nothing is
-        // rendering through it.
-        if (ownsPlayerLifecycle) {
-            oldPlayer.release()
+        // Apply transferred state (after listeners are attached so the observer
+        // sees STATE_READY on the new player).
+        if (shouldTransferState && fallbackMedia != null) {
+            try {
+                newPlayer.setMediaItem(fallbackMedia, transferPosition)
+                newPlayer.prepare()
+                newPlayer.playWhenReady = transferPlayWhenReady
+                Log.d(
+                    TAG,
+                    "Transferred fallback media to external player (pos=$transferPosition, playWhenReady=$transferPlayWhenReady)"
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to transfer fallback state to external player: ${e.message}")
+            }
         }
 
-        // Update ownership semantics: external is not ours to release.
+        // Release the old fallback player — we owned it, and now nothing is
+        // rendering through it. Clear ownsPlayerLifecycle BEFORE release so a
+        // racing dispose() observes the updated ownership and skips its own
+        // release call (release() is not safe to call twice).
+        val shouldReleaseOld = ownsPlayerLifecycle
         ownsPlayerLifecycle = false
         isSharedPlayer = true
+        if (shouldReleaseOld) {
+            oldPlayer.release()
+        }
 
         // Listener already self-removes (setExternalPlayer clears the list
         // before invoking). Clear our reference so dispose doesn't try to
