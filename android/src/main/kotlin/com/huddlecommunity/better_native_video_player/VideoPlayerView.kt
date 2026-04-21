@@ -276,6 +276,14 @@ class VideoPlayerView(
             handleFullscreenToggleNative(enterFullscreen)
         }
 
+        // Re-bind the Surface after the video track is re-enabled (audio-mode → video).
+        // Without this, some devices (OnePlus 15 / OxygenOS) leave the new
+        // MediaCodecVideoRenderer connected to an offscreen ImageReader and the
+        // video appears frozen.
+        methodHandler.onSurfaceRebindRequest = {
+            reconnectSurface()
+        }
+
         // PiP is now handled by the floating package on the Dart side
         // Callbacks removed as they're no longer needed
 
