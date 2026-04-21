@@ -5,7 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
 import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -45,12 +49,45 @@ class VideoPlayerNotificationHandler(
     // Guards release() so both handleDispose and PlatformView.dispose can call it.
     private var isReleased: Boolean = false
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Set true while the foreground service is being torn down. During teardown,
+    // Android's MediaSessionLegacyStub fires onStop() on the session, which routes
+    // to wrappedPlayer.stop() → ExoPlayer.stop() and drops the player to STATE_IDLE
+    // (wiping the decoded video surface — observed on OnePlus 15 during
+    // video→audio→video toggle). We swallow stop() only while this flag is set,
+    // so legitimate external stops (Bluetooth headset, Android Auto, Assistant,
+    // notification swipe) still work normally.
+    @Volatile
+    private var suppressSystemStop: Boolean = false
+
+    // How long to keep the suppression flag true after stopService(). The onStop
+    // callback is posted asynchronously during service teardown; 500ms is a
+    // generous upper bound — in practice it fires within a few ms.
+    private val suppressSystemStopDurationMs: Long = 500L
+
     /**
      * Wraps the ExoPlayer so that seekBack/seekForward can be intercepted when track-navigation
      * buttons are active. The system notification always calls seekBack()/seekForward() on the
      * player regardless of custom session commands, so interception must happen here.
      */
     private val wrappedPlayer = object : ForwardingPlayer(player) {
+        // Android's MediaSessionLegacyStub fires onStop() on the session while the
+        // foreground service is torn down (e.g. stopForegroundPlayback() →
+        // context.stopService() when exiting audio mode). That callback routes to
+        // ForwardingPlayer.stop() → ExoPlayer.stop() and drops the player to
+        // STATE_IDLE, wiping the decoded video surface (OnePlus 15 repro). We
+        // swallow stop() only while suppressSystemStop is set — legitimate
+        // external transport stops (Bluetooth headset, Android Auto, Assistant,
+        // notification swipe) still pass through.
+        override fun stop() {
+            if (suppressSystemStop) {
+                Log.w("VideoPlayerNH", "Ignoring MediaSession stop() during foreground teardown")
+                return
+            }
+            super.stop()
+        }
+
         override fun getAvailableCommands(): Player.Commands {
             val builder = super.getAvailableCommands().buildUpon()
             if (showSystemPreviousTrackControl) {
@@ -321,6 +358,13 @@ class VideoPlayerNotificationHandler(
         if (!foregroundRequested) return
         foregroundRequested = false
 
+        // Guard against MediaSessionLegacyStub.onStop() firing during service
+        // teardown. Cleared on a delayed main-thread post after the onStop
+        // callback has had time to be processed.
+        suppressSystemStop = true
+        mainHandler.removeCallbacks(clearSuppressSystemStop)
+        mainHandler.postDelayed(clearSuppressSystemStop, suppressSystemStopDurationMs)
+
         mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
 
         try {
@@ -328,6 +372,8 @@ class VideoPlayerNotificationHandler(
             context.stopService(serviceIntent)
         } catch (_: Exception) { }
     }
+
+    private val clearSuppressSystemStop = Runnable { suppressSystemStop = false }
 
     /**
      * Releases MediaSession and tears down the foreground service if we own it.
@@ -343,6 +389,9 @@ class VideoPlayerNotificationHandler(
         mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
         mediaSession?.release()
         mediaSession = null
+
+        mainHandler.removeCallbacks(clearSuppressSystemStop)
+        suppressSystemStop = false
 
         currentTitle = "Video"
         currentSubtitle = ""
