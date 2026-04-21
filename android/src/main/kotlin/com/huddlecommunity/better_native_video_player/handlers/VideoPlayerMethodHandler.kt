@@ -35,7 +35,11 @@ class VideoPlayerMethodHandler(
     private val notificationHandler: VideoPlayerNotificationHandler,
     private val updateMediaInfo: ((Map<String, Any>?) -> Unit)? = null,
     private val controllerId: Int? = null,
-    private val enableHDR: Boolean = false
+    private val enableHDR: Boolean = false,
+    // True when THIS view created the ExoPlayer and is responsible for releasing it.
+    // False when `useExternalPlayer=true` and the player is the host app's shared
+    // ExoPlayer — in that case we must not stop/release it on dispose.
+    private val ownsPlayerLifecycle: Boolean = true,
 ) {
     companion object {
         private const val TAG = "VideoPlayerMethod"
@@ -561,7 +565,12 @@ class VideoPlayerMethodHandler(
      * Disposes the player
      */
     private fun handleDispose(result: MethodChannel.Result) {
-        player.stop()
+        // Only stop the player if we own its lifecycle. When useExternalPlayer=true,
+        // the player belongs to the host app's audio service — stopping it here
+        // would halt unrelated playback.
+        if (ownsPlayerLifecycle) {
+            player.stop()
+        }
 
         if (controllerId != null) {
             // Shared player: SharedPlayerManager.removePlayer() releases the

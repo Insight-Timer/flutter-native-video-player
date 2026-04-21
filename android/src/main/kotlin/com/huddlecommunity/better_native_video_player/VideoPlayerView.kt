@@ -356,7 +356,8 @@ class VideoPlayerView(
             notificationHandler = notificationHandler,
             updateMediaInfo = { mediaInfo -> currentMediaInfo = mediaInfo },
             controllerId = controllerId,
-            enableHDR = enableHDR
+            enableHDR = enableHDR,
+            ownsPlayerLifecycle = ownsPlayerLifecycle,
         )
 
         // Set fullscreen callback for method handler

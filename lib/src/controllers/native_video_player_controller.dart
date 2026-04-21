@@ -2511,8 +2511,10 @@ class NativeVideoPlayerController {
     // Mark as disposed immediately to prevent new events from being added
     _isDisposed = true;
 
-    // Pause playback first to avoid crashes during disposal
-    if (_state.activityState.isPlaying) {
+    // Pause playback first to avoid crashes during disposal.
+    // Skip when useExternalPlayer=true: the host app owns the player lifecycle
+    // and the shared ExoPlayer must not be paused on this view's disposal.
+    if (!useExternalPlayer && _state.activityState.isPlaying) {
       await pause();
       // Give the native side a moment to process the pause
       await Future<void>.delayed(const Duration(milliseconds: 100));
