@@ -66,6 +66,12 @@ class VideoPlayerMethodHandler(
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
 
+    // Callback to force the PlayerView to re-bind its Surface to the player.
+    // Needed after re-enabling the video track: on some devices (e.g. OnePlus 15) the
+    // renderer otherwise reconnects to an offscreen ImageReader instead of the SurfaceView,
+    // causing a frozen video with live audio.
+    var onSurfaceRebindRequest: (() -> Unit)? = null
+
     /**
      * Swap the underlying player. Used by rebindToExternalPlayer when the
      * fallback ExoPlayer is replaced by the host-registered external one.
@@ -905,6 +911,13 @@ class VideoPlayerMethodHandler(
                 notificationHandler.startForegroundPlayback()
             } else {
                 notificationHandler.stopForegroundPlayback()
+                // Disabling and re-enabling the video track releases and recreates the
+                // MediaCodecVideoRenderer. On some devices (OnePlus 15 with OxygenOS +
+                // SD 8 Elite C2 codec) the new renderer does not pick up the original
+                // SurfaceView and instead outputs to a placeholder ImageReader, leaving
+                // the UI frozen. Ask the view to re-bind the Surface to force
+                // setVideoSurface() on the new renderer.
+                onSurfaceRebindRequest?.invoke()
             }
 
             Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")

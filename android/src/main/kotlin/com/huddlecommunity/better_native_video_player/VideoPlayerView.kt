@@ -365,6 +365,19 @@ class VideoPlayerView(
             handleFullscreenToggleNative(enterFullscreen)
         }
 
+        // Re-bind the Surface after the video track is re-enabled (audio-mode → video).
+        // Without this, some devices (OnePlus 15 / OxygenOS) leave the new
+        // MediaCodecVideoRenderer connected to an offscreen ImageReader and the
+        // video appears frozen.
+        //
+        // We use the surgical setVideoSurfaceView() API instead of swapping
+        // `playerView.player = null; = currentPlayer` because the latter was observed
+        // on OnePlus 15 to race with the renderer-enable path and leave the player
+        // silently in STATE_IDLE (no error, no decoder init).
+        methodHandler.onSurfaceRebindRequest = {
+            forceReattachSurfaceToPlayer()
+        }
+
         // PiP is now handled by the floating package on the Dart side
         // Callbacks removed as they're no longer needed
 
@@ -948,6 +961,35 @@ class VideoPlayerView(
                 Log.d(TAG, "Surface reconnected successfully for view $viewId")
             } else {
                 Log.w(TAG, "Cannot reconnect surface - player is null")
+            }
+        }
+    }
+
+    /**
+     * Surgical surface reattach — used on the audio-mode → video-mode transition only.
+     *
+     * Unlike [reconnectSurface], this does NOT swap `playerView.player`. On OnePlus 15
+     * that swap was observed to race with the video-renderer re-enable path and put the
+     * player into STATE_IDLE silently (no error, no decoder init). Here we keep the
+     * player attached to the PlayerView and just rebind the underlying surface view to
+     * the player directly, which is enough to force the new MediaCodecVideoRenderer to
+     * pick up the correct Surface instead of an offscreen ImageReader.
+     */
+    private fun forceReattachSurfaceToPlayer() {
+        if (isDisposed) {
+            Log.d(TAG, "Ignoring surface reattach - view is disposed")
+            return
+        }
+        playerView.post {
+            val surfaceView = playerView.videoSurfaceView
+            if (surfaceView == null) {
+                Log.w(TAG, "forceReattachSurfaceToPlayer: playerView.videoSurfaceView is null")
+                return@post
+            }
+            when (surfaceView) {
+                is android.view.SurfaceView -> player.setVideoSurfaceView(surfaceView)
+                is android.view.TextureView -> player.setVideoTextureView(surfaceView)
+                else -> Log.w(TAG, "forceReattachSurfaceToPlayer: unexpected view type")
             }
         }
     }
