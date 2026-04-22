@@ -9,7 +9,7 @@ import io.flutter.plugin.common.EventChannel
  * Handles sending events from native Android to Flutter via EventChannel
  * Equivalent to iOS VideoPlayerEventHandler
  */
-class VideoPlayerEventHandler(private val isSharedPlayer: Boolean = false) : EventChannel.StreamHandler {
+class VideoPlayerEventHandler(private var isSharedPlayer: Boolean = false) : EventChannel.StreamHandler {
     companion object {
         private const val TAG = "VideoPlayerEventHandler"
     }
@@ -53,6 +53,16 @@ class VideoPlayerEventHandler(private val isSharedPlayer: Boolean = false) : Eve
      */
     fun setInitialStateCallback(callback: () -> Unit) {
         initialStateCallback = callback
+    }
+
+    /**
+     * Swap the shared-player flag. Called by [VideoPlayerView.rebindToExternalPlayer]
+     * after the fallback internal ExoPlayer is replaced by the host-registered
+     * external one, so subsequent EventChannel listeners follow the shared-player
+     * branch in [onListen] instead of emitting a spurious `isInitialized` event.
+     */
+    fun updateIsSharedPlayer(newValue: Boolean) {
+        isSharedPlayer = newValue
     }
 
     /**

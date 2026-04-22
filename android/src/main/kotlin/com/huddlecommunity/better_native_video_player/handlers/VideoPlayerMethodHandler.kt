@@ -39,7 +39,10 @@ class VideoPlayerMethodHandler(
     // True when THIS view created the ExoPlayer and is responsible for releasing it.
     // False when `useExternalPlayer=true` and the player is the host app's shared
     // ExoPlayer — in that case we must not stop/release it on dispose.
-    private val ownsPlayerLifecycle: Boolean = true,
+    // var so VideoPlayerView.rebindToExternalPlayer can flip ownership after the
+    // fallback internal player is swapped for the host-registered external one;
+    // otherwise handleDispose would gate on a stale `true` and stop the host player.
+    private var ownsPlayerLifecycle: Boolean = true,
 ) {
     companion object {
         private const val TAG = "VideoPlayerMethod"
@@ -90,6 +93,16 @@ class VideoPlayerMethodHandler(
             newPlayer.addListener(listener)
         }
         this.player = newPlayer
+    }
+
+    /**
+     * Swap the ownership flag. Called by [VideoPlayerView.rebindToExternalPlayer]
+     * after the fallback internal ExoPlayer is replaced by the host-registered
+     * external one: the view no longer owns the player's lifecycle, so
+     * [handleDispose] must stop gating `player.stop()` on a stale `true`.
+     */
+    fun updateOwnsPlayerLifecycle(newValue: Boolean) {
+        this.ownsPlayerLifecycle = newValue
     }
 
     /**

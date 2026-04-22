@@ -530,7 +530,9 @@ class VideoPlayerView(
         // release call (release() is not safe to call twice).
         val shouldReleaseOld = ownsPlayerLifecycle
         ownsPlayerLifecycle = false
+        methodHandler.updateOwnsPlayerLifecycle(false)
         isSharedPlayer = true
+        eventHandler.updateIsSharedPlayer(true)
         if (shouldReleaseOld) {
             oldPlayer.release()
         }
