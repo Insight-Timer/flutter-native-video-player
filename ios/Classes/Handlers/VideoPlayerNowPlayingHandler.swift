@@ -1,6 +1,13 @@
 import MediaPlayer
 import AVFoundation
 
+/// Private key stashed into MPNowPlayingInfoCenter.nowPlayingInfo so a view can
+/// recognize its own metadata on dispose. Lets cleanupRemoteCommandOwnership
+/// clear only what it wrote — if another player (audio fork, sibling video
+/// view, ambient mixer) has already overwritten the info, the tag won't match
+/// and the clear is skipped.
+let nowPlayingOwnerViewIdKey = "co.insight.videoViewId"
+
 // MARK: - Remote Command Manager
 /// Singleton to manage MPRemoteCommandCenter ownership
 /// Ensures only one VideoPlayerView owns the remote commands at a time
@@ -129,6 +136,10 @@ extension VideoPlayerView {
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = playbackRate
         print("   → Playback rate: \(playbackRate)")
 
+        // Tag the info so cleanupRemoteCommandOwnership can tell if this view
+        // still owns it at dispose time.
+        nowPlayingInfo[nowPlayingOwnerViewIdKey] = viewId
+
         // --- Commit initial metadata immediately (before artwork loads) ---
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         print("   → Now Playing info SET to: \(nowPlayingInfo[MPMediaItemPropertyTitle] ?? "Unknown")")
@@ -182,6 +193,7 @@ extension VideoPlayerView {
                     image
                 }
                 updatedInfo[MPMediaItemPropertyArtwork] = artwork
+                updatedInfo[nowPlayingOwnerViewIdKey] = self.viewId
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = updatedInfo
             }
         }
@@ -412,6 +424,7 @@ extension VideoPlayerView {
         }
 
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
+        nowPlayingInfo[nowPlayingOwnerViewIdKey] = viewId
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
 }
