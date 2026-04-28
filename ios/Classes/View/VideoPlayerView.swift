@@ -728,13 +728,13 @@ import QuartzCore
                 // Identity-guarded clear: only wipe Now Playing info if it still
                 // belongs to this view. setupNowPlayingInfo / artwork updates /
                 // updateNowPlayingPlaybackTime all stamp the info with
-                // nowPlayingOwnerViewIdKey = viewId. If another player (audio
+                // NowPlayingOwnership.key = viewId. If another player (audio
                 // fork, sibling video view, ambient mixer) has already
                 // overwritten it, their write replaced our tag, so we skip the
                 // clear and avoid wiping their setup — the same race the
                 // previous "never clear" rule was guarding against.
                 let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
-                if let ownerId = currentInfo?[nowPlayingOwnerViewIdKey] as? Int64, ownerId == viewId {
+                if let ownerId = currentInfo?[NowPlayingOwnership.key] as? Int64, ownerId == viewId {
                     print("🗑️ View \(viewId) still owns Now Playing info - clearing")
                     MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
                 } else {
