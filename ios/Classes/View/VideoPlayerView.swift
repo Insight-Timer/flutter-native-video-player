@@ -724,15 +724,27 @@ import QuartzCore
                 RemoteCommandManager.shared.clearOwner(viewId)
                 // Do NOT clear nowPlayingInfo or remove targets while PiP is active or restoring
             } else {
-                print("🗑️ No transfer possible and PiP is not active - clearing ownership only")
                 RemoteCommandManager.shared.clearOwner(viewId)
-                // Do NOT remove targets or clear nowPlayingInfo here.
-                // In a mixed video/audio playlist, the audio player may have already re-registered
-                // its command handlers and set its nowPlayingInfo. Clearing them here creates a race
-                // condition where the audio player's setup gets wiped, resulting in "Not Playing".
-                // The stale video handlers are harmless: they check RemoteCommandManager.isOwner()
-                // (now cleared) and hold a [weak self] that becomes nil after deallocation — both
-                // guards cause them to return .commandFailed without side effects.
+                // Identity-guarded clear: only wipe Now Playing info if it still
+                // belongs to this view. setupNowPlayingInfo / artwork updates /
+                // updateNowPlayingPlaybackTime all stamp the info with
+                // NowPlayingOwnership.key = viewId. If another player (audio
+                // fork, sibling video view, ambient mixer) has already
+                // overwritten it, their write replaced our tag, so we skip the
+                // clear and avoid wiping their setup — the same race the
+                // previous "never clear" rule was guarding against.
+                let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
+                if let ownerId = currentInfo?[NowPlayingOwnership.key] as? Int64, ownerId == viewId {
+                    print("🗑️ View \(viewId) still owns Now Playing info - clearing")
+                    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                } else {
+                    print("🗑️ View \(viewId) no longer owns Now Playing info - leaving it alone")
+                }
+                // Remote command targets are left registered. They are harmless:
+                // each handler checks RemoteCommandManager.isOwner() (now
+                // cleared) and holds a [weak self] that becomes nil after
+                // deallocation — both guards cause them to return
+                // .commandFailed without side effects.
             }
         }
     }

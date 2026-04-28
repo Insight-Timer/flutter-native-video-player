@@ -1,6 +1,15 @@
 import MediaPlayer
 import AVFoundation
 
+enum NowPlayingOwnership {
+    /// Private key stashed into MPNowPlayingInfoCenter.nowPlayingInfo so a view can
+    /// recognize its own metadata on dispose. Lets cleanupRemoteCommandOwnership
+    /// clear only what it wrote — if another player (audio fork, sibling video
+    /// view, ambient mixer) has already overwritten the info, the tag won't match
+    /// and the clear is skipped.
+    static let key = "co.insight.videoViewId"
+}
+
 // MARK: - Remote Command Manager
 /// Singleton to manage MPRemoteCommandCenter ownership
 /// Ensures only one VideoPlayerView owns the remote commands at a time
@@ -129,6 +138,10 @@ extension VideoPlayerView {
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = playbackRate
         print("   → Playback rate: \(playbackRate)")
 
+        // Tag the info so cleanupRemoteCommandOwnership can tell if this view
+        // still owns it at dispose time.
+        nowPlayingInfo[NowPlayingOwnership.key] = viewId
+
         // --- Commit initial metadata immediately (before artwork loads) ---
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
         print("   → Now Playing info SET to: \(nowPlayingInfo[MPMediaItemPropertyTitle] ?? "Unknown")")
@@ -178,10 +191,15 @@ extension VideoPlayerView {
                 }
 
                 var updatedInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+                guard let ownerId = updatedInfo[NowPlayingOwnership.key] as? Int64, ownerId == self.viewId else {
+                    print("🎵 Dropping late artwork for view \(self.viewId) - no longer owns Now Playing info")
+                    return
+                }
                 let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in
                     image
                 }
                 updatedInfo[MPMediaItemPropertyArtwork] = artwork
+                updatedInfo[NowPlayingOwnership.key] = self.viewId
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = updatedInfo
             }
         }
@@ -412,6 +430,7 @@ extension VideoPlayerView {
         }
 
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
+        nowPlayingInfo[NowPlayingOwnership.key] = viewId
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
 }
