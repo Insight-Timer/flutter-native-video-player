@@ -2126,6 +2126,40 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Hard-toggles AVKit's master `allowsPictureInPicturePlayback` flag at
+  /// runtime on iOS. When `allows` is `false`, Picture-in-Picture cannot
+  /// start at all on this controller — manual entry, automatic-from-inline,
+  /// and auto-on-background from fullscreen are all suppressed.
+  ///
+  /// Use this when a consumer needs PIP to be unavailable in a particular
+  /// app state (e.g. the app's video player has switched to an audio-only
+  /// mode and must not shrink into a PIP window even if the platform view
+  /// is reconstructed). Unlike [disableAutomaticInlinePip], this survives
+  /// the plugin's view-reconstruction re-enable path because the override
+  /// is stored in `SharedPlayerManager` and read back during view init.
+  ///
+  /// **Platform Support:**
+  /// - iOS: any version. The flag is honored by `AVPlayerViewController`.
+  /// - Android: no-op — the Android side of this plugin doesn't manage PIP
+  ///   itself (consumers should use the `floating` package directly).
+  ///
+  /// **Returns:** `true` if the call reached the iOS plugin successfully.
+  /// `false` on Android, on web, or on iOS error.
+  Future<bool> setAllowsPictureInPicture(bool allows) async {
+    if (_methodChannel == null) {
+      return false;
+    }
+    if (kIsWeb || !Platform.isIOS) {
+      return false;
+    }
+    try {
+      return await _methodChannel!.setAllowsPictureInPicture(allows);
+    } catch (e) {
+      debugPrint('Error setting allowsPictureInPicture: $e');
+      return false;
+    }
+  }
+
   /// Toggles Picture-in-Picture mode
   /// Only works on iOS 14+ and Android 8+
   /// Returns true if the operation was successful

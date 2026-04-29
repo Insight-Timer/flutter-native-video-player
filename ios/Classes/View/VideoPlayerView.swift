@@ -297,7 +297,18 @@ import QuartzCore
 
                 if isActiveForAutoPiP || isPlaying {
                     print("🎬 Controller state - activeForAutoPiP: \(isActiveForAutoPiP), isPlaying: \(isPlaying)")
-                    if canStartPictureInPictureAutomatically {
+                    // Respect a runtime hard-disable of PIP: if a previous
+                    // `setAllowsPictureInPicture(false)` call has flipped the
+                    // stored `allowsPictureInPicture` setting off, do NOT
+                    // re-enable auto-PIP on this newly-constructed view.
+                    // Without this guard, the construction-time value would
+                    // silently undo runtime PIP gating (e.g., consumer's
+                    // audio-mode toggle) every time the platform view is
+                    // rebuilt.
+                    let storedAllowsPip = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
+                    if !storedAllowsPip {
+                        print("   ⚠️ Skipping automatic PiP re-enable - allowsPictureInPicture is false (runtime override)")
+                    } else if canStartPictureInPictureAutomatically {
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
@@ -543,6 +554,8 @@ import QuartzCore
             handleEnableAutomaticInlinePip(result: result)
         case "disableAutomaticInlinePip":
             handleDisableAutomaticInlinePip(result: result)
+        case "setAllowsPictureInPicture":
+            handleSetAllowsPictureInPicture(call: call, result: result)
         case "setShowNativeControls":
             handleSetShowNativeControls(call: call, result: result)
         case "setUseAspectFill":

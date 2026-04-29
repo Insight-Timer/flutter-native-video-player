@@ -1084,6 +1084,72 @@ extension VideoPlayerView {
         }
     }
 
+    /// Toggles `AVPlayerViewController.allowsPictureInPicturePlayback` at
+    /// runtime. This is AVKit's master PIP switch — when set to `false`,
+    /// Picture-in-Picture cannot start at all (manual entry, automatic-from-
+    /// inline entry, or auto-on-background entry from fullscreen are all
+    /// suppressed). Re-enable with `true`.
+    ///
+    /// Use this when a consumer needs to hard-disable PIP at runtime — for
+    /// example, when an app's video player switches to an audio-only mode and
+    /// must not shrink into a PIP window even if the platform view is
+    /// reconstructed (the construction-time `allowsPictureInPicture`
+    /// argument cannot be changed after the fact, and `disableAutomaticInlinePip`
+    /// alone is silently reverted by the view-construction re-enable path
+    /// when a new view is built for a still-playing controller).
+    func handleSetAllowsPictureInPicture(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let allows = args["allows"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'allows' bool parameter",
+                details: nil
+            ))
+            return
+        }
+
+        print("🎬 setAllowsPictureInPicture(\(allows))")
+        playerViewController.allowsPictureInPicturePlayback = allows
+
+        // Keep the SharedPlayerManager-stored setting in sync so any later
+        // view reconstruction picks up the runtime-overridden value instead
+        // of reverting to the construction-time default.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
+            print("✅ allowsPictureInPicturePlayback=\(allows) for controller \(controllerIdValue)")
+        } else {
+            print("✅ allowsPictureInPicturePlayback=\(allows) for non-shared player")
+        }
+
+        // Keep `canStartPictureInPictureAutomaticallyFromInline` symmetric
+        // with the master flag:
+        //  - On disable: clear it so a subsequent view reconstruction has no
+        //    surface to land on (belt-and-braces).
+        //  - On re-enable: re-arm it via `SharedPlayerManager.setAutomaticPiPEnabled`,
+        //    which respects each view's construction-time
+        //    `canStartPictureInPictureAutomatically` consent. Without this,
+        //    a runtime disable→re-enable round trip leaves auto-from-inline
+        //    permanently off until the next view reconstruction picks it
+        //    back up — and consumers see "first background after re-enable
+        //    fails to PIP, but the second one works".
+        if #available(iOS 14.2, *) {
+            if !allows {
+                playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                if let controllerIdValue = controllerId {
+                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: false)
+                }
+            } else if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+            } else if canStartPictureInPictureAutomatically {
+                // Non-shared player path — no manager involvement; mirror
+                // the construction-time consent directly on the view.
+                playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+            }
+        }
+
+        result(true)
+    }
+
     /// Sets up periodic time observer to update Now Playing elapsed time
     func setupPeriodicTimeObserver() {
         // Remove existing observer if any
