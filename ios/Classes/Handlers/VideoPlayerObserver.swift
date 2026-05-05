@@ -3,16 +3,24 @@ import Foundation
 
 extension VideoPlayerView {
     func addObservers(to item: AVPlayerItem) {
+        // Idempotent: if observers are already registered on this view,
+        // skip — `deinit`'s matching `removeObserver` block can only
+        // unregister the same observer once per key path.
+        if didRegisterPlayerItemObservers || didRegisterPlayerObservers {
+            return
+        }
         item.addObserver(self, forKeyPath: "status", options: [.new, .old], context: nil)
         item.addObserver(self, forKeyPath: "playbackBufferEmpty", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "playbackLikelyToKeepUp", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
+        didRegisterPlayerItemObservers = true
 
         // Observe player's timeControlStatus to track play/pause state changes
         player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
 
         // Observe AirPlay connection status
         player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
+        didRegisterPlayerObservers = true
 
         // Observe audio route changes to detect AirPlay device changes
         NotificationCenter.default.addObserver(

@@ -115,6 +115,17 @@ import QuartzCore
     // DRM handler for protected content
     var drmHandler: VideoPlayerDrmHandler?
 
+    // Track which KVO observers were actually registered on this view, so
+    // `deinit` only calls `removeObserver` for them. Without this guard,
+    // secondary / shared-player views that never reach the
+    // `addObservers(to:)` code path (player had no `currentItem` at init
+    // and no later `loadUrl` call routes through this view) would still
+    // attempt to unregister at `deinit` and trip
+    // `_removeObserver:forProperty:` — crashing the app whenever a
+    // floating-preview view is disposed (e.g. playlist track change).
+    var didRegisterPlayerItemObservers: Bool = false
+    var didRegisterPlayerObservers: Bool = false
+
 
     public init(
         frame: CGRect,
@@ -1005,19 +1016,31 @@ import QuartzCore
         }
 
         // Only remove observers, don't dispose the player if it's shared
-        // The shared player will be kept alive for reuse
-        if let item = player?.currentItem {
+        // The shared player will be kept alive for reuse.
+        //
+        // Gate on the flags set by `addObservers(to:)` — without this,
+        // secondary / shared-player views that never registered (player
+        // had no `currentItem` at init AND never received a fresh
+        // `loadUrl` through this view's method handler) would throw
+        // `_removeObserver:forProperty:` here. Repro: floating-preview
+        // view created for a track that's already playing on the inline
+        // view, then disposed when the user skips tracks.
+        if didRegisterPlayerItemObservers, let item = player?.currentItem {
             item.removeObserver(self, forKeyPath: "status")
             item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
             item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
             item.removeObserver(self, forKeyPath: "presentationSize")
+            didRegisterPlayerItemObservers = false
         }
 
-        // Remove player observer for timeControlStatus
-        player?.removeObserver(self, forKeyPath: "timeControlStatus")
+        if didRegisterPlayerObservers {
+            // Remove player observer for timeControlStatus
+            player?.removeObserver(self, forKeyPath: "timeControlStatus")
 
-        // Remove player observer for externalPlaybackActive
-        player?.removeObserver(self, forKeyPath: "externalPlaybackActive")
+            // Remove player observer for externalPlaybackActive
+            player?.removeObserver(self, forKeyPath: "externalPlaybackActive")
+            didRegisterPlayerObservers = false
+        }
 
         // Remove route detector observer
         if #available(iOS 11.0, *) {
