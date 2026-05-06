@@ -1132,123 +1132,11 @@ import QuartzCore
     /// reads it, guaranteeing PIP fires on the very next background.
     @objc func handleAppWillResignActive() {
         guard #available(iOS 14.2, *) else { return }
-
-        // === DIAGNOSTIC: dump every PIP-eligibility input AVKit could care
-        //     about. Log this on every backgrounding so we can compare a
-        //     successful auto-PIP entry against a silent no-op and pin
-        //     down exactly which condition is preventing the OS from
-        //     auto-entering PIP. Each line uses a unique [P##] prefix so
-        //     we can detect if any line is silently dropped (Console.app
-        //     truncation, optional-coalescing edge cases, etc).
-        let allowsPip = playerViewController.allowsPictureInPicturePlayback
-        let autoFromInline = playerViewController.canStartPictureInPictureAutomaticallyFromInline
-
-        // Format helpers — keep it dead simple so Swift type inference
-        // never causes a print to silently fail.
-        func addr(_ obj: AnyObject?) -> String {
-            guard let obj = obj else { return "<nil>" }
-            return "0x" + String(unsafeBitCast(obj, to: Int.self), radix: 16)
-        }
-        func optStr<T>(_ v: T?) -> String {
-            if let v = v { return "\(v)" }
-            return "<nil>"
-        }
-
-        let storedAllowsStr: String = {
-            guard let cid = controllerId else { return "<no-cid>" }
-            guard let s = SharedPlayerManager.shared.getPipSettings(for: cid)?.allowsPictureInPicture else { return "<no-stored>" }
-            return "\(s)"
-        }()
-        let primaryViewIdStr: String = {
-            guard let cid = controllerId else { return "<no-cid>" }
-            guard let pid = SharedPlayerManager.shared.getPrimaryViewId(for: cid) else { return "<none>" }
-            return "\(pid)"
-        }()
-
-        let p = player
-        let item = p?.currentItem
-        let rate = p?.rate ?? -999
-        var timeControl = "<no-player>"
-        if let p = p {
-            switch p.timeControlStatus {
-            case .paused: timeControl = "paused"
-            case .waitingToPlayAtSpecifiedRate: timeControl = "waiting"
-            case .playing: timeControl = "playing"
-            @unknown default: timeControl = "unknown"
-            }
-        }
-        var itemStatus = "<no-item>"
-        if let item = item {
-            switch item.status {
-            case .unknown: itemStatus = "unknown"
-            case .readyToPlay: itemStatus = "readyToPlay"
-            case .failed: itemStatus = "failed"
-            @unknown default: itemStatus = "@unknown"
-            }
-        }
-        let likelyToKeepUp = item?.isPlaybackLikelyToKeepUp ?? false
-        let bufferEmpty = item?.isPlaybackBufferEmpty ?? true
-        let presentationSize = item?.presentationSize ?? .zero
-        let preferredBitrate = item?.preferredPeakBitRate ?? -1
-        let videoTrackCount = item?.tracks.filter { $0.assetTrack?.mediaType == .video }.count ?? 0
-        let enabledVideoTracks = item?.tracks.filter {
-            $0.assetTrack?.mediaType == .video && $0.isEnabled
-        }.count ?? 0
-        var visualSelected = "<no-item>"
-        if let item = item {
-            visualSelected = "<no-visual-group>"
-            if let asset = item.asset as? AVURLAsset,
-               let visualGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .visual) {
-                if let selected = item.currentMediaSelection.selectedMediaOption(in: visualGroup) {
-                    visualSelected = selected.displayName
-                } else {
-                    visualSelected = "<none-selected>"
-                }
-            }
-        }
-        let pvcView = playerViewController.view
-        let inWindow = pvcView?.window != nil
-        let viewSize = pvcView?.bounds.size ?? .zero
-        let isHidden = pvcView?.isHidden ?? true
-        let alpha = pvcView?.alpha ?? -1
-        let pipSupported = AVPictureInPictureController.isPictureInPictureSupported()
-        let isInPip = isPipCurrentlyActive
-        let isUsingNative = isUsingNativeLayout
-        let inFullscreen = (fullscreenPlayerViewController != nil)
-
-        // Print every line with a unique [P##] prefix so we can spot a
-        // silently-dropped line in the console output.
-        print("📱 [PIP-DIAG] willResignActive (view \(viewId), pvc=\(addr(playerViewController))):")
-        print("   [PIP-DIAG-P01] controllerId: \(optStr(controllerId))")
-        print("   [PIP-DIAG-P02] player address: \(addr(p))   currentItem address: \(addr(item))")
-        print("   [PIP-DIAG-P03] allowsPictureInPicturePlayback: \(allowsPip)")
-        print("   [PIP-DIAG-P04] canStartPictureInPictureAutomaticallyFromInline: \(autoFromInline)")
-        print("   [PIP-DIAG-P05] SharedPlayerManager.allowsPictureInPicture: \(storedAllowsStr)")
-        print("   [PIP-DIAG-P06] SharedPlayerManager.primaryViewId: \(primaryViewIdStr)  (this view: \(viewId))")
-        print("   [PIP-DIAG-P07] view.canStartPictureInPictureAutomatically (construction-time): \(canStartPictureInPictureAutomatically)")
-        print("   [PIP-DIAG-P08] player.rate: \(rate)   timeControlStatus: \(timeControl)")
-        print("   [PIP-DIAG-P09] playerItem.status: \(itemStatus)")
-        print("   [PIP-DIAG-P10] playerItem.isPlaybackLikelyToKeepUp: \(likelyToKeepUp)   isPlaybackBufferEmpty: \(bufferEmpty)")
-        print("   [PIP-DIAG-P11] playerItem.presentationSize: \(presentationSize)   preferredPeakBitRate: \(preferredBitrate)")
-        print("   [PIP-DIAG-P12] playerItem video tracks: \(enabledVideoTracks)/\(videoTrackCount) enabled")
-        print("   [PIP-DIAG-P13] visual media selection: \(visualSelected)")
-        print("   [PIP-DIAG-P14] pvc.view in window: \(inWindow)   bounds: \(viewSize)")
-        print("   [PIP-DIAG-P15] pvc.view isHidden: \(isHidden)   alpha: \(alpha)")
-        print("   [PIP-DIAG-P16] PIP system supported: \(pipSupported)   already in PIP: \(isInPip)")
-        print("   [PIP-DIAG-P17] isUsingNativeLayout: \(isUsingNative)   isInFullscreen: \(inFullscreen)")
-        print("   [PIP-DIAG-P18] isDartFullscreenView: \(isDartFullscreenView)   isSharedPlayer: \(isSharedPlayer)")
-
         // Only re-arm if the master flag is on — never inadvertently flip
         // auto-PIP back on when the consumer has explicitly disabled it
         // (e.g., audio mode is currently active).
-        guard allowsPip else {
-            print("   ⏭️  Skipping re-arm (allowsPictureInPicture=false)")
-            return
-        }
-        guard canStartPictureInPictureAutomatically else {
-            print("   ⏭️  Skipping re-arm (canStartPictureInPictureAutomatically=false)")
-            return
-        }
+        guard playerViewController.allowsPictureInPicturePlayback else { return }
+        guard canStartPictureInPictureAutomatically else { return }
 
         // Belt-and-braces: reapply both the per-view flag and the manager
         // state. The manager update keeps the bookkeeping consistent with
@@ -1258,7 +1146,6 @@ import QuartzCore
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
         }
-        print("   ✅ Final pre-background re-arm complete (auto-PIP flag was: \(autoFromInline))")
     }
 
     /// Called when app enters background (including screen lock)

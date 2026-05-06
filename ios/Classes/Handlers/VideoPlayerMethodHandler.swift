@@ -1108,7 +1108,6 @@ extension VideoPlayerView {
             return
         }
 
-        print("🎬 setAllowsPictureInPicture(\(allows))")
         playerViewController.allowsPictureInPicturePlayback = allows
 
         // Keep the SharedPlayerManager-stored setting in sync so any later
@@ -1116,9 +1115,6 @@ extension VideoPlayerView {
         // of reverting to the construction-time default.
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
-            print("✅ allowsPictureInPicturePlayback=\(allows) for controller \(controllerIdValue)")
-        } else {
-            print("✅ allowsPictureInPicturePlayback=\(allows) for non-shared player")
         }
 
         // Keep `canStartPictureInPictureAutomaticallyFromInline` symmetric
@@ -1150,9 +1146,6 @@ extension VideoPlayerView {
                 // background-after-re-enable to silently fail to PIP.
                 if canStartPictureInPictureAutomatically {
                     playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-                    print("✅ Direct re-arm: canStartPictureInPictureAutomaticallyFromInline=true on dispatched view")
-                } else {
-                    print("⚠️ Skipped direct re-arm — view's canStartPictureInPictureAutomatically is false")
                 }
                 // Also propagate via the manager so any sibling views for
                 // this shared controller get armed and the bookkeeping stays
@@ -1184,13 +1177,9 @@ extension VideoPlayerView {
                     } else {
                         stillAllows = self.playerViewController.allowsPictureInPicturePlayback
                     }
-                    guard stillAllows else {
-                        print("ℹ️ Delayed PIP re-arm skipped — allowsPictureInPicture has since been disabled")
-                        return
-                    }
+                    guard stillAllows else { return }
                     if self.canStartPictureInPictureAutomatically {
                         self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-                        print("✅ Delayed re-arm: canStartPictureInPictureAutomaticallyFromInline=true (post-media-settle)")
                     }
                     if let controllerIdValue = self.controllerId {
                         SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)

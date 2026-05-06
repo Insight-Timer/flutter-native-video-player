@@ -143,16 +143,12 @@ class SharedPlayerManager: NSObject {
     /// init and would otherwise revert to the construction-time value.
     /// No-op if no PIP settings have been stored yet for this controller.
     func setAllowsPictureInPicture(for controllerId: Int, allows: Bool) {
-        guard let existing = pipSettings[controllerId] else {
-            print("   ⚠️ setAllowsPictureInPicture: no stored settings yet for controller \(controllerId)")
-            return
-        }
+        guard let existing = pipSettings[controllerId] else { return }
         pipSettings[controllerId] = PipSettings(
             allowsPictureInPicture: allows,
             canStartPictureInPictureAutomatically: existing.canStartPictureInPictureAutomatically,
             showNativeControls: existing.showNativeControls
         )
-        print("   ✅ Updated allowsPictureInPicture=\(allows) for controller \(controllerId)")
     }
 
     /// Gets PiP settings for a controller
