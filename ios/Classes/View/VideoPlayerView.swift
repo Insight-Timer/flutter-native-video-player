@@ -1196,7 +1196,7 @@ import QuartzCore
             guard #available(iOS 14.0, *) else { return nil }
             return AVPictureInPictureController.isPictureInPictureSupported()
         }()
-        let isInPip = playerViewController.isPictureInPictureActive
+        let isInPip = isPipCurrentlyActive
         let isUsingNative = isUsingNativeLayout
         let inFullscreen = (fullscreenPlayerViewController != nil)
         let pvcAddress = "0x\(String(unsafeBitCast(playerViewController, to: Int.self), radix: 16))"
