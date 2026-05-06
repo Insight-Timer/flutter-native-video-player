@@ -1138,12 +1138,64 @@ extension VideoPlayerView {
                 if let controllerIdValue = controllerId {
                     SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: false)
                 }
-            } else if let controllerIdValue = controllerId {
-                SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-            } else if canStartPictureInPictureAutomatically {
-                // Non-shared player path — no manager involvement; mirror
-                // the construction-time consent directly on the view.
-                playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+            } else {
+                // On re-enable, set the flag DIRECTLY on the dispatched view's
+                // controller — don't rely solely on
+                // `SharedPlayerManager.setAutomaticPiPEnabled` to find and arm
+                // the right view. The manager's primary-view bookkeeping can
+                // be stale after a runtime disable→re-enable round trip
+                // (e.g., the previous primary view was disposed during an
+                // audio-mode toggle) and its fallback path may not arm the
+                // currently-active platform view, causing the first
+                // background-after-re-enable to silently fail to PIP.
+                if canStartPictureInPictureAutomatically {
+                    playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                    print("✅ Direct re-arm: canStartPictureInPictureAutomaticallyFromInline=true on dispatched view")
+                } else {
+                    print("⚠️ Skipped direct re-arm — view's canStartPictureInPictureAutomatically is false")
+                }
+                // Also propagate via the manager so any sibling views for
+                // this shared controller get armed and the bookkeeping stays
+                // consistent.
+                if let controllerIdValue = controllerId {
+                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+                }
+
+                // Belt-and-braces re-application after a short delay. When
+                // PIP is being re-enabled in tandem with restoring a
+                // previously-deselected video media group (the typical
+                // audio-mode → video-mode toggle pattern), AVKit can fail
+                // to honor the immediate flag set because the visual media
+                // selection is still settling — the player view controller
+                // is briefly not considered an "active video playback view"
+                // by AVKit's auto-PIP gating, so the next backgrounding
+                // silently fails to PIP. Re-applying the same settings ~1s
+                // later catches that window so the first background-after-
+                // re-enable reliably enters PIP. Subsequent backgroundings
+                // are unaffected (the flag is already set).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self = self else { return }
+                    // Re-check the stored setting in case the consumer flipped
+                    // it back to false during our delay window — never re-arm
+                    // PIP if it's been runtime-disabled in the meantime.
+                    let stillAllows: Bool
+                    if let controllerIdValue = self.controllerId {
+                        stillAllows = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
+                    } else {
+                        stillAllows = self.playerViewController.allowsPictureInPicturePlayback
+                    }
+                    guard stillAllows else {
+                        print("ℹ️ Delayed PIP re-arm skipped — allowsPictureInPicture has since been disabled")
+                        return
+                    }
+                    if self.canStartPictureInPictureAutomatically {
+                        self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                        print("✅ Delayed re-arm: canStartPictureInPictureAutomaticallyFromInline=true (post-media-settle)")
+                    }
+                    if let controllerIdValue = self.controllerId {
+                        SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+                    }
+                }
             }
         }
 

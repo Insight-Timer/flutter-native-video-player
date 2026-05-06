@@ -371,6 +371,21 @@ import QuartzCore
         )
         print("✅ Registered background notification observer for view \(viewId)")
 
+        // Observe app about to resign active (immediately before backgrounding)
+        // so we can guarantee the auto-PIP flag is armed at the exact moment
+        // AVKit makes its auto-PIP decision. Without this, a small window
+        // exists immediately after a runtime PIP re-enable (e.g., audio-mode
+        // OFF) where AVKit's view-active state is still settling and the
+        // initial flag set isn't honored — backgrounding inside that window
+        // silently fails to PIP.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        print("✅ Registered will-resign-active notification observer for view \(viewId)")
+
         // Observe audio session interruptions
         NotificationCenter.default.addObserver(
             self,
@@ -1102,6 +1117,41 @@ import QuartzCore
     }
 
     // MARK: - App Lifecycle Handling
+
+    /// Called immediately before the app resigns active (right before
+    /// backgrounding). Re-arms the auto-PIP flag so AVKit sees the desired
+    /// state at the exact moment it decides whether to auto-enter PIP.
+    ///
+    /// Why this is needed: after a runtime `setAllowsPictureInPicture(true)`
+    /// (e.g., audio-mode OFF), there's a small window during which AVKit's
+    /// view-active state is still settling from the visual media-selection
+    /// restoration. Backgrounding inside that window leaves AVKit reading
+    /// the flag while it still considers the player "not an active video
+    /// playback view" — auto-PIP silently no-ops. Re-applying the flag at
+    /// `willResignActive` lands the value at the moment AVKit actually
+    /// reads it, guaranteeing PIP fires on the very next background.
+    @objc func handleAppWillResignActive() {
+        guard #available(iOS 14.2, *) else { return }
+        // Only re-arm if the master flag is on — never inadvertently flip
+        // auto-PIP back on when the consumer has explicitly disabled it
+        // (e.g., audio mode is currently active).
+        guard playerViewController.allowsPictureInPicturePlayback else {
+            print("📱 willResignActive (view \(viewId)): allowsPictureInPicture=false — skipping auto-PIP re-arm")
+            return
+        }
+        guard canStartPictureInPictureAutomatically else { return }
+
+        // Belt-and-braces: reapply both the per-view flag and the manager
+        // state. The manager update keeps the bookkeeping consistent with
+        // the per-view direct set, in case the manager is consulted later
+        // (e.g., from the view-construction re-enable path).
+        let wasArmed = playerViewController.canStartPictureInPictureAutomaticallyFromInline
+        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+        }
+        print("📱 willResignActive (view \(viewId)): auto-PIP flag \(wasArmed) → true (final pre-background re-arm)")
+    }
 
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback
