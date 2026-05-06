@@ -1132,25 +1132,117 @@ import QuartzCore
     /// reads it, guaranteeing PIP fires on the very next background.
     @objc func handleAppWillResignActive() {
         guard #available(iOS 14.2, *) else { return }
+
+        // === DIAGNOSTIC: dump every PIP-eligibility input AVKit could care
+        //     about. Log this on every backgrounding so we can compare a
+        //     successful auto-PIP entry against a silent no-op and pin
+        //     down exactly which condition is preventing the OS from
+        //     auto-entering PIP. Inspect the iOS console (Xcode log) at
+        //     ~25 lines per `[PIP-DIAG]` block — find one entry that
+        //     immediately precedes a `🎬 PiP will start` (success) and
+        //     one that doesn't (failure), and diff the two.
+        let allowsPip = playerViewController.allowsPictureInPicturePlayback
+        let autoFromInline = playerViewController.canStartPictureInPictureAutomaticallyFromInline
+        let storedAllows = controllerId.flatMap {
+            SharedPlayerManager.shared.getPipSettings(for: $0)?.allowsPictureInPicture
+        }
+        let p = player
+        let item = p?.currentItem
+        let rate = p?.rate ?? -999
+        let timeControl: String
+        if let p = p {
+            switch p.timeControlStatus {
+            case .paused: timeControl = "paused"
+            case .waitingToPlayAtSpecifiedRate: timeControl = "waiting"
+            case .playing: timeControl = "playing"
+            @unknown default: timeControl = "unknown"
+            }
+        } else {
+            timeControl = "<no-player>"
+        }
+        let itemStatus: String = {
+            guard let item = item else { return "<no-item>" }
+            switch item.status {
+            case .unknown: return "unknown"
+            case .readyToPlay: return "readyToPlay"
+            case .failed: return "failed"
+            @unknown default: return "@unknown"
+            }
+        }()
+        let likelyToKeepUp = item?.isPlaybackLikelyToKeepUp ?? false
+        let bufferEmpty = item?.isPlaybackBufferEmpty ?? true
+        let presentationSize = item?.presentationSize ?? .zero
+        let preferredBitrate = item?.preferredPeakBitRate ?? -1
+        let videoTrackCount = item?.tracks.filter { $0.assetTrack?.mediaType == .video }.count ?? 0
+        let enabledVideoTracks = item?.tracks.filter {
+            $0.assetTrack?.mediaType == .video && $0.isEnabled
+        }.count ?? 0
+        let visualSelected: String = {
+            guard let asset = item?.asset as? AVURLAsset,
+                  let visualGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .visual) else {
+                return "<no-visual-group>"
+            }
+            if let selected = item?.currentMediaSelection.selectedMediaOption(in: visualGroup) {
+                return selected.displayName
+            }
+            return "<none-selected>"
+        }()
+        let pvcView = playerViewController.view
+        let inWindow = pvcView?.window != nil
+        let viewSize = pvcView?.bounds.size ?? .zero
+        let isHidden = pvcView?.isHidden ?? true
+        let alpha = pvcView?.alpha ?? -1
+        let isPipPossible: Bool? = {
+            guard #available(iOS 14.0, *) else { return nil }
+            return AVPictureInPictureController.isPictureInPictureSupported()
+        }()
+        let isInPip = playerViewController.isPictureInPictureActive
+        let isUsingNative = isUsingNativeLayout
+        let inFullscreen = (fullscreenPlayerViewController != nil)
+        let pvcAddress = "0x\(String(unsafeBitCast(playerViewController, to: Int.self), radix: 16))"
+        let primaryViewId = controllerId.flatMap {
+            SharedPlayerManager.shared.getPrimaryViewId(for: $0)
+        }
+
+        print("📱 [PIP-DIAG] willResignActive (view \(viewId), pvc=\(pvcAddress)):")
+        print("   • allowsPictureInPicturePlayback: \(allowsPip)")
+        print("   • canStartPictureInPictureAutomaticallyFromInline: \(autoFromInline)")
+        print("   • SharedPlayerManager.allowsPictureInPicture: \(storedAllows.map(String.init(describing:)) ?? "<no-stored>")")
+        print("   • SharedPlayerManager.primaryViewId: \(primaryViewId.map(String.init) ?? "<none>")  (this view: \(viewId))")
+        print("   • view.canStartPictureInPictureAutomatically (construction-time): \(canStartPictureInPictureAutomatically)")
+        print("   • player.rate: \(rate)   timeControlStatus: \(timeControl)")
+        print("   • playerItem.status: \(itemStatus)")
+        print("   • playerItem.isPlaybackLikelyToKeepUp: \(likelyToKeepUp)   isPlaybackBufferEmpty: \(bufferEmpty)")
+        print("   • playerItem.presentationSize: \(presentationSize)   preferredPeakBitRate: \(preferredBitrate)")
+        print("   • playerItem video tracks: \(enabledVideoTracks)/\(videoTrackCount) enabled")
+        print("   • visual media selection: \(visualSelected)")
+        print("   • pvc.view in window: \(inWindow)   bounds: \(viewSize)   isHidden: \(isHidden)   alpha: \(alpha)")
+        print("   • PIP system supported: \(isPipPossible.map(String.init(describing:)) ?? "<n/a>")")
+        print("   • already in PIP: \(isInPip)")
+        print("   • isUsingNativeLayout: \(isUsingNative)   isInFullscreen: \(inFullscreen)")
+        print("   • isDartFullscreenView: \(isDartFullscreenView)   isSharedPlayer: \(isSharedPlayer)")
+
         // Only re-arm if the master flag is on — never inadvertently flip
         // auto-PIP back on when the consumer has explicitly disabled it
         // (e.g., audio mode is currently active).
-        guard playerViewController.allowsPictureInPicturePlayback else {
-            print("📱 willResignActive (view \(viewId)): allowsPictureInPicture=false — skipping auto-PIP re-arm")
+        guard allowsPip else {
+            print("   ⏭️  Skipping re-arm (allowsPictureInPicture=false)")
             return
         }
-        guard canStartPictureInPictureAutomatically else { return }
+        guard canStartPictureInPictureAutomatically else {
+            print("   ⏭️  Skipping re-arm (canStartPictureInPictureAutomatically=false)")
+            return
+        }
 
         // Belt-and-braces: reapply both the per-view flag and the manager
         // state. The manager update keeps the bookkeeping consistent with
         // the per-view direct set, in case the manager is consulted later
         // (e.g., from the view-construction re-enable path).
-        let wasArmed = playerViewController.canStartPictureInPictureAutomaticallyFromInline
         playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
         }
-        print("📱 willResignActive (view \(viewId)): auto-PIP flag \(wasArmed) → true (final pre-background re-arm)")
+        print("   ✅ Final pre-background re-arm complete (auto-PIP flag was: \(autoFromInline))")
     }
 
     /// Called when app enters background (including screen lock)
