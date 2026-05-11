@@ -136,12 +136,8 @@ class SharedPlayerManager: NSObject {
         print("   ✅ Stored PiP settings for controller \(controllerId) - allows: \(allowsPictureInPicture), autoStart: \(canStartPictureInPictureAutomatically)")
     }
 
-    /// Updates only the `allowsPictureInPicture` field of the stored PiP
-    /// settings for a controller, preserving the other fields. Used to make
-    /// runtime `setAllowsPictureInPicture` calls survive view reconstruction
-    /// — newly-built `VideoPlayerView` instances read these settings during
-    /// init and would otherwise revert to the construction-time value.
-    /// No-op if no PIP settings have been stored yet for this controller.
+    /// Mirrors a runtime `allowsPictureInPicture` change into stored settings
+    /// so view reconstruction reads the updated value. No-op if no settings stored.
     func setAllowsPictureInPicture(for controllerId: Int, allows: Bool) {
         guard let existing = pipSettings[controllerId] else { return }
         pipSettings[controllerId] = PipSettings(

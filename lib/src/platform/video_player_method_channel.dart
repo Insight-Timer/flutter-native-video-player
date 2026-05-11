@@ -293,12 +293,9 @@ class VideoPlayerMethodChannel {
     }
   }
 
-  /// Toggles AVKit's master `allowsPictureInPicturePlayback` flag at runtime
-  /// on iOS. When `false`, Picture-in-Picture cannot start at all (manual
-  /// entry, automatic-from-inline, or auto-on-background from fullscreen are
-  /// all suppressed). Use [enableAutomaticInlinePip] / [disableAutomaticInlinePip]
-  /// for the lighter-weight per-event-type toggle; use this for a hard
-  /// disable that survives the plugin's view-reconstruction re-enable path.
+  /// Hard-toggles AVKit's `allowsPictureInPicturePlayback`. `false` blocks all
+  /// PIP entry paths and survives view reconstruction (vs the lighter-weight
+  /// [enableAutomaticInlinePip] / [disableAutomaticInlinePip]).
   Future<bool> setAllowsPictureInPicture(bool allows) async {
     try {
       final dynamic result = await _methodChannel.invokeMethod<dynamic>(

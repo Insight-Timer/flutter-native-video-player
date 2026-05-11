@@ -297,17 +297,10 @@ import QuartzCore
 
                 if isActiveForAutoPiP || isPlaying {
                     print("🎬 Controller state - activeForAutoPiP: \(isActiveForAutoPiP), isPlaying: \(isPlaying)")
-                    // Respect a runtime hard-disable of PIP: if a previous
-                    // `setAllowsPictureInPicture(false)` call has flipped the
-                    // stored `allowsPictureInPicture` setting off, do NOT
-                    // re-enable auto-PIP on this newly-constructed view.
-                    // Without this guard, the construction-time value would
-                    // silently undo runtime PIP gating (e.g., consumer's
-                    // audio-mode toggle) every time the platform view is
-                    // rebuilt.
+                    // Honor runtime PIP hard-disable across view reconstruction.
                     let storedAllowsPip = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
                     if !storedAllowsPip {
-                        // Skip re-enable — runtime override has hard-disabled PIP.
+                        // Skip — runtime override has disabled PIP.
                     } else if canStartPictureInPictureAutomatically {
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
@@ -371,13 +364,9 @@ import QuartzCore
         )
         print("✅ Registered background notification observer for view \(viewId)")
 
-        // Observe app about to resign active (immediately before backgrounding)
-        // so we can guarantee the auto-PIP flag is armed at the exact moment
-        // AVKit makes its auto-PIP decision. Without this, a small window
-        // exists immediately after a runtime PIP re-enable (e.g., audio-mode
-        // OFF) where AVKit's view-active state is still settling and the
-        // initial flag set isn't honored — backgrounding inside that window
-        // silently fails to PIP.
+        // Re-arm auto-PIP at willResignActive: closes the window right after
+        // a runtime PIP re-enable where AVKit's view-active state is still
+        // settling and the initial flag set would otherwise be ignored.
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppWillResignActive),
@@ -1117,30 +1106,15 @@ import QuartzCore
 
     // MARK: - App Lifecycle Handling
 
-    /// Called immediately before the app resigns active (right before
-    /// backgrounding). Re-arms the auto-PIP flag so AVKit sees the desired
-    /// state at the exact moment it decides whether to auto-enter PIP.
-    ///
-    /// Why this is needed: after a runtime `setAllowsPictureInPicture(true)`
-    /// (e.g., audio-mode OFF), there's a small window during which AVKit's
-    /// view-active state is still settling from the visual media-selection
-    /// restoration. Backgrounding inside that window leaves AVKit reading
-    /// the flag while it still considers the player "not an active video
-    /// playback view" — auto-PIP silently no-ops. Re-applying the flag at
-    /// `willResignActive` lands the value at the moment AVKit actually
-    /// reads it, guaranteeing PIP fires on the very next background.
+    /// Re-arms auto-PIP at the last possible moment before backgrounding so
+    /// AVKit reads the desired flag value at decision time — fixes the
+    /// post-runtime-toggle window where the initial flag set is ignored.
     @objc func handleAppWillResignActive() {
         guard #available(iOS 14.2, *) else { return }
-        // Only re-arm if the master flag is on — never inadvertently flip
-        // auto-PIP back on when the consumer has explicitly disabled it
-        // (e.g., audio mode is currently active).
+        // Don't override an explicit consumer disable.
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
 
-        // Belt-and-braces: reapply both the per-view flag and the manager
-        // state. The manager update keeps the bookkeeping consistent with
-        // the per-view direct set, in case the manager is consulted later
-        // (e.g., from the view-construction re-enable path).
         playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
