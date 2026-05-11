@@ -166,6 +166,26 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             }
         }
 
+        // pipDidStop — fires AFTER AVKit's restore animation completes,
+        // so Flutter listeners can perform navigation safely (vs `pipStop`
+        // from willStop which lands mid-animation).
+        if eventSink != nil {
+            sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+        } else if let controllerIdValue = controllerId {
+            let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            for view in allViews where view.eventSink != nil {
+                view.sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+                break
+            }
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent(
+                "pipDidStop",
+                data: ["isPictureInPicture": false],
+                for: controllerIdValue
+            )
+        }
+
         // Emit current state to sync UI after PiP stops
         // Note: pipStop event was already sent in willStopPictureInPicture
         if eventSink != nil {
@@ -442,6 +462,24 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
                     print("⚠️ NOT re-enabling automatic PiP - neither view nor shared settings allow it")
                 }
             }
+        }
+
+        // pipDidStop — post-transition. See playerViewControllerDidStop above.
+        if eventSink != nil {
+            sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+        } else if let controllerIdValue = controllerId {
+            let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            for view in allViews where view.eventSink != nil {
+                view.sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+                break
+            }
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent(
+                "pipDidStop",
+                data: ["isPictureInPicture": false],
+                for: controllerIdValue
+            )
         }
 
         // Emit current state to sync UI after PiP stops

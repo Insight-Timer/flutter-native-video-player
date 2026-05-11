@@ -22,7 +22,13 @@ enum PlayerControlState {
   previousTrackRequested,
   nextTrackRequested,
   pipStarted,
+
+  /// iOS: AVKit `willStop` (mid-transition). Route mutations get dropped
+  /// here — use [pipDidStop] for navigation.
   pipStopped,
+
+  /// iOS: AVKit `didStop` (post-transition). Safe for navigation.
+  pipDidStop,
   pipAvailabilityChanged,
   airPlayAvailabilityChanged,
   airPlayConnected,
@@ -114,6 +120,8 @@ class PlayerControlEvent {
         return PlayerControlState.pipStarted;
       case 'pipStop':
         return PlayerControlState.pipStopped;
+      case 'pipDidStop':
+        return PlayerControlState.pipDidStop;
       case 'pipAvailabilityChanged':
         return PlayerControlState.pipAvailabilityChanged;
       case 'airPlayAvailabilityChanged':

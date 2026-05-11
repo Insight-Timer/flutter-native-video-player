@@ -307,7 +307,7 @@ import QuartzCore
                     // rebuilt.
                     let storedAllowsPip = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
                     if !storedAllowsPip {
-                        print("   ⚠️ Skipping automatic PiP re-enable - allowsPictureInPicture is false (runtime override)")
+                        // Skip re-enable — runtime override has hard-disabled PIP.
                     } else if canStartPictureInPictureAutomatically {
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
@@ -384,7 +384,6 @@ import QuartzCore
             name: UIApplication.willResignActiveNotification,
             object: nil
         )
-        print("✅ Registered will-resign-active notification observer for view \(viewId)")
 
         // Observe audio session interruptions
         NotificationCenter.default.addObserver(
