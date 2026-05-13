@@ -219,6 +219,78 @@ class VideoPlayerNotificationHandler(
     }
 
     /**
+     * Refreshes the system media controls' prev/next button availability without
+     * restarting playback or reloading media. Used by playlist hosts after a
+     * reorder/shuffle moves the playing item — the flags baked in at `load`
+     * time have gone stale.
+     *
+     * Updates the booleans the wrapped player reports via `getAvailableCommands`,
+     * then republishes the session so connected system controllers (notification,
+     * Bluetooth, Android Auto) pick up the new command set via `onConnect`.
+     * Inlines the release + recreate from the seek-permission-change branch of
+     * [setupMediaSession] but deliberately skips [updatePlayerMediaItemMetadata]
+     * so the existing `MediaItem`'s title/artist/album/artwork survives untouched
+     * — the player's current `MediaItem` still holds the metadata from `load`.
+     * No-op when there's no active session yet; the next [setupMediaSession]
+     * will pick up the latest flags as usual.
+     */
+    fun refreshSystemTrackControlsAvailability(
+        showSystemNextTrackControl: Boolean,
+        showSystemPreviousTrackControl: Boolean
+    ) {
+        val flagsChanged =
+            this.showSystemNextTrackControl != showSystemNextTrackControl ||
+                this.showSystemPreviousTrackControl != showSystemPreviousTrackControl
+        this.showSystemNextTrackControl = showSystemNextTrackControl
+        this.showSystemPreviousTrackControl = showSystemPreviousTrackControl
+
+        if (!flagsChanged) return
+
+        val existing = mediaSession ?: return
+
+        // Tear down the existing session so connected controllers re-`onConnect`
+        // against a fresh one that reports the new command set. We can't fire
+        // onAvailableCommandsChanged externally; the wrappedPlayer reads the
+        // updated booleans live, so the new session's getAvailableCommands()
+        // returns the correct ⏮/⏭ availability immediately.
+        val wasActive = VideoPlayerMediaSessionService.getActiveSession() === existing
+        VideoPlayerMediaSessionService.clearActiveSessionIfMatches(existing)
+        existing.release()
+        mediaSession = null
+        player.removeListener(playerListener)
+
+        // Recreate the session — mirrors setupMediaSession's session-rebuild
+        // branch (lines 369-377) but skips updatePlayerMediaItemMetadata so the
+        // existing MediaItem's title/artist/album/artwork stays intact.
+        val packageManager = context.packageManager
+        val intent = packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        } ?: Intent()
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
+        val sessionId = "huddle_video_player_${++sessionCounter}"
+        mediaSession = MediaSession.Builder(context, wrappedPlayer)
+            .setId(sessionId)
+            .setSessionActivity(pendingIntent)
+            .setCallback(mediaSessionCallback)
+            .build()
+
+        player.removeListener(playerListener)
+        player.addListener(playerListener)
+
+        // If our session was the foreground service's active one, re-publish
+        // it so the running notification keeps pointing at the new instance.
+        if (wasActive) {
+            mediaSession?.let { VideoPlayerMediaSessionService.setActiveSession(it) }
+        }
+    }
+
+    /**
      * Updates the event handler (needed when shared NotificationHandler is reused by new VideoPlayerView)
      */
     fun updateEventHandler(newEventHandler: VideoPlayerEventHandler) {
