@@ -512,61 +512,17 @@ extension VideoPlayerView {
     }
     
     private func startQualityMonitoring() {
-        // Remove existing observer if any
+        // Disabled on purpose: quality now stays on a stable master URL and is
+        // applied via preferred peak bitrate / max resolution, so URL-index based
+        // adaptation is no longer valid.
         if let timeObserver = timeObserver {
             player?.removeTimeObserver(timeObserver)
-        }
-        
-        // Monitor playback every second for auto-quality
-        let interval = CMTime(seconds: 1.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-        timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
-            self?.checkAndAdjustQuality()
+            self.timeObserver = nil
         }
     }
     
     private func checkAndAdjustQuality() {
-        guard isAutoQuality,
-              !qualityLevels.isEmpty,
-              CACurrentMediaTime() - lastBitrateCheck >= bitrateCheckInterval else {
-            return
-        }
-        
-        lastBitrateCheck = CACurrentMediaTime()
-        
-        // Get current playback statistics
-        let loadedTimeRanges = player?.currentItem?.loadedTimeRanges ?? []
-        let currentTime = player?.currentTime() ?? CMTime.zero
-        
-        // Calculate buffer health
-        var bufferHealth: TimeInterval = 0
-        for range in loadedTimeRanges {
-            let timeRange = range.timeRangeValue
-            if timeRange.start <= currentTime {
-                bufferHealth += timeRange.duration.seconds
-            }
-        }
-        
-        // Get current quality index
-        guard let urlAsset = player?.currentItem?.asset as? AVURLAsset,
-              let currentUrl = urlAsset.url.absoluteString as String?,
-              let currentIndex = qualityLevels.firstIndex(where: { $0.url == currentUrl }) else {
-            return
-        }
-        
-        // Adjust quality based on buffer health
-        var targetIndex = currentIndex
-        
-        if bufferHealth < 3.0 && currentIndex > 0 {
-            // Buffer is low, decrease quality
-            targetIndex = currentIndex - 1
-        } else if bufferHealth > 10.0 && currentIndex < qualityLevels.count - 1 {
-            // Buffer is healthy, try increasing quality
-            targetIndex = currentIndex + 1
-        }
-        
-        if targetIndex != currentIndex {
-            switchToQuality(qualityLevels[targetIndex], result: nil)
-        }
+        // Intentionally disabled. See startQualityMonitoring().
     }
     
     private func switchToQuality(_ quality: VideoPlayer.QualityLevel, result: FlutterResult?) {
@@ -1348,6 +1304,16 @@ extension VideoPlayerView {
                let videoGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .visual) {
                 playerItem.select(nil, in: videoGroup)
             }
+
+            for itemTrack in playerItem.tracks {
+                let mediaType = itemTrack.assetTrack?.mediaType
+                if mediaType == .video {
+                    itemTrack.isEnabled = false
+                } else if mediaType == .audio {
+                    itemTrack.isEnabled = true
+                }
+            }
+
             playerItem.preferredPeakBitRate = 1.0
             if #available(iOS 11.0, *) {
                 playerItem.preferredMaximumResolution = .zero
@@ -1362,6 +1328,13 @@ extension VideoPlayerView {
                 playerItem.select(defaultOption, in: videoGroup)
             } else if let firstOption = videoGroup.options.first {
                 playerItem.select(firstOption, in: videoGroup)
+            }
+        }
+
+        for itemTrack in playerItem.tracks {
+            let mediaType = itemTrack.assetTrack?.mediaType
+            if mediaType == .video || mediaType == .audio {
+                itemTrack.isEnabled = true
             }
         }
 

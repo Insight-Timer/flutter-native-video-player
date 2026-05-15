@@ -44,10 +44,11 @@ class VideoPlayerMethodHandler(
     private var lastBitrateCheck = 0L
     private val bitrateCheckInterval = 5000L // 5 seconds
     private var currentVideoIsHls = false // Track if current video is HLS for quality switching
-    private var desiredVideoTrackDisabled = false
+    private var videoTrackDisabledPreference = false
     private var preferredMaxVideoBitrate: Int? = null
     private var preferredMaxVideoWidth: Int? = null
     private var preferredMaxVideoHeight: Int? = null
+    private var trackReadyListener: Player.Listener? = null
 
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
@@ -60,7 +61,7 @@ class VideoPlayerMethodHandler(
 
     init {
         if (controllerId != null) {
-            desiredVideoTrackDisabled = SharedPlayerManager.isVideoTrackDisabled(controllerId)
+            videoTrackDisabledPreference = SharedPlayerManager.isVideoTrackDisabled(controllerId)
         }
     }
 
@@ -250,6 +251,7 @@ class VideoPlayerMethodHandler(
         player.setMediaSource(mediaSource)
         applyTrackPreferences(reason = "load_set_media_source")
         player.prepare()
+        applyVideoTrackPreference(reason = "load_prepare")
 
         // Configure HDR settings for ExoPlayer using TrackSelectionParameters
         if (!enableHDR) {
@@ -425,6 +427,7 @@ class VideoPlayerMethodHandler(
             preferredMaxVideoHeight = null
             eventHandler.sendEvent("loading")
             applyTrackPreferences(reason = "quality_auto")
+            applyVideoTrackPreference(reason = "quality_auto")
             eventHandler.sendEvent("qualityChange", mapOf(
                 "url" to (qualityInfo["url"] ?: ""),
                 "label" to (qualityInfo["label"] ?: "Auto"),
@@ -443,6 +446,7 @@ class VideoPlayerMethodHandler(
 
             eventHandler.sendEvent("loading")
             applyTrackPreferences(reason = "quality_manual")
+            applyVideoTrackPreference(reason = "quality_manual")
 
             eventHandler.sendEvent("qualityChange", mapOf(
                 "url" to (qualityInfo["url"] ?: ""),
@@ -466,6 +470,7 @@ class VideoPlayerMethodHandler(
         preferredMaxVideoWidth = (quality["width"] as? Number)?.toInt()?.takeIf { it > 0 }
         preferredMaxVideoHeight = (quality["height"] as? Number)?.toInt()?.takeIf { it > 0 }
         applyTrackPreferences(reason = "switch_quality")
+        applyVideoTrackPreference(reason = "switch_quality")
 
         eventHandler.sendEvent("qualityChange", mapOf(
             "url" to (quality["url"] ?: ""),
@@ -502,6 +507,7 @@ class VideoPlayerMethodHandler(
      * Disposes the player
      */
     private fun handleDispose(result: MethodChannel.Result) {
+        clearTrackReadyListener()
         player.stop()
 
         if (controllerId != null) {
@@ -810,44 +816,33 @@ class VideoPlayerMethodHandler(
 
             Log.d(TAG, "Setting video track disabled: $disabled")
 
-            if (disabled) {
-                // Check if HLS has demuxed (separate) audio tracks.
-                // If audio is muxed inside video segments, disabling video
-                // will not save bandwidth, so skip.
-                val hasDemuxedAudio = player.currentTracks.groups.any {
-                    it.type == C.TRACK_TYPE_AUDIO
-                }
-                if (!hasDemuxedAudio) {
-                    desiredVideoTrackDisabled = disabled
-                    if (controllerId != null) {
-                        SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
-                    }
-                    result.success(mapOf("skipped" to true, "reason" to "no_demuxed_audio"))
-                    return
-                }
-            }
-
-            desiredVideoTrackDisabled = disabled
+            videoTrackDisabledPreference = disabled
             if (controllerId != null) {
                 SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
             }
-            applyTrackPreferences(reason = "set_video_track_disabled")
 
-            // Start/stop the foreground service based on audio-only mode.
-            // When video track is disabled → audio-only → show notification.
-            // When video track is re-enabled → video mode → remove notification.
             if (disabled) {
-                notificationHandler.startForegroundPlayback()
+                val groups = player.currentTracks.groups
+                if (groups.isEmpty()) {
+                    applyVideoTrackPreference(reason = "set_video_track_disabled_tracks_not_ready")
+                    ensureTrackReadyListener()
+                    result.success(null)
+                    return
+                }
+                // Check if HLS has demuxed (separate) audio tracks.
+                // If audio is muxed inside video segments, disabling video
+                // will not save bandwidth, so skip.
+                val hasDemuxedAudio = groups.any { it.type == C.TRACK_TYPE_AUDIO }
+                if (!hasDemuxedAudio) {
+                    result.success(mapOf("skipped" to true, "reason" to "no_demuxed_audio"))
+                    return
+                }
+                clearTrackReadyListener()
             } else {
-                notificationHandler.stopForegroundPlayback()
-                // Disabling and re-enabling the video track releases and recreates the
-                // MediaCodecVideoRenderer. On some devices (OnePlus 15 with OxygenOS +
-                // SD 8 Elite C2 codec) the new renderer does not pick up the original
-                // SurfaceView and instead outputs to a placeholder ImageReader, leaving
-                // the UI frozen. Ask the view to re-bind the Surface to force
-                // setVideoSurface() on the new renderer.
-                onSurfaceRebindRequest?.invoke()
+                clearTrackReadyListener()
             }
+
+            applyVideoTrackPreference(reason = "set_video_track_disabled")
 
             Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
             result.success(null)
@@ -859,18 +854,15 @@ class VideoPlayerMethodHandler(
 
     fun reapplyTrackPreferences(reason: String) {
         applyTrackPreferences(reason)
+        applyVideoTrackPreference(reason)
     }
 
     private fun applyTrackPreferences(reason: String) {
         val builder = player.trackSelectionParameters
             .buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, desiredVideoTrackDisabled)
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, videoTrackDisabledPreference)
 
-        if (desiredVideoTrackDisabled) {
-            // Keep this hard-cap to favor audio rendition selection when video is disabled.
-            builder.setMaxVideoBitrate(1)
-            builder.setMaxVideoSize(1, 1)
-        } else {
+        if (!videoTrackDisabledPreference) {
             builder.setMaxVideoBitrate(preferredMaxVideoBitrate ?: Int.MAX_VALUE)
             if (preferredMaxVideoWidth != null && preferredMaxVideoHeight != null) {
                 builder.setMaxVideoSize(preferredMaxVideoWidth!!, preferredMaxVideoHeight!!)
@@ -882,7 +874,47 @@ class VideoPlayerMethodHandler(
         player.trackSelectionParameters = builder.build()
         Log.d(
             TAG,
-            "Applied track prefs ($reason): videoDisabled=$desiredVideoTrackDisabled, maxBitrate=${preferredMaxVideoBitrate ?: "auto"}"
+            "Applied track prefs ($reason): videoDisabled=$videoTrackDisabledPreference, maxBitrate=${preferredMaxVideoBitrate ?: "auto"}"
         )
+    }
+
+    private fun applyVideoTrackPreference(reason: String) {
+        val newParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, videoTrackDisabledPreference)
+            .build()
+        player.trackSelectionParameters = newParameters
+
+        if (videoTrackDisabledPreference) {
+            notificationHandler.startForegroundPlayback()
+        } else {
+            notificationHandler.stopForegroundPlayback()
+            // Rebind surface on re-enable for devices that can end up with stale renderer output.
+            onSurfaceRebindRequest?.invoke()
+        }
+
+        Log.d(TAG, "Applied video track preference ($reason): disabled=$videoTrackDisabledPreference")
+    }
+
+    private fun ensureTrackReadyListener() {
+        if (trackReadyListener != null) return
+        trackReadyListener = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (!videoTrackDisabledPreference) {
+                    clearTrackReadyListener()
+                    return
+                }
+                if (tracks.groups.isEmpty()) return
+                applyVideoTrackPreference(reason = "tracks_ready_reapply")
+                clearTrackReadyListener()
+            }
+        }
+        player.addListener(trackReadyListener!!)
+    }
+
+    private fun clearTrackReadyListener() {
+        val listener = trackReadyListener ?: return
+        player.removeListener(listener)
+        trackReadyListener = null
     }
 }
