@@ -16,13 +16,10 @@ import QuartzCore
     var isEventChannelActive: Bool = false
     var isDisposed: Bool = false
     var availableQualities: [[String: Any]] = []
-    var qualityLevels: [VideoPlayer.QualityLevel] = []
     var isAutoQuality = false
     var lastBitrateCheck: TimeInterval = 0
     let bitrateCheckInterval: TimeInterval = 5.0 // Check every 5 seconds
     var desiredVideoTrackDisabled: Bool = false
-    var preferredPeakBitRateForQuality: Double = 0
-    var preferredMaximumResolutionForQuality: CGSize = .zero
     var controllerId: Int?
     var pipController: AVPictureInPictureController?
 
@@ -513,21 +510,7 @@ import QuartzCore
         case "setQuality":
             handleSetQuality(call: call, result: result)
         case "getAvailableQualities":
-            // First check if we have qualities in this view instance
-            if !availableQualities.isEmpty {
-                result(availableQualities)
-            } else if let controllerIdValue = controllerId,
-                      let cachedQualities = SharedPlayerManager.shared.getQualities(for: controllerIdValue) {
-                // If view instance is empty but cache has qualities, restore them
-                availableQualities = cachedQualities
-                if let cachedQualityLevels = SharedPlayerManager.shared.getQualityLevels(for: controllerIdValue) {
-                    qualityLevels = cachedQualityLevels
-                }
-                print("🔄 Restored \(cachedQualities.count) qualities from cache for controller \(controllerIdValue)")
-                result(cachedQualities)
-            } else {
-                result(availableQualities)
-            }
+            result(availableQualities)
         case "getAvailableSubtitleTracks":
             handleGetAvailableSubtitleTracks(result: result)
         case "setSubtitleTrack":

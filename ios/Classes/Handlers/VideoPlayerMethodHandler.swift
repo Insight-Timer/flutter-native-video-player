@@ -38,64 +38,9 @@ extension VideoPlayerView {
 
         sendEvent("loading")
 
-        // Determine if this is likely an HLS stream
+        // Metadata quality preloading is intentionally disabled.
         let isHls = isHlsUrl(url)
         print("🎬 Loading video - URL: \(urlString), isHLS: \(isHls)")
-
-        // Fetch qualities (async) only for HLS streams
-        if isHls {
-            VideoPlayerQualityHandler.fetchHLSQualities(from: url) { [weak self] qualities in
-            guard let self = self else { return }
-
-            self.qualityLevels = qualities
-
-            // Convert to Flutter format
-            var result: [[String: Any]] = []
-
-            // Add auto quality option
-            result.append([
-                "label": "Auto",
-                "url": qualities.first?.url ?? "",
-                "isAuto": true
-            ])
-
-            // Add all available qualities
-            result.append(contentsOf: qualities.map { quality in
-                [
-                    "label": quality.label,
-                    "url": quality.url,
-                    "bitrate": quality.bitrate,
-                    "width": Int(quality.resolution.width),
-                    "height": Int(quality.resolution.height),
-                    "isAuto": false
-                ]
-            })
-
-            // Send qualities to Flutter
-            self.availableQualities = result
-
-            // Store in SharedPlayerManager if this is a shared player
-            if let controllerIdValue = self.controllerId {
-                SharedPlayerManager.shared.setQualities(
-                    for: controllerIdValue,
-                    qualities: result,
-                    qualityLevels: qualities
-                )
-            }
-
-            // Send qualityChange event to notify Flutter that qualities are loaded
-            if !result.isEmpty, let defaultQuality = result.first {
-                self.sendEvent("qualityChange", data: [
-                    "url": defaultQuality["url"] as? String ?? "",
-                    "label": defaultQuality["label"] as? String ?? "Auto",
-                    "isAuto": defaultQuality["isAuto"] as? Bool ?? true
-                ])
-                print("🎬 Sent qualityChange event with \(result.count) available qualities")
-            }
-            }
-        } else {
-            print("🎬 Skipping quality fetch for non-HLS content")
-        }
 
         // --- Build player item ---
         let playerItem: AVPlayerItem
@@ -129,8 +74,6 @@ extension VideoPlayerView {
         }
         
         playerItem = AVPlayerItem(asset: asset)
-        preferredPeakBitRateForQuality = 0
-        preferredMaximumResolutionForQuality = .zero
 
         // Replace current item immediately - don't wait for HDR configuration
         // This allows the video to start loading right away
@@ -483,22 +426,6 @@ extension VideoPlayerView {
         
         let isAuto = qualityInfo["isAuto"] as? Bool ?? false
         isAutoQuality = isAuto
-        
-        if isAuto {
-            preferredPeakBitRateForQuality = 0
-            preferredMaximumResolutionForQuality = .zero
-        } else {
-            let qualityBitrate = (qualityInfo["bitrate"] as? NSNumber)?.doubleValue ?? 0
-            preferredPeakBitRateForQuality = qualityBitrate > 0 ? qualityBitrate : 0
-
-            let width = qualityInfo["width"] as? Int ?? 0
-            let height = qualityInfo["height"] as? Int ?? 0
-            if width > 0, height > 0 {
-                preferredMaximumResolutionForQuality = CGSize(width: width, height: height)
-            } else {
-                preferredMaximumResolutionForQuality = .zero
-            }
-        }
 
         sendEvent("loading")
         applyDesiredVideoTrackState(reason: "set_quality")
@@ -526,8 +453,6 @@ extension VideoPlayerView {
     }
     
     private func switchToQuality(_ quality: VideoPlayer.QualityLevel, result: FlutterResult?) {
-        preferredPeakBitRateForQuality = quality.bitrate > 0 ? Double(quality.bitrate) : 0
-        preferredMaximumResolutionForQuality = quality.resolution
         applyDesiredVideoTrackState(reason: "switch_quality")
         sendEvent("qualityChange", data: [
             "url": quality.url,
@@ -1248,9 +1173,10 @@ extension VideoPlayerView {
     /// Uses a two-strategy approach:
     /// - Strategy 1 (AVMediaSelectionGroup): Deselects the visual media selection group.
     ///   With demuxed HLS, AVPlayer stops downloading video segments.
-    /// - Strategy 2 (preferredPeakBitRate): Fallback that restricts bitrate to exclude video variants.
+    /// - Strategy 2 (preferredPeakBitRate): Fallback that aggressively constrains
+    ///   bitrate when video is disabled.
     ///
-    /// When re-enabling, restores default video rendition and clears bitrate restriction.
+    /// When re-enabling, restores default video rendition and returns to auto adaptation.
     func handleSetVideoTrackDisabled(call: FlutterMethodCall, result: @escaping FlutterResult) {
         guard let args = call.arguments as? [String: Any],
               let disabled = args["disabled"] as? Bool else {
@@ -1338,11 +1264,11 @@ extension VideoPlayerView {
             }
         }
 
-        playerItem.preferredPeakBitRate = preferredPeakBitRateForQuality
+        playerItem.preferredPeakBitRate = 0
         if #available(iOS 11.0, *) {
-            playerItem.preferredMaximumResolution = preferredMaximumResolutionForQuality
+            playerItem.preferredMaximumResolution = .zero
         }
-        print("🎛️ Applied video-enabled state (\(reason)) peak=\(preferredPeakBitRateForQuality)")
+        print("🎛️ Applied video-enabled state (\(reason)) auto-quality")
         return nil
     }
 }

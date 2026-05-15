@@ -16,9 +16,6 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import com.huddlecommunity.better_native_video_player.manager.SharedPlayerManager
 
 /**
@@ -45,9 +42,6 @@ class VideoPlayerMethodHandler(
     private val bitrateCheckInterval = 5000L // 5 seconds
     private var currentVideoIsHls = false // Track if current video is HLS for quality switching
     private var videoTrackDisabledPreference = false
-    private var preferredMaxVideoBitrate: Int? = null
-    private var preferredMaxVideoWidth: Int? = null
-    private var preferredMaxVideoHeight: Int? = null
     private var trackReadyListener: Player.Listener? = null
 
     // Callback to handle fullscreen requests from Flutter
@@ -227,11 +221,8 @@ class VideoPlayerMethodHandler(
 
         val mediaItem = mediaItemBuilder.build()
 
-        // New source should start from auto-quality, but keep the desired
-        // video-enabled/disabled state and reapply it deterministically.
-        preferredMaxVideoBitrate = null
-        preferredMaxVideoWidth = null
-        preferredMaxVideoHeight = null
+        // New source should start from auto-quality while keeping the desired
+        // video-enabled/disabled state.
         isAutoQuality = true
 
         // Create appropriate MediaSource based on URL type
@@ -249,7 +240,6 @@ class VideoPlayerMethodHandler(
 
         // Set media source
         player.setMediaSource(mediaSource)
-        applyTrackPreferences(reason = "load_set_media_source")
         player.prepare()
         applyVideoTrackPreference(reason = "load_prepare")
 
@@ -271,30 +261,6 @@ class VideoPlayerMethodHandler(
             // See: https://github.com/androidx/media/issues/1074
         } else {
             Log.d(TAG, "🎨 HDR enabled - allowing native HDR playback")
-        }
-
-        // Fetch qualities asynchronously for HLS streams
-        if (url.contains(".m3u8")) {
-            CoroutineScope(Dispatchers.Main).launch {
-                availableQualities = VideoPlayerQualityHandler.fetchHLSQualities(url)
-                Log.d(TAG, "Fetched ${availableQualities.size} qualities")
-
-                // Store in SharedPlayerManager if this is a shared player
-                if (controllerId != null) {
-                    SharedPlayerManager.setQualities(controllerId, availableQualities)
-                }
-
-                // Send qualityChange event to notify Flutter that qualities are loaded
-                if (availableQualities.isNotEmpty()) {
-                    val defaultQuality = availableQualities.first()
-                    eventHandler.sendEvent("qualityChange", mapOf(
-                        "url" to (defaultQuality["url"] ?: ""),
-                        "label" to (defaultQuality["label"] ?: "Auto"),
-                        "isAuto" to (defaultQuality["isAuto"] ?: true)
-                    ))
-                    Log.d(TAG, "Sent qualityChange event with ${availableQualities.size} available qualities")
-                }
-            }
         }
 
         // NOTE: Media session will be set up when playback starts (in VideoPlayerObserver)
@@ -421,41 +387,14 @@ class VideoPlayerMethodHandler(
         val isAuto = qualityInfo["isAuto"] as? Boolean ?: false
         isAutoQuality = isAuto
 
-        if (isAuto) {
-            preferredMaxVideoBitrate = null
-            preferredMaxVideoWidth = null
-            preferredMaxVideoHeight = null
-            eventHandler.sendEvent("loading")
-            applyTrackPreferences(reason = "quality_auto")
-            applyVideoTrackPreference(reason = "quality_auto")
-            eventHandler.sendEvent("qualityChange", mapOf(
-                "url" to (qualityInfo["url"] ?: ""),
-                "label" to (qualityInfo["label"] ?: "Auto"),
-                "isAuto" to true
-            ))
-            result.success(null)
-        } else {
-            val label = qualityInfo["label"] as? String
-            val bitrate = (qualityInfo["bitrate"] as? Number)?.toInt()
-            val width = (qualityInfo["width"] as? Number)?.toInt()
-            val height = (qualityInfo["height"] as? Number)?.toInt()
-
-            preferredMaxVideoBitrate = bitrate?.takeIf { it > 0 }
-            preferredMaxVideoWidth = width?.takeIf { it > 0 }
-            preferredMaxVideoHeight = height?.takeIf { it > 0 }
-
-            eventHandler.sendEvent("loading")
-            applyTrackPreferences(reason = "quality_manual")
-            applyVideoTrackPreference(reason = "quality_manual")
-
-            eventHandler.sendEvent("qualityChange", mapOf(
-                "url" to (qualityInfo["url"] ?: ""),
-                "label" to (label ?: ""),
-                "isAuto" to false
-            ))
-
-            result.success(null)
-        }
+        eventHandler.sendEvent("loading")
+        applyVideoTrackPreference(reason = "set_quality")
+        eventHandler.sendEvent("qualityChange", mapOf(
+            "url" to (qualityInfo["url"] ?: ""),
+            "label" to (qualityInfo["label"] ?: if (isAuto) "Auto" else ""),
+            "isAuto" to isAuto
+        ))
+        result.success(null)
     }
 
     private fun startQualityMonitoring() {
@@ -466,10 +405,6 @@ class VideoPlayerMethodHandler(
 
     private fun switchToQuality(quality: Map<String, Any>, result: MethodChannel.Result?) {
         val label = quality["label"] as? String ?: "Unknown"
-        preferredMaxVideoBitrate = (quality["bitrate"] as? Number)?.toInt()?.takeIf { it > 0 }
-        preferredMaxVideoWidth = (quality["width"] as? Number)?.toInt()?.takeIf { it > 0 }
-        preferredMaxVideoHeight = (quality["height"] as? Number)?.toInt()?.takeIf { it > 0 }
-        applyTrackPreferences(reason = "switch_quality")
         applyVideoTrackPreference(reason = "switch_quality")
 
         eventHandler.sendEvent("qualityChange", mapOf(
@@ -485,22 +420,7 @@ class VideoPlayerMethodHandler(
      * Returns available video qualities
      */
     private fun handleGetAvailableQualities(result: MethodChannel.Result) {
-        // First check if we have qualities in this instance
-        if (availableQualities.isNotEmpty()) {
-            result.success(availableQualities)
-        } else if (controllerId != null) {
-            // If instance is empty but cache has qualities, restore them
-            val cachedQualities = SharedPlayerManager.getQualities(controllerId)
-            if (cachedQualities != null && cachedQualities.isNotEmpty()) {
-                availableQualities = cachedQualities
-                Log.d(TAG, "🔄 Restored ${cachedQualities.size} qualities from cache for controller $controllerId")
-                result.success(cachedQualities)
-            } else {
-                result.success(availableQualities)
-            }
-        } else {
-            result.success(availableQualities)
-        }
+        result.success(availableQualities)
     }
 
     /**
@@ -857,29 +777,7 @@ class VideoPlayerMethodHandler(
     }
 
     fun reapplyTrackPreferences(reason: String) {
-        applyTrackPreferences(reason)
         applyVideoTrackPreference(reason)
-    }
-
-    private fun applyTrackPreferences(reason: String) {
-        val builder = player.trackSelectionParameters
-            .buildUpon()
-            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, videoTrackDisabledPreference)
-
-        if (!videoTrackDisabledPreference) {
-            builder.setMaxVideoBitrate(preferredMaxVideoBitrate ?: Int.MAX_VALUE)
-            if (preferredMaxVideoWidth != null && preferredMaxVideoHeight != null) {
-                builder.setMaxVideoSize(preferredMaxVideoWidth!!, preferredMaxVideoHeight!!)
-            } else {
-                builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
-            }
-        }
-
-        player.trackSelectionParameters = builder.build()
-        Log.d(
-            TAG,
-            "Applied track prefs ($reason): videoDisabled=$videoTrackDisabledPreference, maxBitrate=${preferredMaxVideoBitrate ?: "auto"}"
-        )
     }
 
     private fun applyVideoTrackPreference(reason: String) {
