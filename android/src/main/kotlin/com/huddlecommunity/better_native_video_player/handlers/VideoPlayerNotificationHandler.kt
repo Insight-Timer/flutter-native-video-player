@@ -206,16 +206,27 @@ class VideoPlayerNotificationHandler(
     }
 
     /**
-     * Updates track navigation flags early (called from handleLoad before setMediaSource).
-     * This ensures getAvailableCommands() returns the correct result when ExoPlayer fires
-     * onAvailableCommandsChanged during media source preparation, so the system notification
-     * shows ⏮/⏭ without requiring a session recreation.
+     * Caches track navigation flags from a [mediaInfo] map. Called from
+     * [handleLoad] before [setMediaSource] so [getAvailableCommands] returns the
+     * correct result when ExoPlayer fires `onAvailableCommandsChanged` during
+     * media source preparation, and the system notification shows ⏮/⏭ without
+     * requiring a session recreation.
      */
-    fun updateTrackNavFlags(mediaInfo: Map<String, Any>?) {
+    fun cacheTrackNavFlags(mediaInfo: Map<String, Any>?) {
         val newShowPrev = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
         val newShowNext = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
-        showSystemPreviousTrackControl = newShowPrev
-        showSystemNextTrackControl = newShowNext
+        setTrackNavFlags(showNext = newShowNext, showPrev = newShowPrev)
+    }
+
+    /**
+     * Single place where the cached `showSystem*TrackControl` booleans are
+     * assigned. The wrapped player's [getAvailableCommands] reads them live, so
+     * any future tweak to the assignment (logging, validation) lands in one
+     * spot rather than in every call site that needs to update them.
+     */
+    private fun setTrackNavFlags(showNext: Boolean, showPrev: Boolean) {
+        showSystemNextTrackControl = showNext
+        showSystemPreviousTrackControl = showPrev
     }
 
     /**
@@ -241,8 +252,7 @@ class VideoPlayerNotificationHandler(
         val flagsChanged =
             this.showSystemNextTrackControl != showSystemNextTrackControl ||
                 this.showSystemPreviousTrackControl != showSystemPreviousTrackControl
-        this.showSystemNextTrackControl = showSystemNextTrackControl
-        this.showSystemPreviousTrackControl = showSystemPreviousTrackControl
+        setTrackNavFlags(showNext = showSystemNextTrackControl, showPrev = showSystemPreviousTrackControl)
 
         if (!flagsChanged) return
 
@@ -257,11 +267,30 @@ class VideoPlayerNotificationHandler(
         VideoPlayerMediaSessionService.clearActiveSessionIfMatches(existing)
         existing.release()
         mediaSession = null
-        player.removeListener(playerListener)
 
-        // Recreate the session — mirrors setupMediaSession's session-rebuild
-        // branch (lines 369-377) but skips updatePlayerMediaItemMetadata so the
-        // existing MediaItem's title/artist/album/artwork stays intact.
+        // Recreate the session — the wrappedPlayer reads the updated booleans
+        // live, so `getAvailableCommands()` on the new session reports the
+        // correct ⏮/⏭ availability immediately. Skip
+        // `updatePlayerMediaItemMetadata` so the existing MediaItem's
+        // title/artist/album/artwork stays intact.
+        createMediaSession()
+
+        // If our session was the foreground service's active one, re-publish
+        // it so the running notification keeps pointing at the new instance.
+        if (wasActive) {
+            mediaSession?.let { VideoPlayerMediaSessionService.setActiveSession(it) }
+        }
+    }
+
+    /**
+     * Builds a fresh [MediaSession] wired to [wrappedPlayer] and assigns it to
+     * [mediaSession]. Shared between [setupMediaSession]'s session-rebuild
+     * branch and [refreshSystemTrackControlsAvailability]. Re-registers
+     * [playerListener] on the player too — `removeListener` is idempotent, so
+     * calling it before `addListener` keeps a previously-registered
+     * subscription from doubling up.
+     */
+    private fun createMediaSession() {
         val packageManager = context.packageManager
         val intent = packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -270,7 +299,7 @@ class VideoPlayerNotificationHandler(
             context,
             0,
             intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
         val sessionId = "huddle_video_player_${++sessionCounter}"
@@ -282,12 +311,6 @@ class VideoPlayerNotificationHandler(
 
         player.removeListener(playerListener)
         player.addListener(playerListener)
-
-        // If our session was the foreground service's active one, re-publish
-        // it so the running notification keeps pointing at the new instance.
-        if (wasActive) {
-            mediaSession?.let { VideoPlayerMediaSessionService.setActiveSession(it) }
-        }
     }
 
     /**
@@ -345,8 +368,7 @@ class VideoPlayerNotificationHandler(
         currentTitle = newTitle
         currentSubtitle = newSubtitle
         showSkipControls = newShowSkipControls
-        showSystemPreviousTrackControl = newShowSystemPreviousTrackControl
-        showSystemNextTrackControl = newShowSystemNextTrackControl
+        setTrackNavFlags(showNext = newShowSystemNextTrackControl, showPrev = newShowSystemPreviousTrackControl)
 
         // Recreate MediaSession when seek permissions change so connected system controllers
         // receive the new command set via onConnect.
@@ -364,27 +386,7 @@ class VideoPlayerNotificationHandler(
             return
         }
 
-        // Create pending intent to launch app when notification is clicked
-        val packageManager = context.packageManager
-        val intent = packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        } ?: Intent()
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        val sessionId = "huddle_video_player_${++sessionCounter}"
-        mediaSession = MediaSession.Builder(context, wrappedPlayer)
-            .setId(sessionId)
-            .setSessionActivity(pendingIntent)
-            .setCallback(mediaSessionCallback)
-            .build()
-
-        player.removeListener(playerListener)
-        player.addListener(playerListener)
+        createMediaSession()
 
         mediaInfo?.let { updatePlayerMediaItemMetadata(it) }
     }
