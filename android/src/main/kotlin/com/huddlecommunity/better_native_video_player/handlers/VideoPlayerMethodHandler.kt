@@ -16,6 +16,9 @@ import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.huddlecommunity.better_native_video_player.manager.SharedPlayerManager
 
 /**
@@ -221,10 +224,6 @@ class VideoPlayerMethodHandler(
 
         val mediaItem = mediaItemBuilder.build()
 
-        // New source should start from auto-quality while keeping the desired
-        // video-enabled/disabled state.
-        isAutoQuality = true
-
         // Create appropriate MediaSource based on URL type
         val mediaSource: MediaSource = if (isHls) {
             // HLS stream
@@ -261,6 +260,30 @@ class VideoPlayerMethodHandler(
             // See: https://github.com/androidx/media/issues/1074
         } else {
             Log.d(TAG, "🎨 HDR enabled - allowing native HDR playback")
+        }
+
+        // Fetch qualities asynchronously for HLS streams
+        if (url.contains(".m3u8")) {
+            CoroutineScope(Dispatchers.Main).launch {
+                availableQualities = VideoPlayerQualityHandler.fetchHLSQualities(url)
+                Log.d(TAG, "Fetched ${availableQualities.size} qualities")
+
+                // Store in SharedPlayerManager if this is a shared player
+                if (controllerId != null) {
+                    SharedPlayerManager.setQualities(controllerId, availableQualities)
+                }
+
+                // Send qualityChange event to notify Flutter that qualities are loaded
+                if (availableQualities.isNotEmpty()) {
+                    val defaultQuality = availableQualities.first()
+                    eventHandler.sendEvent("qualityChange", mapOf(
+                        "url" to (defaultQuality["url"] ?: ""),
+                        "label" to (defaultQuality["label"] ?: "Auto"),
+                        "isAuto" to (defaultQuality["isAuto"] ?: true)
+                    ))
+                    Log.d(TAG, "Sent qualityChange event with ${availableQualities.size} available qualities")
+                }
+            }
         }
 
         // NOTE: Media session will be set up when playback starts (in VideoPlayerObserver)
@@ -387,14 +410,62 @@ class VideoPlayerMethodHandler(
         val isAuto = qualityInfo["isAuto"] as? Boolean ?: false
         isAutoQuality = isAuto
 
-        eventHandler.sendEvent("loading")
-        applyVideoTrackPreference(reason = "set_quality")
-        eventHandler.sendEvent("qualityChange", mapOf(
-            "url" to (qualityInfo["url"] ?: ""),
-            "label" to (qualityInfo["label"] ?: if (isAuto) "Auto" else ""),
-            "isAuto" to isAuto
-        ))
-        result.success(null)
+        if (isAuto) {
+            // Start with the middle quality for auto mode
+            val midIndex = (availableQualities.size / 2 - 1).coerceAtLeast(0)
+            if (midIndex >= availableQualities.size) {
+                result.error("NO_QUALITIES", "No qualities available", null)
+                return
+            }
+
+            val initialQuality = availableQualities[midIndex]
+            switchToQuality(initialQuality, result)
+
+            // Start monitoring quality
+            startQualityMonitoring()
+        } else {
+            val url = qualityInfo["url"] as? String
+            val label = qualityInfo["label"] as? String
+
+            if (url == null) {
+                result.error("INVALID_QUALITY", "Quality URL is required", null)
+                return
+            }
+
+            eventHandler.sendEvent("loading")
+
+            // Save current state
+            val wasPlaying = player.isPlaying
+            val currentPosition = player.currentPosition
+
+            // Build new media source
+            // Use DefaultDataSource for consistency with load method
+            val dataSourceFactory = DefaultDataSource.Factory(context)
+            val mediaItem = MediaItem.fromUri(url)
+            val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(mediaItem)
+
+            // Switch to new quality
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            player.seekTo(currentPosition)
+
+            // Re-apply desired video-track preference after media replacement.
+            applyVideoTrackPreference(reason = "set_quality_manual")
+
+            // Only resume playback if it was playing before
+            if (wasPlaying) {
+                player.play()
+            }
+
+            eventHandler.sendEvent("qualityChange", mapOf(
+                "url" to url,
+                "label" to (label ?: ""),
+                "isAuto" to false
+            ))
+
+            result.success(null)
+        }
     }
 
     private fun startQualityMonitoring() {
@@ -404,11 +475,37 @@ class VideoPlayerMethodHandler(
     }
 
     private fun switchToQuality(quality: Map<String, Any>, result: MethodChannel.Result?) {
+        val url = quality["url"] as? String ?: return
         val label = quality["label"] as? String ?: "Unknown"
+
+        eventHandler.sendEvent("loading")
+
+        // Save current state
+        val wasPlaying = player.isPlaying
+        val currentPosition = player.currentPosition
+
+        // Build new media source
+        // Use DefaultDataSource for consistency with load method
+        val dataSourceFactory = DefaultDataSource.Factory(context)
+        val mediaItem = MediaItem.fromUri(url)
+        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
+            .createMediaSource(mediaItem)
+
+        // Switch to new quality
+        player.setMediaSource(mediaSource)
+        player.prepare()
+        player.seekTo(currentPosition)
+
+        // Re-apply desired video-track preference after media replacement.
         applyVideoTrackPreference(reason = "switch_quality")
 
+        // Only resume playback if it was playing before
+        if (wasPlaying) {
+            player.play()
+        }
+
         eventHandler.sendEvent("qualityChange", mapOf(
-            "url" to (quality["url"] ?: ""),
+            "url" to url,
             "label" to label,
             "isAuto" to isAutoQuality
         ))
@@ -420,7 +517,22 @@ class VideoPlayerMethodHandler(
      * Returns available video qualities
      */
     private fun handleGetAvailableQualities(result: MethodChannel.Result) {
-        result.success(availableQualities)
+        // First check if we have qualities in this instance
+        if (availableQualities.isNotEmpty()) {
+            result.success(availableQualities)
+        } else if (controllerId != null) {
+            // If instance is empty but cache has qualities, restore them
+            val cachedQualities = SharedPlayerManager.getQualities(controllerId)
+            if (cachedQualities != null && cachedQualities.isNotEmpty()) {
+                availableQualities = cachedQualities
+                Log.d(TAG, "🔄 Restored ${cachedQualities.size} qualities from cache for controller $controllerId")
+                result.success(cachedQualities)
+            } else {
+                result.success(availableQualities)
+            }
+        } else {
+            result.success(availableQualities)
+        }
     }
 
     /**

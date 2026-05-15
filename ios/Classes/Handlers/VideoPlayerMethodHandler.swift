@@ -38,9 +38,64 @@ extension VideoPlayerView {
 
         sendEvent("loading")
 
-        // Metadata quality preloading is intentionally disabled.
+        // Determine if this is likely an HLS stream
         let isHls = isHlsUrl(url)
         print("🎬 Loading video - URL: \(urlString), isHLS: \(isHls)")
+
+        // Fetch qualities (async) only for HLS streams
+        if isHls {
+            VideoPlayerQualityHandler.fetchHLSQualities(from: url) { [weak self] qualities in
+            guard let self = self else { return }
+
+            self.qualityLevels = qualities
+
+            // Convert to Flutter format
+            var result: [[String: Any]] = []
+
+            // Add auto quality option
+            result.append([
+                "label": "Auto",
+                "url": qualities.first?.url ?? "",
+                "isAuto": true
+            ])
+
+            // Add all available qualities
+            result.append(contentsOf: qualities.map { quality in
+                [
+                    "label": quality.label,
+                    "url": quality.url,
+                    "bitrate": quality.bitrate,
+                    "width": Int(quality.resolution.width),
+                    "height": Int(quality.resolution.height),
+                    "isAuto": false
+                ]
+            })
+
+            // Send qualities to Flutter
+            self.availableQualities = result
+
+            // Store in SharedPlayerManager if this is a shared player
+            if let controllerIdValue = self.controllerId {
+                SharedPlayerManager.shared.setQualities(
+                    for: controllerIdValue,
+                    qualities: result,
+                    qualityLevels: qualities
+                )
+            }
+
+            // Send qualityChange event to notify Flutter that qualities are loaded
+            if !result.isEmpty, let defaultQuality = result.first {
+                self.sendEvent("qualityChange", data: [
+                    "url": defaultQuality["url"] as? String ?? "",
+                    "label": defaultQuality["label"] as? String ?? "Auto",
+                    "isAuto": defaultQuality["isAuto"] as? Bool ?? true
+                ])
+                print("🎬 Sent qualityChange event with \(result.count) available qualities")
+            }
+            }
+        } else {
+            print("🎬 Skipping quality fetch for non-HLS content")
+        }
 
         // --- Build player item ---
         let playerItem: AVPlayerItem
@@ -426,39 +481,136 @@ extension VideoPlayerView {
         
         let isAuto = qualityInfo["isAuto"] as? Bool ?? false
         isAutoQuality = isAuto
-
-        sendEvent("loading")
-        applyDesiredVideoTrackState(reason: "set_quality")
-
-        sendEvent("qualityChange", data: [
-            "url": qualityInfo["url"] as? String ?? "",
-            "label": qualityInfo["label"] as? String ?? (isAuto ? "Auto" : ""),
-            "isAuto": isAuto
-        ])
-        result(nil)
+        
+        if isAuto {
+            // Start with the middle quality for auto mode
+            let midIndex = max(0, qualityLevels.count / 2 - 1)
+            guard midIndex < qualityLevels.count else {
+                result(FlutterError(code: "NO_QUALITIES", message: "No qualities available", details: nil))
+                return
+            }
+            
+            let initialQuality = qualityLevels[midIndex]
+            switchToQuality(initialQuality, result: result)
+            
+            // Enable quality monitoring
+            startQualityMonitoring()
+        } else {
+            guard let urlString = qualityInfo["url"] as? String,
+                  let url = URL(string: urlString) else {
+                result(FlutterError(code: "INVALID_URL", message: "Invalid quality URL", details: nil))
+                return
+            }
+            
+            sendEvent("loading")
+            
+            // Store current playback state and position
+            let wasPlaying = player?.rate != 0
+            let currentTime = player?.currentTime() ?? CMTime.zero
+            
+            let newItem = AVPlayerItem(url: url)
+            player?.replaceCurrentItem(with: newItem)
+            player?.seek(to: currentTime)
+            applyDesiredVideoTrackState(reason: "set_quality_manual")
+            
+            // Only resume playback if it was playing before
+            if wasPlaying {
+                player?.play()
+            }
+            
+            sendEvent("qualityChange", data: [
+                "url": urlString,
+                "label": qualityInfo["label"] as? String ?? "",
+                "isAuto": false
+            ])
+            result(nil)
+        }
     }
     
     private func startQualityMonitoring() {
-        // Disabled on purpose: quality now stays on a stable master URL and is
-        // applied via preferred peak bitrate / max resolution, so URL-index based
-        // adaptation is no longer valid.
+        // Remove existing observer if any
         if let timeObserver = timeObserver {
             player?.removeTimeObserver(timeObserver)
-            self.timeObserver = nil
+        }
+        
+        // Monitor playback every second for auto-quality
+        let interval = CMTime(seconds: 1.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+        timeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
+            self?.checkAndAdjustQuality()
         }
     }
     
     private func checkAndAdjustQuality() {
-        // Intentionally disabled. See startQualityMonitoring().
+        guard isAutoQuality,
+              !qualityLevels.isEmpty,
+              CACurrentMediaTime() - lastBitrateCheck >= bitrateCheckInterval else {
+            return
+        }
+        
+        lastBitrateCheck = CACurrentMediaTime()
+        
+        // Get current playback statistics
+        let loadedTimeRanges = player?.currentItem?.loadedTimeRanges ?? []
+        let currentTime = player?.currentTime() ?? CMTime.zero
+        
+        // Calculate buffer health
+        var bufferHealth: TimeInterval = 0
+        for range in loadedTimeRanges {
+            let timeRange = range.timeRangeValue
+            if timeRange.start <= currentTime {
+                bufferHealth += timeRange.duration.seconds
+            }
+        }
+        
+        // Get current quality index
+        guard let urlAsset = player?.currentItem?.asset as? AVURLAsset,
+              let currentUrl = urlAsset.url.absoluteString as String?,
+              let currentIndex = qualityLevels.firstIndex(where: { $0.url == currentUrl }) else {
+            return
+        }
+        
+        // Adjust quality based on buffer health
+        var targetIndex = currentIndex
+        
+        if bufferHealth < 3.0 && currentIndex > 0 {
+            // Buffer is low, decrease quality
+            targetIndex = currentIndex - 1
+        } else if bufferHealth > 10.0 && currentIndex < qualityLevels.count - 1 {
+            // Buffer is healthy, try increasing quality
+            targetIndex = currentIndex + 1
+        }
+        
+        if targetIndex != currentIndex {
+            switchToQuality(qualityLevels[targetIndex], result: nil)
+        }
     }
     
     private func switchToQuality(_ quality: VideoPlayer.QualityLevel, result: FlutterResult?) {
+        guard let url = URL(string: quality.url) else {
+            result?(FlutterError(code: "INVALID_URL", message: "Invalid quality URL", details: nil))
+            return
+        }
+        
+        sendEvent("loading")
+        
+        let wasPlaying = player?.rate != 0
+        let currentTime = player?.currentTime() ?? CMTime.zero
+        
+        let newItem = AVPlayerItem(url: url)
+        player?.replaceCurrentItem(with: newItem)
+        player?.seek(to: currentTime)
         applyDesiredVideoTrackState(reason: "switch_quality")
+        
+        if wasPlaying {
+            player?.play()
+        }
+        
         sendEvent("qualityChange", data: [
             "url": quality.url,
             "label": quality.label,
             "isAuto": isAutoQuality
         ])
+        
         result?(nil)
     }
 
