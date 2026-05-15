@@ -30,6 +30,10 @@ object SharedPlayerManager {
     // This ensures qualities persist across view recreations
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
 
+    // Desired video track disabled state per controller.
+    // Reapplied by method handlers whenever media source/item changes.
+    private val videoTrackDisabledState = mutableMapOf<Int, Boolean>()
+
     /**
      * Gets or creates a player for the given controller ID
      * Returns a Pair<ExoPlayer, Boolean> where the Boolean indicates if the player already existed (true) or was newly created (false)
@@ -118,6 +122,14 @@ object SharedPlayerManager {
         return qualitiesCache[controllerId]
     }
 
+    fun setVideoTrackDisabled(controllerId: Int, disabled: Boolean) {
+        videoTrackDisabledState[controllerId] = disabled
+    }
+
+    fun isVideoTrackDisabled(controllerId: Int): Boolean {
+        return videoTrackDisabledState[controllerId] ?: false
+    }
+
     /**
      * Stops all views for a given controller
      */
@@ -147,6 +159,7 @@ object SharedPlayerManager {
 
         // Remove qualities cache
         qualitiesCache.remove(controllerId)
+        videoTrackDisabledState.remove(controllerId)
 
         // Clear active views for this controller
         activeViews.remove(controllerId)
@@ -173,6 +186,7 @@ object SharedPlayerManager {
 
         // Clear qualities cache
         qualitiesCache.clear()
+        videoTrackDisabledState.clear()
 
         // Stop the service when clearing all players
         stopMediaSessionService(context)

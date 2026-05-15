@@ -270,6 +270,7 @@ class VideoPlayerView(
             controllerId = controllerId,
             enableHDR = enableHDR
         )
+        methodHandler.reapplyTrackPreferences("view_init")
 
         // Set fullscreen callback for method handler
         methodHandler.onFullscreenRequest = { enterFullscreen ->
@@ -308,6 +309,7 @@ class VideoPlayerView(
         if (controllerId != null) {
             SharedPlayerManager.registerView(controllerId, viewId) {
                 reconnectSurface()
+                methodHandler.reapplyTrackPreferences("shared_view_reconnect")
                 // Emit current state after reconnecting to ensure UI stays in sync
                 emitCurrentState()
             }

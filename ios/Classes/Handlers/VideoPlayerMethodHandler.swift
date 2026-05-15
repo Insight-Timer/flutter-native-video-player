@@ -129,10 +129,13 @@ extension VideoPlayerView {
         }
         
         playerItem = AVPlayerItem(asset: asset)
+        preferredPeakBitRateForQuality = 0
+        preferredMaximumResolutionForQuality = .zero
 
         // Replace current item immediately - don't wait for HDR configuration
         // This allows the video to start loading right away
         player?.replaceCurrentItem(with: playerItem)
+        applyDesiredVideoTrackState(reason: "load_replace_item")
 
         // --- Configure HDR settings asynchronously (doesn't block video loading) ---
         // Only apply color space correction if HDR is explicitly disabled AND we detect this might be HDR content
@@ -236,6 +239,7 @@ extension VideoPlayerView {
             switch item.status {
             case .readyToPlay:
                 print("🎬 Video ready to play")
+                self.applyDesiredVideoTrackState(reason: "load_ready_to_play")
 
                 // Get duration
                 let duration = item.duration
@@ -481,47 +485,30 @@ extension VideoPlayerView {
         isAutoQuality = isAuto
         
         if isAuto {
-            // Start with the middle quality for auto mode
-            let midIndex = max(0, qualityLevels.count / 2 - 1)
-            guard midIndex < qualityLevels.count else {
-                result(FlutterError(code: "NO_QUALITIES", message: "No qualities available", details: nil))
-                return
-            }
-            
-            let initialQuality = qualityLevels[midIndex]
-            switchToQuality(initialQuality, result: result)
-            
-            // Enable quality monitoring
-            startQualityMonitoring()
+            preferredPeakBitRateForQuality = 0
+            preferredMaximumResolutionForQuality = .zero
         } else {
-            guard let urlString = qualityInfo["url"] as? String,
-                  let url = URL(string: urlString) else {
-                result(FlutterError(code: "INVALID_URL", message: "Invalid quality URL", details: nil))
-                return
+            let qualityBitrate = (qualityInfo["bitrate"] as? NSNumber)?.doubleValue ?? 0
+            preferredPeakBitRateForQuality = qualityBitrate > 0 ? qualityBitrate : 0
+
+            let width = qualityInfo["width"] as? Int ?? 0
+            let height = qualityInfo["height"] as? Int ?? 0
+            if width > 0, height > 0 {
+                preferredMaximumResolutionForQuality = CGSize(width: width, height: height)
+            } else {
+                preferredMaximumResolutionForQuality = .zero
             }
-            
-            sendEvent("loading")
-            
-            // Store current playback state and position
-            let wasPlaying = player?.rate != 0
-            let currentTime = player?.currentTime() ?? CMTime.zero
-            
-            let newItem = AVPlayerItem(url: url)
-            player?.replaceCurrentItem(with: newItem)
-            player?.seek(to: currentTime)
-            
-            // Only resume playback if it was playing before
-            if wasPlaying {
-                player?.play()
-            }
-            
-            sendEvent("qualityChange", data: [
-                "url": urlString,
-                "label": qualityInfo["label"] as? String ?? "",
-                "isAuto": false
-            ])
-            result(nil)
         }
+
+        sendEvent("loading")
+        applyDesiredVideoTrackState(reason: "set_quality")
+
+        sendEvent("qualityChange", data: [
+            "url": qualityInfo["url"] as? String ?? "",
+            "label": qualityInfo["label"] as? String ?? (isAuto ? "Auto" : ""),
+            "isAuto": isAuto
+        ])
+        result(nil)
     }
     
     private func startQualityMonitoring() {
@@ -583,30 +570,14 @@ extension VideoPlayerView {
     }
     
     private func switchToQuality(_ quality: VideoPlayer.QualityLevel, result: FlutterResult?) {
-        guard let url = URL(string: quality.url) else {
-            result?(FlutterError(code: "INVALID_URL", message: "Invalid quality URL", details: nil))
-            return
-        }
-        
-        sendEvent("loading")
-        
-        let wasPlaying = player?.rate != 0
-        let currentTime = player?.currentTime() ?? CMTime.zero
-        
-        let newItem = AVPlayerItem(url: url)
-        player?.replaceCurrentItem(with: newItem)
-        player?.seek(to: currentTime)
-        
-        if wasPlaying {
-            player?.play()
-        }
-        
+        preferredPeakBitRateForQuality = quality.bitrate > 0 ? Double(quality.bitrate) : 0
+        preferredMaximumResolutionForQuality = quality.resolution
+        applyDesiredVideoTrackState(reason: "switch_quality")
         sendEvent("qualityChange", data: [
             "url": quality.url,
             "label": quality.label,
             "isAuto": isAutoQuality
         ])
-        
         result?(nil)
     }
 
@@ -1335,62 +1306,70 @@ extension VideoPlayerView {
             return
         }
 
-        guard let player = player, let playerItem = player.currentItem else {
-            result(nil)
-            return
+        desiredVideoTrackDisabled = disabled
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setVideoTrackDisabled(for: controllerIdValue, disabled: disabled)
         }
 
-        if disabled {
-            // Check if HLS has demuxed (separate) audio tracks.
-            // AVMediaSelectionGroup for .audible is non-nil only when
-            // #EXT-X-MEDIA:TYPE=AUDIO is present with separate audio renditions.
-            // If nil/empty, audio is muxed inside video segments, so skip.
+        let applyResult = applyDesiredVideoTrackState(reason: "set_video_track_disabled")
+        if let applyResult = applyResult {
+            result(applyResult)
+            return
+        }
+        result(nil)
+    }
+
+    @discardableResult
+    func applyDesiredVideoTrackState(reason: String) -> [String: Any]? {
+        guard let playerItem = player?.currentItem else {
+            return nil
+        }
+
+        if desiredVideoTrackDisabled {
             let hasDemuxedAudio: Bool
             if let asset = playerItem.asset as? AVURLAsset,
-               let audioGroup = asset.mediaSelectionGroup(
-                   forMediaCharacteristic: .audible
-               ),
+               let audioGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .audible),
                !audioGroup.options.isEmpty {
                 hasDemuxedAudio = true
+                if playerItem.currentMediaSelection.selectedMediaOption(in: audioGroup) == nil {
+                    if let preferredAudio = audioGroup.defaultOption ?? audioGroup.options.first {
+                        playerItem.select(preferredAudio, in: audioGroup)
+                    }
+                }
             } else {
                 hasDemuxedAudio = false
             }
 
             if !hasDemuxedAudio {
-                result([
-                    "skipped": true,
-                    "reason": "no_demuxed_audio"
-                ])
-                return
+                return ["skipped": true, "reason": "no_demuxed_audio"]
             }
 
-            // Strategy 1: Deselect the visual media selection group (demuxed HLS)
             if let asset = playerItem.asset as? AVURLAsset,
-               let videoGroup = asset.mediaSelectionGroup(
-                   forMediaCharacteristic: .visual
-               ) {
+               let videoGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .visual) {
                 playerItem.select(nil, in: videoGroup)
             }
-
-            // Strategy 2: Restrict bitrate to audio-only threshold (fallback)
             playerItem.preferredPeakBitRate = 1.0
-        } else {
-            // Re-enable: restore video rendition selection
-            if let asset = playerItem.asset as? AVURLAsset,
-               let videoGroup = asset.mediaSelectionGroup(
-                   forMediaCharacteristic: .visual
-               ) {
-                if let defaultOption = videoGroup.defaultOption {
-                    playerItem.select(defaultOption, in: videoGroup)
-                } else if let firstOption = videoGroup.options.first {
-                    playerItem.select(firstOption, in: videoGroup)
-                }
+            if #available(iOS 11.0, *) {
+                playerItem.preferredMaximumResolution = .zero
             }
-
-            // Clear bitrate restriction (0 = no limit)
-            playerItem.preferredPeakBitRate = 0
+            print("🎛️ Applied video-disabled state (\(reason))")
+            return nil
         }
 
-        result(nil)
+        if let asset = playerItem.asset as? AVURLAsset,
+           let videoGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .visual) {
+            if let defaultOption = videoGroup.defaultOption {
+                playerItem.select(defaultOption, in: videoGroup)
+            } else if let firstOption = videoGroup.options.first {
+                playerItem.select(firstOption, in: videoGroup)
+            }
+        }
+
+        playerItem.preferredPeakBitRate = preferredPeakBitRateForQuality
+        if #available(iOS 11.0, *) {
+            playerItem.preferredMaximumResolution = preferredMaximumResolutionForQuality
+        }
+        print("🎛️ Applied video-enabled state (\(reason)) peak=\(preferredPeakBitRateForQuality)")
+        return nil
     }
 }

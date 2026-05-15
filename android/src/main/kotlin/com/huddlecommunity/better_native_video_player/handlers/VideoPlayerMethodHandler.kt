@@ -7,8 +7,6 @@ import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.Timeline
-import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.DefaultDataSource
@@ -46,6 +44,10 @@ class VideoPlayerMethodHandler(
     private var lastBitrateCheck = 0L
     private val bitrateCheckInterval = 5000L // 5 seconds
     private var currentVideoIsHls = false // Track if current video is HLS for quality switching
+    private var desiredVideoTrackDisabled = false
+    private var preferredMaxVideoBitrate: Int? = null
+    private var preferredMaxVideoWidth: Int? = null
+    private var preferredMaxVideoHeight: Int? = null
 
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
@@ -55,6 +57,12 @@ class VideoPlayerMethodHandler(
     // renderer otherwise reconnects to an offscreen ImageReader instead of the SurfaceView,
     // causing a frozen video with live audio.
     var onSurfaceRebindRequest: (() -> Unit)? = null
+
+    init {
+        if (controllerId != null) {
+            desiredVideoTrackDisabled = SharedPlayerManager.isVideoTrackDisabled(controllerId)
+        }
+    }
 
     /**
      * Handles incoming method calls from Flutter
@@ -218,6 +226,13 @@ class VideoPlayerMethodHandler(
 
         val mediaItem = mediaItemBuilder.build()
 
+        // New source should start from auto-quality, but keep the desired
+        // video-enabled/disabled state and reapply it deterministically.
+        preferredMaxVideoBitrate = null
+        preferredMaxVideoWidth = null
+        preferredMaxVideoHeight = null
+        isAutoQuality = true
+
         // Create appropriate MediaSource based on URL type
         val mediaSource: MediaSource = if (isHls) {
             // HLS stream
@@ -233,6 +248,7 @@ class VideoPlayerMethodHandler(
 
         // Set media source
         player.setMediaSource(mediaSource)
+        applyTrackPreferences(reason = "load_set_media_source")
         player.prepare()
 
         // Configure HDR settings for ExoPlayer using TrackSelectionParameters
@@ -404,52 +420,32 @@ class VideoPlayerMethodHandler(
         isAutoQuality = isAuto
 
         if (isAuto) {
-            // Start with the middle quality for auto mode
-            val midIndex = (availableQualities.size / 2 - 1).coerceAtLeast(0)
-            if (midIndex >= availableQualities.size) {
-                result.error("NO_QUALITIES", "No qualities available", null)
-                return
-            }
-
-            val initialQuality = availableQualities[midIndex]
-            switchToQuality(initialQuality, result)
-
-            // Start monitoring quality
-            startQualityMonitoring()
+            preferredMaxVideoBitrate = null
+            preferredMaxVideoWidth = null
+            preferredMaxVideoHeight = null
+            eventHandler.sendEvent("loading")
+            applyTrackPreferences(reason = "quality_auto")
+            eventHandler.sendEvent("qualityChange", mapOf(
+                "url" to (qualityInfo["url"] ?: ""),
+                "label" to (qualityInfo["label"] ?: "Auto"),
+                "isAuto" to true
+            ))
+            result.success(null)
         } else {
-            val url = qualityInfo["url"] as? String
             val label = qualityInfo["label"] as? String
+            val bitrate = (qualityInfo["bitrate"] as? Number)?.toInt()
+            val width = (qualityInfo["width"] as? Number)?.toInt()
+            val height = (qualityInfo["height"] as? Number)?.toInt()
 
-            if (url == null) {
-                result.error("INVALID_QUALITY", "Quality URL is required", null)
-                return
-            }
+            preferredMaxVideoBitrate = bitrate?.takeIf { it > 0 }
+            preferredMaxVideoWidth = width?.takeIf { it > 0 }
+            preferredMaxVideoHeight = height?.takeIf { it > 0 }
 
             eventHandler.sendEvent("loading")
-
-            // Save current state
-            val wasPlaying = player.isPlaying
-            val currentPosition = player.currentPosition
-
-            // Build new media source
-            // Use DefaultDataSource for consistency with load method
-            val dataSourceFactory = DefaultDataSource.Factory(context)
-            val mediaItem = MediaItem.fromUri(url)
-            val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
-                .createMediaSource(mediaItem)
-
-            // Switch to new quality
-            player.setMediaSource(mediaSource)
-            player.prepare()
-            player.seekTo(currentPosition)
-            
-            // Only resume playback if it was playing before
-            if (wasPlaying) {
-                player.play()
-            }
+            applyTrackPreferences(reason = "quality_manual")
 
             eventHandler.sendEvent("qualityChange", mapOf(
-                "url" to url,
+                "url" to (qualityInfo["url"] ?: ""),
                 "label" to (label ?: ""),
                 "isAuto" to false
             ))
@@ -465,34 +461,14 @@ class VideoPlayerMethodHandler(
     }
 
     private fun switchToQuality(quality: Map<String, Any>, result: MethodChannel.Result?) {
-        val url = quality["url"] as? String ?: return
         val label = quality["label"] as? String ?: "Unknown"
-
-        eventHandler.sendEvent("loading")
-
-        // Save current state
-        val wasPlaying = player.isPlaying
-        val currentPosition = player.currentPosition
-
-        // Build new media source
-        // Use DefaultDataSource for consistency with load method
-        val dataSourceFactory = DefaultDataSource.Factory(context)
-        val mediaItem = MediaItem.fromUri(url)
-        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
-            .createMediaSource(mediaItem)
-
-        // Switch to new quality
-        player.setMediaSource(mediaSource)
-        player.prepare()
-        player.seekTo(currentPosition)
-
-        // Only resume playback if it was playing before
-        if (wasPlaying) {
-            player.play()
-        }
+        preferredMaxVideoBitrate = (quality["bitrate"] as? Number)?.toInt()?.takeIf { it > 0 }
+        preferredMaxVideoWidth = (quality["width"] as? Number)?.toInt()?.takeIf { it > 0 }
+        preferredMaxVideoHeight = (quality["height"] as? Number)?.toInt()?.takeIf { it > 0 }
+        applyTrackPreferences(reason = "switch_quality")
 
         eventHandler.sendEvent("qualityChange", mapOf(
-            "url" to url,
+            "url" to (quality["url"] ?: ""),
             "label" to label,
             "isAuto" to isAutoQuality
         ))
@@ -842,17 +818,20 @@ class VideoPlayerMethodHandler(
                     it.type == C.TRACK_TYPE_AUDIO
                 }
                 if (!hasDemuxedAudio) {
+                    desiredVideoTrackDisabled = disabled
+                    if (controllerId != null) {
+                        SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
+                    }
                     result.success(mapOf("skipped" to true, "reason" to "no_demuxed_audio"))
                     return
                 }
             }
 
-            val newParameters = player.trackSelectionParameters
-                .buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
-                .build()
-
-            player.trackSelectionParameters = newParameters
+            desiredVideoTrackDisabled = disabled
+            if (controllerId != null) {
+                SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
+            }
+            applyTrackPreferences(reason = "set_video_track_disabled")
 
             // Start/stop the foreground service based on audio-only mode.
             // When video track is disabled → audio-only → show notification.
@@ -876,5 +855,34 @@ class VideoPlayerMethodHandler(
             Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
             result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
         }
+    }
+
+    fun reapplyTrackPreferences(reason: String) {
+        applyTrackPreferences(reason)
+    }
+
+    private fun applyTrackPreferences(reason: String) {
+        val builder = player.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, desiredVideoTrackDisabled)
+
+        if (desiredVideoTrackDisabled) {
+            // Keep this hard-cap to favor audio rendition selection when video is disabled.
+            builder.setMaxVideoBitrate(1)
+            builder.setMaxVideoSize(1, 1)
+        } else {
+            builder.setMaxVideoBitrate(preferredMaxVideoBitrate ?: Int.MAX_VALUE)
+            if (preferredMaxVideoWidth != null && preferredMaxVideoHeight != null) {
+                builder.setMaxVideoSize(preferredMaxVideoWidth!!, preferredMaxVideoHeight!!)
+            } else {
+                builder.setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+            }
+        }
+
+        player.trackSelectionParameters = builder.build()
+        Log.d(
+            TAG,
+            "Applied track prefs ($reason): videoDisabled=$desiredVideoTrackDisabled, maxBitrate=${preferredMaxVideoBitrate ?: "auto"}"
+        )
     }
 }

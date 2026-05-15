@@ -20,6 +20,9 @@ import QuartzCore
     var isAutoQuality = false
     var lastBitrateCheck: TimeInterval = 0
     let bitrateCheckInterval: TimeInterval = 5.0 // Check every 5 seconds
+    var desiredVideoTrackDisabled: Bool = false
+    var preferredPeakBitRateForQuality: Double = 0
+    var preferredMaximumResolutionForQuality: CGSize = .zero
     var controllerId: Int?
     var pipController: AVPictureInPictureController?
 
@@ -137,6 +140,7 @@ import QuartzCore
         if let args = argsDict,
            let controllerIdValue = args["controllerId"] as? Int {
             controllerId = controllerIdValue
+            desiredVideoTrackDisabled = SharedPlayerManager.shared.isVideoTrackDisabled(for: controllerIdValue)
 
             // Get or create shared player AND view controller
             // This ensures the view controller persists across platform view disposal
@@ -340,6 +344,7 @@ import QuartzCore
             addObservers(to: currentItem)
             // Also set up periodic time observer for this new view
             setupPeriodicTimeObserver()
+            applyDesiredVideoTrackState(reason: "shared_view_attach")
         }
 
         // Observe app entering foreground to restore Now Playing info
@@ -1094,6 +1099,7 @@ import QuartzCore
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
         print("📱 App entering background (screen lock) - maintaining audio session for view \(viewId)")
+        applyDesiredVideoTrackState(reason: "did_enter_background")
 
         // Store current playback rate before iOS might pause it
         let wasPlaying = player?.rate ?? 0 > 0
@@ -1128,6 +1134,7 @@ import QuartzCore
     /// Restores Now Playing info which may have been cleared by the system
     @objc func handleAppWillEnterForeground() {
         print("📱 App entering foreground - restoring Now Playing info for view \(viewId)")
+        applyDesiredVideoTrackState(reason: "will_enter_foreground")
 
         // CRITICAL: Reactivate audio session first
         do {

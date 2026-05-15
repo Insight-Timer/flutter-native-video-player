@@ -67,6 +67,10 @@ class SharedPlayerManager: NSObject {
     /// (e.g. inline + Dart fullscreen) observe the same AVPlayerItem.
     private var completionClaimed: [Int: Bool] = [:]
 
+    /// Desired video track disabled state per controller.
+    /// This is reapplied whenever AVPlayerItem changes.
+    private var videoTrackDisabledByController: [Int: Bool] = [:]
+
     struct PipSettings {
         let allowsPictureInPicture: Bool
         let canStartPictureInPictureAutomatically: Bool
@@ -214,6 +218,16 @@ class SharedPlayerManager: NSObject {
         completionClaimed.removeValue(forKey: controllerId)
     }
 
+    // MARK: - Video Track State
+
+    func setVideoTrackDisabled(for controllerId: Int, disabled: Bool) {
+        videoTrackDisabledByController[controllerId] = disabled
+    }
+
+    func isVideoTrackDisabled(for controllerId: Int) -> Bool {
+        return videoTrackDisabledByController[controllerId] ?? false
+    }
+
     // MARK: - Controller Event Channel Methods
 
     /// Registers a controller-level event sink for persistent events
@@ -351,6 +365,7 @@ class SharedPlayerManager: NSObject {
         // Clear looping and completion-claim state
         loopingByController.removeValue(forKey: controllerId)
         completionClaimed.removeValue(forKey: controllerId)
+        videoTrackDisabledByController.removeValue(forKey: controllerId)
 
         print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
@@ -375,6 +390,7 @@ class SharedPlayerManager: NSObject {
         controllersWithManualPiP.removeAll()
         loopingByController.removeAll()
         completionClaimed.removeAll()
+        videoTrackDisabledByController.removeAll()
     }
 
     // MARK: - AirPlay Route Detection
