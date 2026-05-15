@@ -816,14 +816,10 @@ class VideoPlayerMethodHandler(
 
             Log.d(TAG, "Setting video track disabled: $disabled")
 
-            videoTrackDisabledPreference = disabled
-            if (controllerId != null) {
-                SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
-            }
-
             if (disabled) {
                 val groups = player.currentTracks.groups
                 if (groups.isEmpty()) {
+                    commitVideoTrackDisabledPreference(disabled = true)
                     applyVideoTrackPreference(reason = "set_video_track_disabled_tracks_not_ready")
                     ensureTrackReadyListener()
                     result.success(null)
@@ -842,6 +838,7 @@ class VideoPlayerMethodHandler(
                 clearTrackReadyListener()
             }
 
+            commitVideoTrackDisabledPreference(disabled = disabled)
             applyVideoTrackPreference(reason = "set_video_track_disabled")
 
             Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
@@ -849,6 +846,13 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
             result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
+        }
+    }
+
+    private fun commitVideoTrackDisabledPreference(disabled: Boolean) {
+        videoTrackDisabledPreference = disabled
+        if (controllerId != null) {
+            SharedPlayerManager.setVideoTrackDisabled(controllerId, disabled)
         }
     }
 
