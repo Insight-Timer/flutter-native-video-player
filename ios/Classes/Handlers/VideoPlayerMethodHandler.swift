@@ -1084,6 +1084,23 @@ extension VideoPlayerView {
         }
     }
 
+    /// Toggles `AVPlayerViewController.requiresLinearPlayback` at runtime.
+    /// When true, AVKit hides the scrubber and 15s skip controls (inline +
+    /// PIP). Hosts use this to gate non-premium users out of seeking.
+    func handleSetRequiresLinearPlayback(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let required = args["required"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'required' bool parameter",
+                details: nil
+            ))
+            return
+        }
+        playerViewController.requiresLinearPlayback = required
+        result(nil)
+    }
+
     /// Toggles AVKit's master PIP switch at runtime. Mirrors the setting to
     /// `SharedPlayerManager` so view reconstructions don't revert to the
     /// construction-time default.

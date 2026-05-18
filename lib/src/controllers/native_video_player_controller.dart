@@ -2126,6 +2126,20 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Toggles `AVPlayerViewController.requiresLinearPlayback` (iOS-only).
+  /// When `true`, AVKit hides the scrubber and 15s skip-back/forward
+  /// controls in both inline and PIP UIs. Used to gate non-premium users
+  /// out of seeking. No-op on Android/web.
+  Future<void> setRequiresLinearPlayback(bool required) async {
+    if (_methodChannel == null) return;
+    if (kIsWeb || !Platform.isIOS) return;
+    try {
+      await _methodChannel!.setRequiresLinearPlayback(required);
+    } catch (e) {
+      debugPrint('Error setting requiresLinearPlayback: $e');
+    }
+  }
+
   /// Hard-toggles AVKit's master `allowsPictureInPicturePlayback` at runtime
   /// (iOS). `false` blocks all PIP entry paths and survives view reconstruction.
   /// No-op on Android/web. Returns `true` on successful iOS call.
