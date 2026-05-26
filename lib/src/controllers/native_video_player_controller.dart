@@ -1904,6 +1904,29 @@ class NativeVideoPlayerController {
     return channel.setVideoTrackDisabled(disabled);
   }
 
+  /// Refreshes the system media controls (lock-screen / notification next/prev
+  /// availability) for the currently-loaded media without restarting playback.
+  ///
+  /// Playlist hosts call this after reorder/shuffle moves the playing item so
+  /// the OS-rendered prev/next buttons match the item's new queue neighbours.
+  /// The track-navigation booleans set at `load` time go stale otherwise and
+  /// keep showing the pre-reorder state until the next `load`.
+  ///
+  /// Returns immediately when the controller hasn't been initialized yet.
+  Future<void> updateTrackNavFlags({
+    required bool showSystemNextTrackControl,
+    required bool showSystemPreviousTrackControl,
+  }) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return;
+    }
+    await channel.updateTrackNavFlags(
+      showSystemNextTrackControl: showSystemNextTrackControl,
+      showSystemPreviousTrackControl: showSystemPreviousTrackControl,
+    );
+  }
+
   /// Returns whether Picture-in-Picture is available on this device
   /// Checks the actual device capabilities rather than just the platform
   /// PiP is available on iOS 14+ and Android 8+ (if the device supports it)

@@ -516,6 +516,35 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Refreshes the system media controls (lock-screen / notification next/prev
+  /// availability) for the currently-loaded media, without restarting playback.
+  ///
+  /// Used by playlist hosts after the playing item is reordered/shuffled to a
+  /// new position — the `mediaInfo` set at `load` time has gone stale and the
+  /// OS-rendered buttons need to follow the item's new queue neighbours.
+  ///
+  /// Only the two track-navigation booleans are updated; other `mediaInfo`
+  /// fields (title, artwork, etc.) are left untouched. No-op on platforms that
+  /// don't implement the method (errors are swallowed; callers shouldn't make
+  /// this their only path to update controls).
+  Future<void> updateTrackNavFlags({
+    required bool showSystemNextTrackControl,
+    required bool showSystemPreviousTrackControl,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'updateTrackNavFlags',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'showSystemNextTrackControl': showSystemNextTrackControl,
+          'showSystemPreviousTrackControl': showSystemPreviousTrackControl,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling updateTrackNavFlags: $e');
+    }
+  }
+
   /// Disposes the native player resources
   Future<void> dispose() async {
     try {

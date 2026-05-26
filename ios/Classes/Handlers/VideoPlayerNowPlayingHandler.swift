@@ -404,6 +404,48 @@ extension VideoPlayerView {
         print("   → Skip backward enabled: \(commandCenter.skipBackwardCommand.isEnabled)")
     }
 
+    /// Refreshes the lock-screen / Control Center prev/next button availability
+    /// against the latest track-navigation flags without touching the registered
+    /// command targets or the Now Playing info.
+    ///
+    /// Playlist hosts call this after a reorder/shuffle moves the playing item:
+    /// the flags baked into the original `mediaInfo` at `load` time go stale,
+    /// and `MPRemoteCommandCenter.{previousTrack,nextTrack}Command.isEnabled`
+    /// needs to be re-evaluated against the item's new queue neighbours.
+    ///
+    /// Mutates the stored `currentMediaInfo` so subsequent reads (e.g. a later
+    /// `setupRemoteCommandCenter` call after an ownership transfer) see the
+    /// refreshed flags. Skipped when this view doesn't currently own the
+    /// command center — toggling buttons we don't own would clobber another
+    /// player's controls.
+    func refreshSystemTrackControlsAvailability(
+        showSystemNextTrackControl: Bool,
+        showSystemPreviousTrackControl: Bool
+    ) {
+        var mediaInfo = currentMediaInfo ?? [:]
+        mediaInfo["showSystemNextTrackControl"] = showSystemNextTrackControl
+        mediaInfo["showSystemPreviousTrackControl"] = showSystemPreviousTrackControl
+        currentMediaInfo = mediaInfo
+
+        guard RemoteCommandManager.shared.isOwner(viewId) else {
+            print("🎛️ View \(viewId) refreshSystemTrackControlsAvailability skipped — not owner")
+            return
+        }
+
+        let showSkipControls = (currentMediaInfo?["showSkipControls"] as? Bool) ?? true
+        let shouldShowTrackNavigation = showSystemNextTrackControl || showSystemPreviousTrackControl
+        let commandCenter = MPRemoteCommandCenter.shared()
+        commandCenter.previousTrackCommand.isEnabled = shouldShowTrackNavigation && showSystemPreviousTrackControl
+        commandCenter.nextTrackCommand.isEnabled = shouldShowTrackNavigation && showSystemNextTrackControl
+        commandCenter.skipBackwardCommand.isEnabled = shouldShowTrackNavigation
+            ? (!showSystemPreviousTrackControl && showSkipControls)
+            : showSkipControls
+        commandCenter.skipForwardCommand.isEnabled = shouldShowTrackNavigation
+            ? (!showSystemNextTrackControl && showSkipControls)
+            : showSkipControls
+        print("🎛️ View \(viewId) refreshed track-nav availability — prev: \(commandCenter.previousTrackCommand.isEnabled), next: \(commandCenter.nextTrackCommand.isEnabled)")
+    }
+
     /// Updates playback time and rate dynamically (e.g., every second or on state change)
     func updateNowPlayingPlaybackTime() {
         guard let player = player else {

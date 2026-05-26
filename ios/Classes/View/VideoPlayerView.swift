@@ -586,9 +586,29 @@ import QuartzCore
             handleStopAirPlayDetection(result: result)
         case "dispose":
             handleDispose(result: result)
+        case "updateTrackNavFlags":
+            handleUpdateTrackNavFlags(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    /// Refreshes the lock-screen / Control Center prev-next button availability
+    /// for the currently-loaded media. Used by playlist hosts after the playing
+    /// item is reordered/shuffled — the `mediaInfo` baked in at `load` time has
+    /// gone stale and the OS buttons need to follow the new queue neighbours.
+    private func handleUpdateTrackNavFlags(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any] else {
+            result(FlutterError(code: "INVALID_ARGS", message: "updateTrackNavFlags expects a Map", details: nil))
+            return
+        }
+        let showNext = args["showSystemNextTrackControl"] as? Bool ?? false
+        let showPrev = args["showSystemPreviousTrackControl"] as? Bool ?? false
+        refreshSystemTrackControlsAvailability(
+            showSystemNextTrackControl: showNext,
+            showSystemPreviousTrackControl: showPrev
+        )
+        result(nil)
     }
 
     func invalidateEventChannel() {
