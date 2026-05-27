@@ -74,20 +74,25 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             print("🎬 This is an AUTOMATIC PiP stop")
         }
 
+        // Active, or only just dismiss-paused. An earlier user pause has an
+        // older timestamp → reads as not-playing, so a paused PIP won't resume.
+        let isPlaying = isPlaybackActive ||
+            (lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes
 
         // Send through per-view event channel (legacy)
         if eventSink != nil {
             print("✅ View \(viewId) is active - sending pipStop event to per-view channel (before stop)")
-            sendEvent("pipStop", data: ["isPictureInPicture": false])
+            sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
         } else if let controllerIdValue = controllerId {
             // Try any view for this controller
             let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
             var eventSent = false
             for view in allViews where view.eventSink != nil {
                 print("✅ Sending pipStop event to per-view channel on view \(view.viewId) (before stop)")
-                view.sendEvent("pipStop", data: ["isPictureInPicture": false])
+                view.sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
                 eventSent = true
                 break
             }
@@ -101,7 +106,7 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             print("✅ Sending pipStop event to controller-level channel for controller \(controllerIdValue)")
             SharedPlayerManager.shared.sendControllerEvent(
                 "pipStop",
-                data: ["isPictureInPicture": false],
+                data: ["isPictureInPicture": false, "isPlaying": isPlaying],
                 for: controllerIdValue
             )
         }
@@ -318,20 +323,25 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
     public func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         print("🎬 Custom PiP controller will stop on view \(viewId)")
 
+        // Active, or only just dismiss-paused. An earlier user pause has an
+        // older timestamp → reads as not-playing, so a paused PIP won't resume.
+        let isPlaying = isPlaybackActive ||
+            (lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes
 
         // Send through per-view event channel (legacy)
         if eventSink != nil {
             print("✅ View \(viewId) is active - sending pipStop event to per-view channel (before stop)")
-            sendEvent("pipStop", data: ["isPictureInPicture": false])
+            sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
         } else if let controllerIdValue = controllerId {
             // Try any view for this controller
             let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
             var eventSent = false
             for view in allViews where view.eventSink != nil {
                 print("✅ Sending pipStop event to per-view channel on view \(view.viewId) (before stop)")
-                view.sendEvent("pipStop", data: ["isPictureInPicture": false])
+                view.sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
                 eventSent = true
                 break
             }
@@ -345,7 +355,7 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
             print("✅ Sending pipStop event to controller-level channel for controller \(controllerIdValue)")
             SharedPlayerManager.shared.sendControllerEvent(
                 "pipStop",
-                data: ["isPictureInPicture": false],
+                data: ["isPictureInPicture": false, "isPlaying": isPlaying],
                 for: controllerIdValue
             )
         }

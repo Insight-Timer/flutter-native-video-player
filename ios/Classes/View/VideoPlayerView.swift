@@ -111,6 +111,11 @@ import QuartzCore
     // Track if app is in background to keep audio playing on screen lock
     var isInBackground: Bool = false
     var lastKnownRate: Float = 0.0
+
+    // Playback intent for PIP dismiss, kept current by `timeControlStatus`
+    // KVO — the dismiss-pause makes the live rate unreliable at willStop.
+    var isPlaybackActive: Bool = false
+    var lastPlayingToPausedAt: Date?
     
     // DRM handler for protected content
     var drmHandler: VideoPlayerDrmHandler?
