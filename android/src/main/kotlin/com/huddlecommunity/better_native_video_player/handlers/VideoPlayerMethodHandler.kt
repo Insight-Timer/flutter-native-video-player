@@ -84,8 +84,35 @@ class VideoPlayerMethodHandler(
             "stopAirPlayDetection" -> handleStopAirPlayDetection(result)
             "disconnectAirPlay" -> handleDisconnectAirPlay(result)
             "dispose" -> handleDispose(result)
+            "updateTrackNavFlags" -> handleUpdateTrackNavFlags(call, result)
             else -> result.notImplemented()
         }
+    }
+
+    /**
+     * Refreshes the system media notification's prev/next button availability
+     * for the currently-loaded media. Used by playlist hosts after the playing
+     * item is reordered/shuffled — the `mediaInfo` set at `load` time has gone
+     * stale and the OS-rendered buttons need to follow the new queue
+     * neighbours without restarting playback.
+     */
+    private fun handleUpdateTrackNavFlags(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val showNext = args?.get("showSystemNextTrackControl") as? Boolean
+        val showPrev = args?.get("showSystemPreviousTrackControl") as? Boolean
+        if (showNext == null || showPrev == null) {
+            result.error(
+                "INVALID_ARGS",
+                "updateTrackNavFlags expects showSystem(Next|Previous)TrackControl bools",
+                null,
+            )
+            return
+        }
+        notificationHandler.refreshSystemTrackControlsAvailability(
+            showSystemNextTrackControl = showNext,
+            showSystemPreviousTrackControl = showPrev,
+        )
+        result.success(null)
     }
 
     /**
@@ -119,9 +146,9 @@ class VideoPlayerMethodHandler(
         val mediaInfo = args["mediaInfo"] as? Map<String, Any>
         val drmConfig = args["drmConfig"] as? Map<*, *>
 
-        // Update track nav flags early so getAvailableCommands() reflects them when
+        // Cache track nav flags early so getAvailableCommands() reflects them when
         // setMediaSource() triggers onAvailableCommandsChanged below.
-        notificationHandler.updateTrackNavFlags(mediaInfo)
+        notificationHandler.cacheTrackNavFlags(mediaInfo)
 
         // Store media info in the VideoPlayerView
         updateMediaInfo?.invoke(mediaInfo)
