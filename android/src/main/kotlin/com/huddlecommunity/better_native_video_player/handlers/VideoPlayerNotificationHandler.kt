@@ -111,6 +111,8 @@ class VideoPlayerNotificationHandler(
             if (showSystemPreviousTrackControl) {
                 eventHandler.sendEvent("previousTrack")
             } else {
+                // Surface the within-track skip so hosts can react (e.g. tracking).
+                eventHandler.sendEvent("seekBack")
                 super.seekBack()
             }
         }
@@ -119,6 +121,7 @@ class VideoPlayerNotificationHandler(
             if (showSystemNextTrackControl) {
                 eventHandler.sendEvent("nextTrack")
             } else {
+                eventHandler.sendEvent("seekForward")
                 super.seekForward()
             }
         }
