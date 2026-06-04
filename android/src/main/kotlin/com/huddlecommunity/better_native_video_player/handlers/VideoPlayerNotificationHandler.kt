@@ -111,6 +111,8 @@ class VideoPlayerNotificationHandler(
             if (showSystemPreviousTrackControl) {
                 eventHandler.sendEvent("previousTrack")
             } else {
+                // Surface the within-track skip so hosts can react (e.g. tracking).
+                eventHandler.sendEvent("seekBack")
                 super.seekBack()
             }
         }
@@ -119,6 +121,7 @@ class VideoPlayerNotificationHandler(
             if (showSystemNextTrackControl) {
                 eventHandler.sendEvent("nextTrack")
             } else {
+                eventHandler.sendEvent("seekForward")
                 super.seekForward()
             }
         }
@@ -167,16 +170,18 @@ class VideoPlayerNotificationHandler(
         ): ConnectionResult {
             val base = super.onConnect(session, controller)
             if (!showSkipControls) {
+                // Strip within-track seek (FF/rewind/scrubber). Cross-track skip
+                // (COMMAND_SEEK_TO_NEXT/PREVIOUS and their _MEDIA_ITEM variants)
+                // is gated independently by wrappedPlayer.getAvailableCommands()
+                // via showSystemNextTrackControl / showSystemPreviousTrackControl,
+                // so that non-premium playlist users keep working PIP / Bluetooth /
+                // Wear / Auto skip buttons.
                 val playerCommands = base.availablePlayerCommands.buildUpon()
                     .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
                     .remove(Player.COMMAND_SEEK_BACK)
                     .remove(Player.COMMAND_SEEK_FORWARD)
                     .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
                     .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
-                    .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
-                    .remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
-                    .remove(Player.COMMAND_SEEK_TO_NEXT)
-                    .remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
                     .build()
                 return ConnectionResult.accept(base.availableSessionCommands, playerCommands)
             }

@@ -136,6 +136,17 @@ class SharedPlayerManager: NSObject {
         print("   ✅ Stored PiP settings for controller \(controllerId) - allows: \(allowsPictureInPicture), autoStart: \(canStartPictureInPictureAutomatically)")
     }
 
+    /// Mirrors a runtime `allowsPictureInPicture` change into stored settings
+    /// so view reconstruction reads the updated value. No-op if no settings stored.
+    func setAllowsPictureInPicture(for controllerId: Int, allows: Bool) {
+        guard let existing = pipSettings[controllerId] else { return }
+        pipSettings[controllerId] = PipSettings(
+            allowsPictureInPicture: allows,
+            canStartPictureInPictureAutomatically: existing.canStartPictureInPictureAutomatically,
+            showNativeControls: existing.showNativeControls
+        )
+    }
+
     /// Gets PiP settings for a controller
     /// Returns nil if no settings have been stored for this controller
     func getPipSettings(for controllerId: Int) -> PipSettings? {

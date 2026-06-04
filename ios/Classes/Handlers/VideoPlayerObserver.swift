@@ -101,6 +101,7 @@ extension VideoPlayerView {
 
                 switch player.timeControlStatus {
                 case .playing:
+                    isPlaybackActive = true
                     // ALWAYS update Now Playing info when playback starts
                     // This ensures media controls show the correct info whether in normal view or PiP
                     var mediaInfo = currentMediaInfo
@@ -169,6 +170,11 @@ extension VideoPlayerView {
 
                     sendEvent("play")
                 case .paused:
+                    // Timestamp the playing→paused edge for the PIP willStop check.
+                    if isPlaybackActive {
+                        lastPlayingToPausedAt = Date()
+                    }
+                    isPlaybackActive = false
                     // Only send pause if not waiting to play (buffering)
                     // This prevents sending pause when seeking to unbuffered position
                     if player.reasonForWaitingToPlay == nil {

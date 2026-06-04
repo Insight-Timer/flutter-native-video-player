@@ -111,6 +111,11 @@ import QuartzCore
     // Track if app is in background to keep audio playing on screen lock
     var isInBackground: Bool = false
     var lastKnownRate: Float = 0.0
+
+    // Playback intent for PIP dismiss, kept current by `timeControlStatus`
+    // KVO — the dismiss-pause makes the live rate unreliable at willStop.
+    var isPlaybackActive: Bool = false
+    var lastPlayingToPausedAt: Date?
     
     // DRM handler for protected content
     var drmHandler: VideoPlayerDrmHandler?
@@ -297,7 +302,11 @@ import QuartzCore
 
                 if isActiveForAutoPiP || isPlaying {
                     print("🎬 Controller state - activeForAutoPiP: \(isActiveForAutoPiP), isPlaying: \(isPlaying)")
-                    if canStartPictureInPictureAutomatically {
+                    // Honor runtime PIP hard-disable across view reconstruction.
+                    let storedAllowsPip = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
+                    if !storedAllowsPip {
+                        // Skip — runtime override has disabled PIP.
+                    } else if canStartPictureInPictureAutomatically {
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
@@ -359,6 +368,16 @@ import QuartzCore
             object: nil
         )
         print("✅ Registered background notification observer for view \(viewId)")
+
+        // Re-arm auto-PIP at willResignActive: closes the window right after
+        // a runtime PIP re-enable where AVKit's view-active state is still
+        // settling and the initial flag set would otherwise be ignored.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAppWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
 
         // Observe audio session interruptions
         NotificationCenter.default.addObserver(
@@ -543,6 +562,10 @@ import QuartzCore
             handleEnableAutomaticInlinePip(result: result)
         case "disableAutomaticInlinePip":
             handleDisableAutomaticInlinePip(result: result)
+        case "setAllowsPictureInPicture":
+            handleSetAllowsPictureInPicture(call: call, result: result)
+        case "setRequiresLinearPlayback":
+            handleSetRequiresLinearPlayback(call: call, result: result)
         case "setShowNativeControls":
             handleSetShowNativeControls(call: call, result: result)
         case "setUseAspectFill":
@@ -1109,6 +1132,21 @@ import QuartzCore
     }
 
     // MARK: - App Lifecycle Handling
+
+    /// Re-arms auto-PIP at the last possible moment before backgrounding so
+    /// AVKit reads the desired flag value at decision time — fixes the
+    /// post-runtime-toggle window where the initial flag set is ignored.
+    @objc func handleAppWillResignActive() {
+        guard #available(iOS 14.2, *) else { return }
+        // Don't override an explicit consumer disable.
+        guard playerViewController.allowsPictureInPicturePlayback else { return }
+        guard canStartPictureInPictureAutomatically else { return }
+
+        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+        }
+    }
 
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback

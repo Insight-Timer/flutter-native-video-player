@@ -1084,6 +1084,86 @@ extension VideoPlayerView {
         }
     }
 
+    /// Toggles `AVPlayerViewController.requiresLinearPlayback` at runtime.
+    /// When true, AVKit hides the scrubber and 15s skip controls (inline +
+    /// PIP). Hosts use this to gate non-premium users out of seeking.
+    func handleSetRequiresLinearPlayback(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let required = args["required"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'required' bool parameter",
+                details: nil
+            ))
+            return
+        }
+        playerViewController.requiresLinearPlayback = required
+        result(nil)
+    }
+
+    /// Toggles AVKit's master PIP switch at runtime. Mirrors the setting to
+    /// `SharedPlayerManager` so view reconstructions don't revert to the
+    /// construction-time default.
+    func handleSetAllowsPictureInPicture(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let allows = args["allows"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'allows' bool parameter",
+                details: nil
+            ))
+            return
+        }
+
+        playerViewController.allowsPictureInPicturePlayback = allows
+
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
+        }
+
+        // Keep auto-from-inline symmetric with the master flag.
+        if #available(iOS 14.2, *) {
+            if !allows {
+                playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                if let controllerIdValue = controllerId {
+                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: false)
+                }
+            } else {
+                // Set directly on this controller — the manager's primary-view
+                // bookkeeping can be stale after a disable→re-enable round trip.
+                if canStartPictureInPictureAutomatically {
+                    playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                }
+                if let controllerIdValue = controllerId {
+                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+                }
+
+                // Re-apply ~1s later: AVKit can ignore the immediate set while
+                // a deselected video media group is still being restored
+                // (audio→video toggle pattern), so the first
+                // background-after-re-enable silently fails to PIP.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self = self else { return }
+                    let stillAllows: Bool
+                    if let controllerIdValue = self.controllerId {
+                        stillAllows = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
+                    } else {
+                        stillAllows = self.playerViewController.allowsPictureInPicturePlayback
+                    }
+                    guard stillAllows else { return }
+                    if self.canStartPictureInPictureAutomatically {
+                        self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                    }
+                    if let controllerIdValue = self.controllerId {
+                        SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+                    }
+                }
+            }
+        }
+
+        result(true)
+    }
+
     /// Sets up periodic time observer to update Now Playing elapsed time
     func setupPeriodicTimeObserver() {
         // Remove existing observer if any
