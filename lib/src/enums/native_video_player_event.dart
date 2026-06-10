@@ -21,8 +21,24 @@ enum PlayerControlState {
   seeked,
   previousTrackRequested,
   nextTrackRequested,
+
+  /// Android-only. Within-track skip backward (15s rewind) initiated by an
+  /// external transport (PIP / Bluetooth / Wear / Auto) when no playlist-skip
+  /// flag is exposing the buttons. iOS does not emit this — AVKit PIP and
+  /// `MPRemoteCommandCenter` skip handlers seek the player directly without
+  /// surfacing a Flutter event.
+  seekBackRequested,
+
+  /// Android-only. Mirror of [seekBackRequested] for skip forward.
+  seekForwardRequested,
   pipStarted,
+
+  /// iOS: AVKit `willStop` (mid-transition). Route mutations get dropped
+  /// here — use [pipDidStop] for navigation.
   pipStopped,
+
+  /// iOS: AVKit `didStop` (post-transition). Safe for navigation.
+  pipDidStop,
   pipAvailabilityChanged,
   airPlayAvailabilityChanged,
   airPlayConnected,
@@ -110,10 +126,16 @@ class PlayerControlEvent {
         return PlayerControlState.previousTrackRequested;
       case 'nextTrack':
         return PlayerControlState.nextTrackRequested;
+      case 'seekBack':
+        return PlayerControlState.seekBackRequested;
+      case 'seekForward':
+        return PlayerControlState.seekForwardRequested;
       case 'pipStart':
         return PlayerControlState.pipStarted;
       case 'pipStop':
         return PlayerControlState.pipStopped;
+      case 'pipDidStop':
+        return PlayerControlState.pipDidStop;
       case 'pipAvailabilityChanged':
         return PlayerControlState.pipAvailabilityChanged;
       case 'airPlayAvailabilityChanged':

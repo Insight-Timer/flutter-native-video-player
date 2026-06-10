@@ -293,6 +293,42 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Hard-toggles AVKit's `allowsPictureInPicturePlayback`. `false` blocks all
+  /// PIP entry paths and survives view reconstruction (vs the lighter-weight
+  /// [enableAutomaticInlinePip] / [disableAutomaticInlinePip]).
+  Future<bool> setAllowsPictureInPicture(bool allows) async {
+    try {
+      final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+        'setAllowsPictureInPicture',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'allows': allows,
+        },
+      );
+      return result == true;
+    } catch (e) {
+      debugPrint('Error calling setAllowsPictureInPicture: $e');
+      return false;
+    }
+  }
+
+  /// Toggles `AVPlayerViewController.requiresLinearPlayback` (iOS-only).
+  /// When `true`, AVKit hides the scrubber and 15s skip-back/forward
+  /// controls in both inline and PIP UIs. No-op on Android.
+  Future<void> setRequiresLinearPlayback(bool required) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setRequiresLinearPlayback',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'required': required,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setRequiresLinearPlayback: $e');
+    }
+  }
+
   /// Enters fullscreen mode
   Future<void> enterFullScreen() async {
     try {
