@@ -650,7 +650,7 @@ extension VideoPlayerView {
         }
 
         // Find the root view controller
-        guard let rootViewController = UIApplication.shared.keyWindow?.rootViewController else {
+        guard let rootViewController = UIApplication.shared.activeKeyWindow?.rootViewController else {
             result(FlutterError(code: "NO_VIEW_CONTROLLER", message: "Could not find root view controller", details: nil))
             return
         }
@@ -768,7 +768,7 @@ extension VideoPlayerView {
     }
 
     func handleEnterFullScreen(result: @escaping FlutterResult) {
-        if let viewController = UIApplication.shared.keyWindow?.rootViewController {
+        if let viewController = UIApplication.shared.activeKeyWindow?.rootViewController {
             // Create a NEW player view controller for fullscreen
             // This prevents the embedded view from being removed from Flutter's view hierarchy
             let fullscreenPlayerViewController = AVPlayerViewController()
