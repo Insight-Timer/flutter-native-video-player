@@ -410,7 +410,8 @@ import QuartzCore
         }
 
         let playerView = playerViewController.view!
-        guard let rootView = UIApplication.shared.delegate?.window??.rootViewController?.view else {
+        // Scene-aware lookup: under UISceneDelegate the AppDelegate's `window` is nil.
+        guard let rootView = UIApplication.shared.activeKeyWindow?.rootViewController?.view else {
             print("⚠️ [NativeLayout] Could not find root view — skipping")
             result(FlutterError(code: "NO_ROOT_VIEW", message: "Could not find root view controller", details: nil))
             return
