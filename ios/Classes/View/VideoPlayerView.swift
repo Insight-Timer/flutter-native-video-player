@@ -311,9 +311,7 @@ import QuartzCore
                 let isActiveForAutoPiP = SharedPlayerManager.shared.isControllerActiveForAutoPiP(controllerIdValue)
                 let isPlaying = player?.rate ?? 0 > 0
 
-                // A Dart-fullscreen (floating well) secondary view must NOT steal
-                  // auto-PiP onto itself — keep arming on the inline/primary view.
-                  if (isActiveForAutoPiP || isPlaying) && !isDartFullscreen {
+                if isActiveForAutoPiP || isPlaying {
                     print("🎬 Controller state - activeForAutoPiP: \(isActiveForAutoPiP), isPlaying: \(isPlaying)")
                     // Honor runtime PIP hard-disable across view reconstruction.
                     let storedAllowsPip = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
