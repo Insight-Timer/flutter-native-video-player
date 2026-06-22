@@ -618,8 +618,19 @@ class SharedPlayerManager: NSObject {
             }
             
             // Then enable ONLY the primary view (the one that most recently called play)
-            var enabledOnView = false
-            if let primaryViewId = primaryViewIdForController[controllerId] {
+            // Then enable ONLY the primary view (the one that most recently called play)
+              var enabledOnView = false
+              // EXPERIMENT: arm the inline (non-Dart-fullscreen) view instead of the
+              // most-recently-played one, so auto-PiP sits on the on-screen full-screen
+              // view rather than the off-screen well.
+              var targetPrimaryViewId = primaryViewIdForController[controllerId]
+              for (_, wrapper) in videoPlayerViews {
+                  if let v = wrapper.view, v.controllerId == controllerId, v.isDartFullscreenView == false {
+                      targetPrimaryViewId = v.viewId
+                      break
+                  }
+              }
+              if let primaryViewId = targetPrimaryViewId {
                 let key = "\(primaryViewId)"
                 if let wrapper = videoPlayerViews[key], let view = wrapper.view {
                     print("   🔍 Checking primary view \(primaryViewId):")
