@@ -618,6 +618,7 @@ class SharedPlayerManager: NSObject {
             }
             
             // Then enable ONLY the primary view (the one that most recently called play)
+            var enabledOnView = false
             if let primaryViewId = primaryViewIdForController[controllerId] {
                 let key = "\(primaryViewId)"
                 if let wrapper = videoPlayerViews[key], let view = wrapper.view {
