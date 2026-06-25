@@ -1673,9 +1673,8 @@ class NativeVideoPlayerController {
     unawaited(_safeCancelSubscription(_eventSubscriptions[platformViewId]));
     _eventSubscriptions.remove(platformViewId);
 
-    // If the disposed view was the primary view, switch to another active view.
-    // Prefer a non-fullscreen-context (inline) view; only fall back to a
-    // fullscreen-context view if it's the only one left.
+    // If the primary view was disposed, promote another view, preferring an
+    // inline view over a fullscreen-context one.
     if (_primaryPlatformViewId == platformViewId &&
         _platformViewIds.isNotEmpty) {
       final newPrimaryViewId = _platformViewIds.lastWhere(
