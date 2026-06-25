@@ -212,11 +212,8 @@ class NativeVideoPlayerController {
   /// Set of platform view IDs that are using this controller
   final Set<int> _platformViewIds = <int>{};
 
-  /// View IDs that are secondary "fullscreen-context" surfaces (e.g. the
-  /// floating mini-preview). They render shared frames only and must never
-  /// become the method-channel command target — otherwise view-specific
-  /// commands (setUseAspectFill, PiP, native controls, fullscreen) get routed
-  /// to them instead of the inline player view.
+  /// Secondary "fullscreen-context" view IDs (e.g. the floating mini-preview).
+  /// They render shared frames only and must never become the command target.
   final Set<int> _fullscreenContextViewIds = <int>{};
 
   /// Primary platform view ID (most recent one registered)
@@ -880,11 +877,8 @@ class NativeVideoPlayerController {
     // Store context for Dart fullscreen
     _platformViewContexts[platformViewId] = context;
 
-    // Only the inline (non-fullscreen-context) view owns the method channel.
-    // A fullscreen-context view (floating mini-preview) renders shared frames
-    // only and must never become the command target. Still adopt it if there
-    // is no primary yet, so a controller that has only a secondary view can
-    // still receive commands.
+    // Only the inline view owns the method channel; a fullscreen-context view
+    // is adopted only if there's no primary yet.
     if (!isFullscreenContext || _primaryPlatformViewId == null) {
       _updateMethodChannel(platformViewId);
     }
