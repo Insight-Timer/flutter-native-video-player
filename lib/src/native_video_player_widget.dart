@@ -206,7 +206,11 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
   /// Called when the platform view is created
   Future<void> _onPlatformViewCreated(int id) async {
     _platformViewId = id;
-    await widget.controller.onPlatformViewCreated(id, context);
+    await widget.controller.onPlatformViewCreated(
+      id,
+      context,
+      isFullscreenContext: widget.isFullscreenContext,
+    );
   }
 
   Map<String, dynamic> _getCreationParams() {
