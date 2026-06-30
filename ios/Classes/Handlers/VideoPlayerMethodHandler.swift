@@ -1133,27 +1133,22 @@ extension VideoPlayerView {
             SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
         }
 
-        // Keep auto-from-inline symmetric with the master flag.
+        // Keep auto-from-inline symmetric with the master flag, but NEVER call
+        // setAutomaticPiPEnabled here. That re-points "primary" at the inline view
+        // and fights setAutomaticPipView, the single source of truth for arming.
+        // We only toggle the shared controller's own flag (playerViewController is
+        // the shared controller; setAutomaticPipView keeps it in the on-screen slot).
         if #available(iOS 14.2, *) {
             if !allows {
                 playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                if let controllerIdValue = controllerId {
-                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: false)
-                }
             } else {
-                // Set directly on this controller — the manager's primary-view
-                // bookkeeping can be stale after a disable→re-enable round trip.
                 if canStartPictureInPictureAutomatically {
                     playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
                 }
-                if let controllerIdValue = controllerId {
-                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-                }
 
-                // Re-apply ~1s later: AVKit can ignore the immediate set while
-                // a deselected video media group is still being restored
-                // (audio→video toggle pattern), so the first
-                // background-after-re-enable silently fails to PIP.
+                // Re-apply ~1s later: AVKit can ignore the immediate set while a
+                // deselected video media group is still being restored (audio→video
+                // toggle), so the first background-after-re-enable silently fails.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     guard let self = self else { return }
                     let stillAllows: Bool
@@ -1162,13 +1157,8 @@ extension VideoPlayerView {
                     } else {
                         stillAllows = self.playerViewController.allowsPictureInPicturePlayback
                     }
-                    guard stillAllows else { return }
-                    if self.canStartPictureInPictureAutomatically {
-                        self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-                    }
-                    if let controllerIdValue = self.controllerId {
-                        SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-                    }
+                    guard stillAllows, self.canStartPictureInPictureAutomatically else { return }
+                    self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
                 }
             }
         }
