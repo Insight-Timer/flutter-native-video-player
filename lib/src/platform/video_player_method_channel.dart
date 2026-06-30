@@ -279,6 +279,21 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Arms auto-PiP on the inline or Dart-fullscreen (floating) view (iOS 14.2+)
+  Future<void> setAutomaticPipView({required bool fullscreenContext}) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setAutomaticPipView',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'fullscreenContext': fullscreenContext,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setAutomaticPipView: $e');
+    }
+  }
+
   /// Disables automatic inline Picture-in-Picture mode (iOS 14.2+)
   Future<bool> disableAutomaticInlinePip() async {
     try {

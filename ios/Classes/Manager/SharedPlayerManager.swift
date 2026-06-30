@@ -567,6 +567,22 @@ class SharedPlayerManager: NSObject {
     func getPrimaryViewId(for controllerId: Int) -> Int64? {
         return primaryViewIdForController[controllerId]
     }
+
+    /// Arm auto-PiP on the inline (fullscreenContext=false) or the Dart-fullscreen
+    /// (fullscreenContext=true) view for this controller — used as the floating
+    /// player collapses/expands so PiP follows the on-screen view.
+    @available(iOS 14.2, *)
+    func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        for (_, wrapper) in videoPlayerViews {
+            if let view = wrapper.view, view.controllerId == controllerId,
+               view.isDartFullscreenView == fullscreenContext {
+                setPrimaryView(view.viewId, for: controllerId)
+                setAutomaticPiPEnabled(for: controllerId, enabled: true)
+                return
+            }
+        }
+    }
     
     /// Enable automatic PiP for a specific controller and disable for all others
     /// This ensures only one player can enter automatic PiP at a time

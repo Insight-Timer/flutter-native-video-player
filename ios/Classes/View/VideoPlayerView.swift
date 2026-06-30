@@ -321,10 +321,10 @@ import QuartzCore
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
-                        } else {
-                            // Set this new view as the primary view
+                        } else if !isDartFullscreenView {
+                            // A Dart-fullscreen (floating) view must not auto-claim primary;
+                            // the app points auto-PiP at it explicitly via setAutomaticPipView.
                             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
-                            // Re-apply automatic PiP settings to enable it on this new view
                             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                             print("   → Set new view as primary and enabled automatic PiP (viewId: \(viewId))")
                         }
@@ -573,6 +573,8 @@ import QuartzCore
             handleEnableAutomaticInlinePip(result: result)
         case "disableAutomaticInlinePip":
             handleDisableAutomaticInlinePip(result: result)
+        case "setAutomaticPipView":
+            handleSetAutomaticPipView(call: call, result: result)
         case "setAllowsPictureInPicture":
             handleSetAllowsPictureInPicture(call: call, result: result)
         case "setRequiresLinearPlayback":

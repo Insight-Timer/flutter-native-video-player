@@ -1063,6 +1063,20 @@ extension VideoPlayerView {
         }
     }
 
+    /// Points auto-PiP at the inline or Dart-fullscreen view for this controller,
+    /// so PiP follows the floating player as it collapses/expands.
+    func handleSetAutomaticPipView(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        if #available(iOS 14.2, *) {
+            let fullscreenContext = (call.arguments as? [String: Any])?["fullscreenContext"] as? Bool ?? false
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setAutomaticPipView(for: controllerIdValue, fullscreenContext: fullscreenContext)
+            }
+            result(true)
+        } else {
+            result(FlutterError(code: "NOT_SUPPORTED", message: "Automatic inline PiP requires iOS 14.2+", details: nil))
+        }
+    }
+
     func handleDisableAutomaticInlinePip(result: @escaping FlutterResult) {
         if #available(iOS 14.2, *) {
             print("🎬 Disabling automatic inline PiP")
