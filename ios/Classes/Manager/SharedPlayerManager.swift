@@ -601,17 +601,11 @@ class SharedPlayerManager: NSObject {
 
         guard let target = targetView else {
             // Target view not registered yet — re-applied when it registers.
-            sendControllerEvent("pipDiagnostic", data: [
-                "stage": "targetMissing", "fullscreenContext": fullscreenContext
-            ], for: controllerId)
             return
         }
 
         // Reparent the one original controller's view into the target's host and
         // apply the slot config (delegate/controls/zoom). Never released/recreated.
-        sendControllerEvent("pipDiagnostic", data: [
-            "stage": "reparent", "view": fullscreenContext ? "floating" : "inline"
-        ], for: controllerId)
         target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)
@@ -623,20 +617,6 @@ class SharedPlayerManager: NSObject {
     /// auto-PiP arming and legacy paths must not arm independently.
     func automaticPipContext(for controllerId: Int) -> Bool? {
         return lastAutoPipContext[controllerId]
-    }
-
-    /// The live view currently designated as the on-screen auto-PiP target
-    /// (matching the last collapse/expand context), if any. Used for diagnostics.
-    func automaticPipTargetView(for controllerId: Int) -> VideoPlayerView? {
-        guard let context = lastAutoPipContext[controllerId] else { return nil }
-        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
-        for (_, wrapper) in videoPlayerViews {
-            if let view = wrapper.view, view.controllerId == controllerId,
-               view.isDartFullscreenView == context {
-                return view
-            }
-        }
-        return nil
     }
 
     /// True if a floating-player handoff has designated the OTHER view (opposite

@@ -1254,34 +1254,16 @@ import QuartzCore
             return
         }
 
-        if let context = SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) {
+        if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
             // Reparent model: ONE original controller, moved into the on-screen
             // host. Both inline and floating views reference the same controller,
             // so just re-assert its auto flag (never disable — that would disarm
             // the single controller). setAutomaticPipView placed it in the right host.
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-            // Is the armed controller's view actually attached to a window?
-            // viewIfLoaded avoids forcing a view load (no behavior change).
-            let armedView = SharedPlayerManager.shared.automaticPipTargetView(for: controllerIdValue)
-            let armedViewInWindow = (armedView?.playerViewController.viewIfLoaded?.window) != nil
-            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
-                "stage": "willResignActive",
-                "view": isDartFullscreenView ? "floating" : "inline",
-                "armedController": context ? "floating" : "inline",
-                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline,
-                "viewInWindow": armedViewInWindow
-            ], for: controllerIdValue)
         } else {
             // No handoff context: legacy last-moment re-arm.
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
-                "stage": "willResignActive",
-                "view": isDartFullscreenView ? "floating" : "inline",
-                "armedController": "legacyPrimary",
-                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline,
-                "viewInWindow": (playerViewController.viewIfLoaded?.window) != nil
-            ], for: controllerIdValue)
         }
     }
 

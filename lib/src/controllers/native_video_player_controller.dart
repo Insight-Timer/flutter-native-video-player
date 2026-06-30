@@ -1110,12 +1110,6 @@ class NativeVideoPlayerController {
     final map = eventMap as Map<dynamic, dynamic>;
     final String eventName = map['event'] as String;
 
-    // PiP diagnostics — surfaced to the Dart console (we can't read Xcode logs).
-    if (eventName == 'pipDiagnostic') {
-      debugPrint('🎬 [PiP] ${Map<String, dynamic>.from(map)}');
-      return;
-    }
-
     // Handle PiP events
     if (eventName == 'pipStart' || eventName == 'pipStop') {
       final bool isPipEnabled = eventName == 'pipStart';
