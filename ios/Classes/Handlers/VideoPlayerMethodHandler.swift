@@ -338,19 +338,15 @@ extension VideoPlayerView {
             print("   → currentMediaInfo was nil and SharedPlayerManager has no cached info for controller \(controllerId ?? -1)")
         }
 
-        // Mark this view as the primary (active) view for this controller
-        // This ensures automatic PiP will be enabled on THIS view, not other views
-        if let controllerIdValue = controllerId {
+        // Mark this view as the primary (active) view for this controller, unless
+        // a collapse/expand handoff has designated the other view as on-screen.
+        if let controllerIdValue = controllerId,
+           !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
-        }
 
-        // Enable automatic PiP for this controller and disable for all others
-        // Only if automatic PiP was requested in creation params
-        if #available(iOS 14.2, *) {
-            if let controllerIdValue = controllerId {
-                // Only enable if the user requested it in creation params
-                let shouldEnableAutoPiP = canStartPictureInPictureAutomatically
-                if shouldEnableAutoPiP {
+            // Enable automatic PiP for this controller (if requested in creation params).
+            if #available(iOS 14.2, *) {
+                if canStartPictureInPictureAutomatically {
                     SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                 } else {
                     print("🎬 Automatic PiP not enabled (canStartPictureInPictureAutomatically = false)")
@@ -980,57 +976,54 @@ extension VideoPlayerView {
                 return playerLayer
             }
         }
-
+        
         return nil
     }
 
-    /// (Re)creates the single dedicated PiP controller bound to THIS view's
-    /// player layer, with the auto-start flag on. Replaces AVPlayerViewController's
-    /// built-in auto PiP so PiP targets the on-screen (inline or floating) view
-    /// even though two controllers share one player. Mirrors the manual-PiP
-    /// readiness pattern: retries until the layer is attached and PiP is possible.
+    // MARK: - Floating-player PiP handoff (exactly one bound AVPlayerViewController)
+
+    /// Releases THIS view's AVPlayerViewController from the shared player so it no
+    /// longer competes for auto-PiP. The shared AVPlayer keeps playing; only this
+    /// view-controller is detached. No-op while this view's PiP is active.
     @available(iOS 14.2, *)
-    func bindAutomaticPipController(attempt: Int = 0) {
-        let maxAttempts = 5
-        // Never disturb an active or manual PiP session.
-        if let controllerIdValue = controllerId,
-           SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) { return }
+    func detachPlayerForPipHandoff() {
         guard !isPipCurrentlyActive else { return }
-        guard playerViewController.allowsPictureInPicturePlayback,
-              canStartPictureInPictureAutomatically else { return }
-
-        // Wait for the layer to be attached before creating the controller.
-        guard let layer = findPlayerLayer() else {
-            if attempt < maxAttempts {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    self?.bindAutomaticPipController(attempt: attempt + 1)
-                }
-            } else if let controllerIdValue = controllerId {
-                // Layer not attached yet — let the player-ready hook retry later.
-                SharedPlayerManager.shared.setPendingAutomaticPipBind(for: controllerIdValue, fullscreenContext: isDartFullscreenView)
-            }
-            return
+        playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+        playerViewController.player = nil
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "controllerReleased",
+                "view": isDartFullscreenView ? "floating" : "inline"
+            ], for: controllerIdValue)
         }
+    }
 
-        if pipController == nil {
-            pipController = try? AVPictureInPictureController(playerLayer: layer)
-            pipController?.delegate = self
+    /// Re-binds THIS view's AVPlayerViewController to the shared player and arms
+    /// built-in auto-PiP on it, making it the one on-screen controller iOS uses.
+    @available(iOS 14.2, *)
+    func attachPlayerAndArmPip(_ sharedPlayer: AVPlayer) {
+        if playerViewController.player !== sharedPlayer {
+            playerViewController.player = sharedPlayer
         }
-        pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-
-        // Confirm PiP is actually possible, retrying like the manual path; the
-        // controller stays armed across retries so it fires once iOS is ready.
-        if let pip = pipController, !pip.isPictureInPicturePossible, attempt < maxAttempts {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                self?.bindAutomaticPipController(attempt: attempt + 1)
-            }
-            return
-        }
+        let allows = playerViewController.allowsPictureInPicturePlayback
+        let arm = allows && canStartPictureInPictureAutomatically
+        playerViewController.canStartPictureInPictureAutomaticallyFromInline = arm
 
         if let controllerIdValue = controllerId {
-            SharedPlayerManager.shared.clearPendingAutomaticPipBind(for: controllerIdValue)
+            let viewLabel = isDartFullscreenView ? "floating" : "inline"
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "controllerRestored", "view": viewLabel, "allowsPip": allows
+            ], for: controllerIdValue)
+            // hasLayer comes from findPlayerLayer() (hierarchy read, no controller
+            // created — so it can't poison the built-in PiP the way a standalone
+            // AVPictureInPictureController did). The real possible/failed signal
+            // arrives via the pipWillStart / pipFailedToStart diagnostics below.
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "autoPipArmed", "view": viewLabel, "autoFlag": arm,
+                "hasLayer": findPlayerLayer() != nil,
+                "isPipSupported": AVPictureInPictureController.isPictureInPictureSupported()
+            ], for: controllerIdValue)
         }
-        print("🎬 Bound dedicated PiP controller on view \(viewId) (fullscreen: \(isDartFullscreenView))")
     }
 
     func handleExitPictureInPicture(result: @escaping FlutterResult) {
@@ -1094,14 +1087,15 @@ extension VideoPlayerView {
 
             print("🎬 Enabling automatic inline PiP")
 
-            // Drive PiP through a single custom controller bound to the on-screen
-            // view — not AVPlayerViewController's built-in flag, which can't
-            // target the right view when two controllers share one player.
+            // Enable automatic PiP on this view controller
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+
+            // Also update the stored setting if this is a shared player
             if let controllerIdValue = controllerId {
-                SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
                 SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+                print("✅ Automatic inline PiP enabled for controller \(controllerIdValue)")
             } else {
-                bindAutomaticPipController()
+                print("✅ Automatic inline PiP enabled for non-shared player")
             }
 
             result(true)
@@ -1190,19 +1184,19 @@ extension VideoPlayerView {
                     SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: false)
                 }
             } else {
-                // Make this on-screen view primary, then arm the custom
-                // controller — the manager's bookkeeping can be stale after a
-                // disable→re-enable round trip.
+                // Set directly on this controller — the manager's primary-view
+                // bookkeeping can be stale after a disable→re-enable round trip.
+                if canStartPictureInPictureAutomatically {
+                    playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                }
                 if let controllerIdValue = controllerId {
-                    SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
                     SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-                } else {
-                    bindAutomaticPipController()
                 }
 
-                // Re-apply ~1s later: the player layer can still be settling
-                // (audio→video toggle pattern), so the first bind may find no
-                // layer and the background-after-re-enable would fail to PIP.
+                // Re-apply ~1s later: AVKit can ignore the immediate set while
+                // a deselected video media group is still being restored
+                // (audio→video toggle pattern), so the first
+                // background-after-re-enable silently fails to PIP.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     guard let self = self else { return }
                     let stillAllows: Bool
@@ -1212,11 +1206,11 @@ extension VideoPlayerView {
                         stillAllows = self.playerViewController.allowsPictureInPicturePlayback
                     }
                     guard stillAllows else { return }
+                    if self.canStartPictureInPictureAutomatically {
+                        self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                    }
                     if let controllerIdValue = self.controllerId {
-                        SharedPlayerManager.shared.setPrimaryView(self.viewId, for: controllerIdValue)
                         SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-                    } else {
-                        self.bindAutomaticPipController()
                     }
                 }
             }

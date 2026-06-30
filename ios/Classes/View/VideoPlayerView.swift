@@ -21,29 +21,7 @@ import QuartzCore
     var lastBitrateCheck: TimeInterval = 0
     let bitrateCheckInterval: TimeInterval = 5.0 // Check every 5 seconds
     var controllerId: Int?
-
-    /// Backing store for the PiP controller of a non-shared player (no controllerId).
-    private var localPipController: AVPictureInPictureController?
-
-    /// The single PiP controller for this player. For shared players it lives in
-    /// SharedPlayerManager (one per controllerId), so the inline and floating
-    /// views — and the manual and automatic PiP paths — all share one instance
-    /// and can't fight. Non-shared players keep a local instance.
-    var pipController: AVPictureInPictureController? {
-        get {
-            if let controllerIdValue = controllerId {
-                return SharedPlayerManager.shared.automaticPipController(for: controllerIdValue)
-            }
-            return localPipController
-        }
-        set {
-            if let controllerIdValue = controllerId {
-                SharedPlayerManager.shared.setAutomaticPipController(newValue, for: controllerIdValue)
-            } else {
-                localPipController = newValue
-            }
-        }
-    }
+    var pipController: AVPictureInPictureController?
 
     // Track if PiP is currently active (for both automatic and manual PiP)
     var isPipCurrentlyActive: Bool = false
@@ -343,9 +321,10 @@ import QuartzCore
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
-                        } else if !isDartFullscreenView {
+                        } else if !isDartFullscreenView,
+                                  !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
                             // A Dart-fullscreen (floating) view must not auto-claim primary;
-                            // the app points auto-PiP at it explicitly via setAutomaticPipView.
+                            // and don't steal auto-PiP from the view a collapse/expand chose.
                             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
                             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                             print("   → Set new view as primary and enabled automatic PiP (viewId: \(viewId))")
@@ -354,6 +333,10 @@ import QuartzCore
                         print("   ⚠️ Cannot enable automatic PiP - canStartPictureInPictureAutomatically is false")
                     }
                 }
+
+                // Re-apply any pending collapse/expand handoff for this controller
+                // (e.g. the floating view registering after the collapse signal).
+                SharedPlayerManager.shared.reapplyAutomaticPipContext(for: controllerIdValue, registeringIsFullscreen: isDartFullscreenView)
             }
         }
 
@@ -1189,12 +1172,16 @@ import QuartzCore
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
 
-        // Re-arm the single custom controller on the current on-screen (primary)
-        // view so backgrounding triggers PiP at decision time.
+        // Defer to an active collapse/expand handoff — at the decisive pre-background
+        // moment, don't re-arm this view if it isn't the on-screen one.
+        if let controllerIdValue = controllerId,
+           SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
+            return
+        }
+
+        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-        } else {
-            bindAutomaticPipController()
         }
     }
 

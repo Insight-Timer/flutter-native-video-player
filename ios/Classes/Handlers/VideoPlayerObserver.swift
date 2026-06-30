@@ -65,11 +65,6 @@ extension VideoPlayerView {
                     if !isSharedPlayer {
                         sendEvent("isInitialized")
                     }
-                    // The layer is attachable now — flush any auto-PiP bind that
-                    // was deferred because the player wasn't ready at arm time.
-                    if #available(iOS 14.2, *), let controllerIdValue = controllerId {
-                        SharedPlayerManager.shared.flushPendingAutomaticPipBind(for: controllerIdValue)
-                    }
                 case .failed:
                     sendEvent("error", data: ["message": item.error?.localizedDescription ?? "Unknown"])
                 default: break
@@ -138,7 +133,10 @@ extension VideoPlayerView {
                     // Enable automatic PiP when playback starts (even from native controls)
                     // This ensures auto PiP works whether the user taps Flutter controls or native controls
                     if #available(iOS 14.2, *) {
-                        if let controllerIdValue = controllerId {
+                        // Defer to an active collapse/expand handoff — don't let play()
+                        // steal auto-PiP back to this view if it's not the on-screen one.
+                        if let controllerIdValue = controllerId,
+                           !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
                             // Check if there's already a primary view for this controller
                             let hasPrimaryView = SharedPlayerManager.shared.getPrimaryViewId(for: controllerIdValue) != nil
 

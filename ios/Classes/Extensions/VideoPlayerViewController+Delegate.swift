@@ -4,6 +4,12 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
     public func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         print("🎬 PiP will start (AVPlayerViewController delegate - automatic or system triggered)")
 
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "pipWillStart", "view": isDartFullscreenView ? "floating" : "inline"
+            ], for: controllerIdValue)
+        }
+
         // Check if manual PiP was just triggered
         // We use this flag to distinguish between manual and automatic PiP starts
         let isManualStart = controllerId.flatMap { SharedPlayerManager.shared.isManualPiPActive($0) } ?? false
@@ -61,6 +67,11 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
 
     public func playerViewControllerDidStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         print("🎬 PiP did start (AVPlayerViewController delegate)")
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "pipDidStart", "view": isDartFullscreenView ? "floating" : "inline"
+            ], for: controllerIdValue)
+        }
     }
 
     public func playerViewControllerWillStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
@@ -209,6 +220,13 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
 
     public func playerViewController(_ playerViewController: AVPlayerViewController, failedToStartPictureInPictureWithError error: Error) {
         print("❌ PiP failed to start (AVPlayerViewController): \(error.localizedDescription)")
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "pipFailedToStart",
+                "view": isDartFullscreenView ? "floating" : "inline",
+                "error": error.localizedDescription
+            ], for: controllerIdValue)
+        }
     }
     
     // This delegate method is called when automatic PiP is about to start (iOS 14.2+)
@@ -455,9 +473,6 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
         // Don't check if playing - let the system handle it
         if #available(iOS 14.2, *) {
             if let controllerIdValue = controllerId {
-                // Honor a collapse/expand that arrived while PiP was active so
-                // PiP re-arms on the view that's now on screen.
-                SharedPlayerManager.shared.flushPendingAutomaticPipBind(for: controllerIdValue)
                 print("🎬 Checking if should re-enable automatic PiP:")
                 print("   - controllerId: \(controllerIdValue)")
                 print("   - view.canStartPictureInPictureAutomatically: \(canStartPictureInPictureAutomatically)")

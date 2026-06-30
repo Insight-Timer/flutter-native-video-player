@@ -32,15 +32,11 @@ class SharedPlayerManager: NSObject {
     /// This ensures we enable PiP on the correct view when multiple views exist (list + detail)
     private var primaryViewIdForController: [Int: Int64] = [:]
 
-    /// Pending auto-PiP bind (fullscreenContext) per controller when the target
-    /// view/layer wasn't ready yet — flushed when the player becomes ready.
-    private var pendingAutoPipBind: [Int: Bool] = [:]
-
-    /// The single dedicated PiP controller per controllerId, bound to the
-    /// on-screen view's layer. Replaces the per-AVPlayerViewController built-in
-    /// auto PiP (which can't fire from the right view when two controllers
-    /// share one player) and is reused by the manual PiP path.
-    private var pipControllers: [Int: AVPictureInPictureController] = [:]
+    /// Last fullscreenContext requested via setAutomaticPipView per controller
+    /// (false = expanded/inline on screen, true = collapsed/floating on screen).
+    /// Re-applied when the matching view registers so a collapse/expand signal
+    /// that arrived before the view existed still takes effect.
+    private var lastAutoPipContext: [Int: Bool] = [:]
 
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
@@ -350,12 +346,7 @@ class SharedPlayerManager: NSObject {
 
         // Clear primary view tracking
         primaryViewIdForController.removeValue(forKey: controllerId)
-        pendingAutoPipBind.removeValue(forKey: controllerId)
-
-        // Drop the dedicated PiP controller for this controller
-        if let pip = pipControllers.removeValue(forKey: controllerId) {
-            pip.delegate = nil
-        }
+        lastAutoPipContext.removeValue(forKey: controllerId)
 
         // Remove PiP settings
         pipSettings.removeValue(forKey: controllerId)
@@ -391,12 +382,10 @@ class SharedPlayerManager: NSObject {
         }
         playerViewControllers.removeAll()
 
-        for (_, pip) in pipControllers { pip.delegate = nil }
-        pipControllers.removeAll()
         players.removeAll()
         videoPlayerViews.removeAll()
         primaryViewIdForController.removeAll()
-        pendingAutoPipBind.removeAll()
+        lastAutoPipContext.removeAll()
         pipSettings.removeAll()
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
@@ -587,137 +576,205 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
-    /// The single dedicated PiP controller for a controller, if one exists.
-    func automaticPipController(for controllerId: Int) -> AVPictureInPictureController? {
-        return pipControllers[controllerId]
-    }
-
-    /// Stores (or clears) the single dedicated PiP controller for a controller.
-    func setAutomaticPipController(_ controller: AVPictureInPictureController?, for controllerId: Int) {
-        if let controller = controller {
-            pipControllers[controllerId] = controller
-        } else {
-            pipControllers.removeValue(forKey: controllerId)
-        }
-    }
-
-    /// Points auto-PiP at the inline (fullscreenContext=false) or Dart-fullscreen
-    /// (fullscreenContext=true) view for this controller — used as the floating
-    /// player collapses/expands so PiP follows the on-screen view. Records a
-    /// pending bind if the target view isn't ready, flushed on player-ready.
+    /// Keeps exactly ONE AVPlayerViewController bound to the shared player as the
+    /// floating player collapses/expands, so iOS built-in auto-PiP fires from the
+    /// on-screen view. Collapse (fullscreenContext=true) releases the inline
+    /// controller and arms the floating one; expand (false) does the reverse.
+    /// The shared AVPlayer is untouched, so playback/audio continue.
     @available(iOS 14.2, *)
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        lastAutoPipContext[controllerId] = fullscreenContext
 
-        // Don't disturb an active or manual PiP session — bind on its next stop.
-        if isManualPiPActive(controllerId) || isPipActiveForController(controllerId) {
-            pendingAutoPipBind[controllerId] = fullscreenContext
-            return
-        }
+        guard let sharedPlayer = players[controllerId] else { return }
 
-        // Find the on-screen target: inline (false) or Dart-fullscreen (true).
-        var target: VideoPlayerView?
+        // Target = the on-screen view: floating when collapsed, inline when expanded.
+        var targetView: VideoPlayerView?
+        var otherViews: [VideoPlayerView] = []
         for (_, wrapper) in videoPlayerViews {
-            if let view = wrapper.view, view.controllerId == controllerId,
-               view.isDartFullscreenView == fullscreenContext {
-                target = view
-                break
+            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
+            if view.isDartFullscreenView == fullscreenContext {
+                targetView = view
+            } else {
+                otherViews.append(view)
             }
         }
 
-        guard let targetView = target else {
-            // View not registered yet — bind when its player becomes ready.
-            pendingAutoPipBind[controllerId] = fullscreenContext
+        // Release every other AVPlayerViewController for this controller so only
+        // the target stays bound to the player (two bound controllers block auto-PiP).
+        for view in otherViews {
+            view.detachPlayerForPipHandoff()
+        }
+        // Release the kept-alive shared controller too, when the inline view was
+        // disposed but its VC persists (else it stays bound and blocks auto-PiP).
+        // Skip if it's the target's VC or already handled as a live other view.
+        if let sharedVC = playerViewControllers[controllerId],
+           sharedVC !== targetView?.playerViewController,
+           !otherViews.contains(where: { $0.playerViewController === sharedVC }) {
+            sharedVC.canStartPictureInPictureAutomaticallyFromInline = false
+            sharedVC.player = nil
+            sendControllerEvent("pipDiagnostic", data: [
+                "stage": "controllerReleased", "view": "sharedKeepAlive"
+            ], for: controllerId)
+        }
+
+        guard let target = targetView else {
+            // Target view not registered yet — re-applied when it registers.
+            sendControllerEvent("pipDiagnostic", data: [
+                "stage": "targetMissing", "fullscreenContext": fullscreenContext
+            ], for: controllerId)
             return
         }
 
-        pendingAutoPipBind[controllerId] = fullscreenContext
-        setPrimaryView(targetView.viewId, for: controllerId)
-        rebindAutomaticPip(for: controllerId, to: targetView)
+        // Bind + arm the single on-screen controller for built-in auto-PiP.
+        setPrimaryView(target.viewId, for: controllerId)
+        controllerWithAutomaticPiP = controllerId
+        target.attachPlayerAndArmPip(sharedPlayer)
     }
 
-    /// Records a pending auto-PiP bind to retry once the player is ready.
-    func setPendingAutomaticPipBind(for controllerId: Int, fullscreenContext: Bool) {
-        pendingAutoPipBind[controllerId] = fullscreenContext
+    /// True if a floating-player handoff has designated the OTHER view (opposite
+    /// fullscreen role) as the on-screen PiP target. Arming sites that fire on
+    /// play/registration use this so they don't steal auto-PiP back from the
+    /// view the collapse/expand signal chose.
+    func isAutomaticPipTargetElsewhere(thisViewIsFullscreen: Bool, for controllerId: Int) -> Bool {
+        guard let fullscreenContext = lastAutoPipContext[controllerId] else { return false }
+        return fullscreenContext != thisViewIsFullscreen
     }
 
-    /// Clears a pending auto-PiP bind (called once the controller is bound).
-    func clearPendingAutomaticPipBind(for controllerId: Int) {
-        pendingAutoPipBind.removeValue(forKey: controllerId)
-    }
-
-    /// Retries a pending auto-PiP bind — called when a view's player becomes ready.
+    /// Re-applies the last collapse/expand context when a view registers, but only
+    /// if that view is the intended on-screen target — so a signal that arrived
+    /// before the target existed takes effect, without a stale context detaching a
+    /// freshly created visible view.
     @available(iOS 14.2, *)
-    func flushPendingAutomaticPipBind(for controllerId: Int) {
-        guard let fullscreenContext = pendingAutoPipBind[controllerId] else { return }
+    func reapplyAutomaticPipContext(for controllerId: Int, registeringIsFullscreen: Bool) {
+        guard let fullscreenContext = lastAutoPipContext[controllerId],
+              fullscreenContext == registeringIsFullscreen else { return }
         setAutomaticPipView(for: controllerId, fullscreenContext: fullscreenContext)
     }
-
-    /// Picks the view to bind the single PiP controller to: the primary
-    /// (on-screen) view, else any view for this controller that allows it.
-    @available(iOS 14.2, *)
-    private func autoPipBindTarget(for controllerId: Int) -> VideoPlayerView? {
-        if let primaryViewId = primaryViewIdForController[controllerId],
-           let wrapper = videoPlayerViews["\(primaryViewId)"], let view = wrapper.view,
-           view.canStartPictureInPictureAutomatically {
-            return view
-        }
-        for (_, wrapper) in videoPlayerViews {
-            if let view = wrapper.view, view.controllerId == controllerId,
-               view.canStartPictureInPictureAutomatically {
-                primaryViewIdForController[controllerId] = view.viewId
-                return view
-            }
-        }
-        return nil
-    }
-
-    /// Tears down the single PiP controller for a controller and rebuilds it
-    /// bound to `view`'s on-screen layer (auto flag + delegate). Keeps the
-    /// built-in per-view auto PiP off on every view.
-    @available(iOS 14.2, *)
-    private func rebindAutomaticPip(for controllerId: Int, to view: VideoPlayerView) {
-        for (_, wrapper) in videoPlayerViews {
-            if let other = wrapper.view, other.controllerId == controllerId {
-                other.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-            }
-        }
-        tearDownAutomaticPip(for: controllerId)
-        view.bindAutomaticPipController()
-        controllerWithAutomaticPiP = controllerId
-    }
-
-    /// Tears down the single PiP controller for a controller, unless a PiP
-    /// session is currently active on it (never kill a live session).
-    @available(iOS 14.0, *)
-    func tearDownAutomaticPip(for controllerId: Int) {
-        guard let pip = pipControllers[controllerId] else { return }
-        if pip.isPictureInPictureActive { return }
-        pip.delegate = nil
-        pipControllers.removeValue(forKey: controllerId)
-    }
-
-    /// Arms (enabled) or tears down (disabled) the single PiP controller for a
-    /// controllerId. We keep AVPlayerViewController's built-in auto-PiP flag OFF
-    /// on every view and drive PiP through one controller bound to the on-screen
-    /// view, so two shared controllers can't fight over who starts PiP.
+    
+    /// Enable automatic PiP for a specific controller and disable for all others
+    /// This ensures only one player can enter automatic PiP at a time
+    /// IMPORTANT: Only enables on the MOST RECENT (primary) view for that controller
     @available(iOS 14.2, *)
     func setAutomaticPiPEnabled(for controllerId: Int, enabled: Bool) {
+        // Clean up nil/deallocated views first
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
-
-        // Keep built-in per-view auto PiP OFF on every view for this controller.
-        for (_, wrapper) in videoPlayerViews {
-            if let view = wrapper.view, view.controllerId == controllerId {
-                view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+        
+        print("📊 Current state: \(videoPlayerViews.count) active views registered")
+        for (key, wrapper) in videoPlayerViews {
+            if let view = wrapper.view {
+                print("   - ViewId \(key): Controller \(view.controllerId ?? -1), canStartAuto: \(view.canStartPictureInPictureAutomatically), current: \(view.playerViewController.canStartPictureInPictureAutomaticallyFromInline)")
             }
         }
-
+        
         if enabled {
-            if isManualPiPActive(controllerId) { return }
-            guard let target = autoPipBindTarget(for: controllerId) else { return }
-            rebindAutomaticPip(for: controllerId, to: target)
+            // Check if manual PiP is active for this controller
+            if isManualPiPActive(controllerId) {
+                print("⚠️ Cannot enable automatic PiP for controller \(controllerId) - manual PiP is active")
+                return
+            }
+
+            // Disable automatic PiP on all other controllers first
+            if let previousControllerId = controllerWithAutomaticPiP, previousControllerId != controllerId {
+                print("🎬 Disabling automatic PiP for controller \(previousControllerId)")
+                // Disable on ALL platform views for the previous controller
+                var disabledCount = 0
+                for (viewKey, wrapper) in videoPlayerViews {
+                    if let view = wrapper.view, view.controllerId == previousControllerId {
+                        let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                        view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                        let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                        print("   → ViewId \(viewKey): \(wasBefore) → \(isAfter)")
+                        disabledCount += 1
+                    }
+                }
+                print("   → Disabled on \(disabledCount) platform view(s) for controller \(previousControllerId)")
+            }
+            
+            // Find the PRIMARY (most recently played) platform view for this controller
+            print("🎬 Enabling automatic PiP for controller \(controllerId)")
+            
+            // First, disable ALL views for this controller
+            for (viewKey, wrapper) in videoPlayerViews {
+                if let view = wrapper.view, view.controllerId == controllerId {
+                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                }
+            }
+            
+            // Then enable ONLY the primary view (the one that most recently called play)
+            var enabledOnView = false
+            if let primaryViewId = primaryViewIdForController[controllerId] {
+                let key = "\(primaryViewId)"
+                if let wrapper = videoPlayerViews[key], let view = wrapper.view {
+                    print("   🔍 Checking primary view \(primaryViewId):")
+                    print("      - view.canStartPictureInPictureAutomatically: \(view.canStartPictureInPictureAutomatically)")
+                    print("      - playerViewController.allowsPictureInPicturePlayback: \(view.playerViewController.allowsPictureInPicturePlayback)")
+                    print("      - player rate: \(view.player?.rate ?? -1)")
+
+                    if view.canStartPictureInPictureAutomatically {
+                        let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                        view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                        let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                        print("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [PRIMARY]")
+                        print("   ✅ Enabled on PRIMARY platform view for controller \(controllerId)")
+                        enabledOnView = true
+                    } else {
+                        print("   ⚠️ Primary view doesn't allow automatic PiP")
+                    }
+                } else {
+                    print("   ⚠️ Primary view (ViewId \(primaryViewId)) not found or disposed")
+                }
+            } else {
+                print("   ⚠️ No primary view set for controller \(controllerId)")
+            }
+
+            // FALLBACK: If no primary view was found or it was disposed, pick ANY view for this controller
+            // This handles the case where the primary view was disposed but other views still exist
+            if !enabledOnView {
+                print("   🔄 Looking for any available view for controller \(controllerId)")
+                for (viewKey, wrapper) in videoPlayerViews {
+                    if let view = wrapper.view, view.controllerId == controllerId {
+                        if view.canStartPictureInPictureAutomatically {
+                            let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                            view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                            let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                            print("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [FALLBACK]")
+                            print("   ✅ Enabled on fallback platform view for controller \(controllerId)")
+                            // Set this as the new primary view
+                            primaryViewIdForController[controllerId] = view.viewId
+                            enabledOnView = true
+                            break
+                        }
+                    }
+                }
+
+                if !enabledOnView {
+                    print("   ⚠️ No available view found for controller \(controllerId) that allows automatic PiP")
+                }
+            }
+
+            // Only set controllerWithAutomaticPiP if we actually enabled a view
+            if enabledOnView {
+                controllerWithAutomaticPiP = controllerId
+                print("   ✅ Set controller \(controllerId) as the active automatic PiP controller")
+            } else {
+                print("   ⚠️ Not setting as active automatic PiP controller - no view was enabled")
+            }
         } else {
-            tearDownAutomaticPip(for: controllerId)
+            // Disable automatic PiP for ALL platform views of the specified controller
+            print("🎬 Disabling automatic PiP for controller \(controllerId)")
+            var disabledCount = 0
+            for (viewKey, wrapper) in videoPlayerViews {
+                if let view = wrapper.view, view.controllerId == controllerId {
+                    let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                    let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                    print("   → ViewId \(viewKey): \(wasBefore) → \(isAfter)")
+                    disabledCount += 1
+                }
+            }
+            print("   → Disabled on \(disabledCount) platform view(s) for controller \(controllerId)")
+            
             if controllerWithAutomaticPiP == controllerId {
                 controllerWithAutomaticPiP = nil
             }
