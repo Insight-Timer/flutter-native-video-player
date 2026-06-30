@@ -65,6 +65,11 @@ extension VideoPlayerView {
                     if !isSharedPlayer {
                         sendEvent("isInitialized")
                     }
+                    // The layer is attachable now — flush any auto-PiP bind that
+                    // was deferred because the player wasn't ready at arm time.
+                    if #available(iOS 14.2, *), let controllerIdValue = controllerId {
+                        SharedPlayerManager.shared.flushPendingAutomaticPipBind(for: controllerIdValue)
+                    }
                 case .failed:
                     sendEvent("error", data: ["message": item.error?.localizedDescription ?? "Unknown"])
                 default: break

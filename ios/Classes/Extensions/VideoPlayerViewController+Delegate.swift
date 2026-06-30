@@ -455,6 +455,9 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
         // Don't check if playing - let the system handle it
         if #available(iOS 14.2, *) {
             if let controllerIdValue = controllerId {
+                // Honor a collapse/expand that arrived while PiP was active so
+                // PiP re-arms on the view that's now on screen.
+                SharedPlayerManager.shared.flushPendingAutomaticPipBind(for: controllerIdValue)
                 print("🎬 Checking if should re-enable automatic PiP:")
                 print("   - controllerId: \(controllerIdValue)")
                 print("   - view.canStartPictureInPictureAutomatically: \(canStartPictureInPictureAutomatically)")

@@ -1167,9 +1167,12 @@ import QuartzCore
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
 
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+        // Re-arm the single custom controller on the current on-screen (primary)
+        // view so backgrounding triggers PiP at decision time.
         if let controllerIdValue = controllerId {
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+        } else {
+            bindAutomaticPipController()
         }
     }
 
