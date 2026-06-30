@@ -130,54 +130,10 @@ extension VideoPlayerView {
                         print("⚠️ [Observer] No media info available when playing - media controls may not show correctly")
                     }
 
-                    // Enable automatic PiP when playback starts (even from native controls)
-                    // This ensures auto PiP works whether the user taps Flutter controls or native controls
-                    if #available(iOS 14.2, *) {
-                        // Defer to an active collapse/expand handoff — don't let play()
-                        // steal auto-PiP back to this view if it's not the on-screen one.
-                        if let controllerIdValue = controllerId,
-                           !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
-                            // Check if there's already a primary view for this controller
-                            let hasPrimaryView = SharedPlayerManager.shared.getPrimaryViewId(for: controllerIdValue) != nil
-
-                            if !hasPrimaryView {
-                                // No primary view set yet - this means the user started playback via native controls
-                                // Set THIS view as primary
-                                SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
-                                print("📱 [Observer] No primary view set, making this view (ViewId \(viewId)) primary for controller \(controllerIdValue)")
-                            }
-
-                            // Check if THIS view is the primary view for this controller
-                            if SharedPlayerManager.shared.isPrimaryView(viewId, for: controllerIdValue) {
-                                // For shared players, check the shared settings instead of instance variable
-                                // This ensures the second view uses the same PiP settings as the first view
-                                let shouldEnableAutoPiP: Bool
-                                if let sharedSettings = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue) {
-                                    shouldEnableAutoPiP = sharedSettings.canStartPictureInPictureAutomatically
-                                    print("📱 [Observer] Using shared PiP settings for controller \(controllerIdValue): \(shouldEnableAutoPiP)")
-                                } else {
-                                    shouldEnableAutoPiP = canStartPictureInPictureAutomatically
-                                    print("📱 [Observer] Using instance PiP settings: \(shouldEnableAutoPiP)")
-                                }
-
-                                if shouldEnableAutoPiP {
-                                    print("📱 [Observer] Enabling automatic PiP for controller \(controllerIdValue) (triggered by native controls)")
-                                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-
-                                    // Ensure media info is set again after enabling PiP
-                                    // This guarantees media controls work correctly in PiP mode
-                                    if let mediaInfo = currentMediaInfo {
-                                        setupNowPlayingInfo(mediaInfo: mediaInfo)
-                                        print("✅ [Observer] Media info updated for PiP mode")
-                                    }
-                                } else {
-                                    print("📱 [Observer] Automatic PiP not enabled (canStartPictureInPictureAutomatically = false)")
-                                }
-                            } else {
-                                print("📱 [Observer] Skipping auto PiP enable - this view (ViewId \(viewId)) is not primary for controller \(controllerIdValue)")
-                            }
-                        }
-                    }
+                    // NOTE: Automatic PiP arming is NOT done here. setAutomaticPipView is
+                    // the single source of truth for which controller is armed; the play
+                    // event re-running setAutomaticPiPEnabled (disable-all/enable-primary)
+                    // raced the handoff and left the wrong controller armed by background.
 
                     sendEvent("play")
                 case .paused:

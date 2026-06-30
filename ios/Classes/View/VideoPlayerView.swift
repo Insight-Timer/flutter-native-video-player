@@ -322,9 +322,10 @@ import QuartzCore
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
                         } else if !isDartFullscreenView,
-                                  !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
-                            // A Dart-fullscreen (floating) view must not auto-claim primary;
-                            // and don't steal auto-PiP from the view a collapse/expand chose.
+                                  SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) == nil {
+                            // Legacy arming only when the app never used setAutomaticPipView.
+                            // Once a collapse/expand context exists, setAutomaticPipView is the
+                            // single source of truth (the reapply below targets the right view).
                             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
                             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                             print("   → Set new view as primary and enabled automatic PiP (viewId: \(viewId))")
@@ -1172,16 +1173,35 @@ import QuartzCore
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
 
-        // Defer to an active collapse/expand handoff — at the decisive pre-background
-        // moment, don't re-arm this view if it isn't the on-screen one.
-        if let controllerIdValue = controllerId,
-           SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
+        guard let controllerIdValue = controllerId else {
+            // Non-shared player: arm self.
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             return
         }
 
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-        if let controllerIdValue = controllerId {
+        if let context = SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) {
+            // Handoff active: setAutomaticPipView is the single source of truth.
+            // Re-assert the flag for THIS view based on whether it's the on-screen
+            // target — never arm a non-target controller. No setAutomaticPiPEnabled
+            // churn, which raced and could leave the flag wrong by this moment.
+            let isTarget = (context == isDartFullscreenView)
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = isTarget
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "willResignActive",
+                "view": isDartFullscreenView ? "floating" : "inline",
+                "armedController": context ? "floating" : "inline",
+                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline
+            ], for: controllerIdValue)
+        } else {
+            // No handoff context: legacy last-moment re-arm.
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
+                "stage": "willResignActive",
+                "view": isDartFullscreenView ? "floating" : "inline",
+                "armedController": "legacyPrimary",
+                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline
+            ], for: controllerIdValue)
         }
     }
 

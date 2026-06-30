@@ -632,6 +632,13 @@ class SharedPlayerManager: NSObject {
         target.attachPlayerAndArmPip(sharedPlayer)
     }
 
+    /// The last collapse/expand context for a controller, or nil if the app has
+    /// never called setAutomaticPipView. When non-nil, setAutomaticPipView owns
+    /// auto-PiP arming and legacy paths must not arm independently.
+    func automaticPipContext(for controllerId: Int) -> Bool? {
+        return lastAutoPipContext[controllerId]
+    }
+
     /// True if a floating-player handoff has designated the OTHER view (opposite
     /// fullscreen role) as the on-screen PiP target. Arming sites that fire on
     /// play/registration use this so they don't steal auto-PiP back from the
