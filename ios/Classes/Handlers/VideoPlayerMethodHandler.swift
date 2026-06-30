@@ -1133,11 +1133,8 @@ extension VideoPlayerView {
             SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
         }
 
-        // Keep auto-from-inline symmetric with the master flag, but NEVER call
-        // setAutomaticPiPEnabled here. That re-points "primary" at the inline view
-        // and fights setAutomaticPipView, the single source of truth for arming.
-        // We only toggle the shared controller's own flag (playerViewController is
-        // the shared controller; setAutomaticPipView keeps it in the on-screen slot).
+        // Only toggle the shared controller's own flag — never setAutomaticPiPEnabled,
+        // which re-points primary at the inline view and fights setAutomaticPipView.
         if #available(iOS 14.2, *) {
             if !allows {
                 playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
@@ -1146,9 +1143,8 @@ extension VideoPlayerView {
                     playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
                 }
 
-                // Re-apply ~1s later: AVKit can ignore the immediate set while a
-                // deselected video media group is still being restored (audio→video
-                // toggle), so the first background-after-re-enable silently fails.
+                // Re-apply ~1s later: AVKit can ignore the immediate set during a
+                // video media-group restore (audio→video toggle).
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                     guard let self = self else { return }
                     let stillAllows: Bool

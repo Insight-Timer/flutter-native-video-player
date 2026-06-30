@@ -130,10 +130,8 @@ extension VideoPlayerView {
                         print("⚠️ [Observer] No media info available when playing - media controls may not show correctly")
                     }
 
-                    // NOTE: Automatic PiP arming is NOT done here. setAutomaticPipView is
-                    // the single source of truth for which controller is armed; the play
-                    // event re-running setAutomaticPiPEnabled (disable-all/enable-primary)
-                    // raced the handoff and left the wrong controller armed by background.
+                    // No auto-PiP arming here — setAutomaticPipView is the single
+                    // source of truth; arming on play raced and disarmed the handoff.
 
                     sendEvent("play")
                 case .paused:

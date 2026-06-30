@@ -23,14 +23,12 @@ import QuartzCore
     var controllerId: Int?
     var pipController: AVPictureInPictureController?
 
-    /// Stable empty container returned from view(). The ONE shared
-    /// AVPlayerViewController's view is reparented into whichever on-screen
-    /// view's host container is current (inline ↔ floating) — the controller is
-    /// never recreated, so iOS keeps honoring auto-PiP from it in either slot.
+    /// Stable container returned from view(). The one shared controller's view is
+    /// reparented into whichever on-screen host is current (inline ↔ floating).
     let hostContainer = UIView()
 
-    /// Desired native-controls visibility for the inline slot, restored after the
-    /// floating slot hides them.
+    /// Native-controls visibility for the inline slot, restored after the floating
+    /// slot hides them.
     var showNativeControls: Bool = true
 
     // Track if PiP is currently active (for both automatic and manual PiP)
@@ -174,13 +172,10 @@ import QuartzCore
             isSharedPlayer = alreadyExisted
 
             if isDartFullscreen {
-                // Floating host: reuse the ONE shared controller — never create a
-                // second AVPlayerViewController (a recreated/extra controller won't
-                // auto-PiP). Its view is reparented into this view's host container
-                // on collapse via setAutomaticPipView. This view only lends its host.
+                // Floating host reuses the ONE shared controller (a second/extra
+                // controller won't auto-PiP); its view is reparented in on collapse.
                 playerViewController = sharedViewController
                 isDartFullscreenView = true
-                print("✅ Floating host reuses the shared AVPlayerViewController (controller ID: \(controllerIdValue))")
             } else {
                 if alreadyExisted {
                     // Second or later platform view for this controller (e.g. detail screen).
@@ -219,10 +214,8 @@ import QuartzCore
         showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
 
-        // The floating host must NOT reconfigure the shared controller — it isn't
-        // on screen until collapse, and setAutomaticPipView owns its slot config
-        // (delegate, controls, gravity). Configuring here would steal the inline
-        // view's delegate/zoom/controls.
+        // Floating host must not reconfigure the shared controller — setAutomaticPipView
+        // owns its slot config on collapse; doing it here steals the inline view's setup.
         if !isDartFullscreenView {
             playerViewController.showsPlaybackControls = showControls
             playerViewController.delegate = self
@@ -286,11 +279,9 @@ import QuartzCore
             }
 
             if #available(iOS 14.2, *), !isDartFullscreenView {
-                // Start with automatic PiP DISABLED on the shared controller; it's
-                // armed when playback/handoff arms it. Skip for the floating host so
-                // it never disarms the already-armed shared controller.
+                // Start disabled (armed on play/handoff). Skip for the floating host
+                // so it never disarms the already-armed shared controller.
                 playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                print("✅ PiP configured, automatic PiP will be enabled on play if allowed")
             } else if #unavailable(iOS 14.2) {
                 print("⚠️ Automatic PiP requires iOS 14.2+, current device doesn't support it")
             }
@@ -340,9 +331,8 @@ import QuartzCore
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
                         } else if !isDartFullscreenView,
                                   SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) == nil {
-                            // Legacy arming only when the app never used setAutomaticPipView.
-                            // Once a collapse/expand context exists, setAutomaticPipView is the
-                            // single source of truth (the reapply below targets the right view).
+                            // Legacy arming only when setAutomaticPipView was never used;
+                            // otherwise it owns arming (the reapply below targets the view).
                             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
                             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                             print("   → Set new view as primary and enabled automatic PiP (viewId: \(viewId))")
@@ -427,9 +417,8 @@ import QuartzCore
             setupAirPlayRouteDetector()
         }
 
-        // Mount the controller's view into this view's host container. The
-        // floating host starts empty — the shared controller's view is moved
-        // into it on collapse (setAutomaticPipView), never recreated.
+        // Mount the controller's view into the host. The floating host stays empty
+        // until collapse moves the shared controller's view in.
         if !isDartFullscreenView {
             mountControllerView(playerViewController, collapsed: false, setSlotConfig: false)
         }
@@ -439,14 +428,12 @@ import QuartzCore
         return hostContainer
     }
 
-    /// Reparents `controller`'s view into THIS view's stable host container and,
-    /// when requested, applies the slot config (delegate + controls + zoom). Used
-    /// both at init (inline mount) and by setAutomaticPipView on collapse/expand.
-    /// The controller is never recreated, so iOS keeps honoring its auto-PiP.
+    /// Reparents `controller`'s view into this view's host container; with
+    /// setSlotConfig it also applies the slot config (delegate/controls/zoom/arm).
     func mountControllerView(_ controller: AVPlayerViewController, collapsed: Bool, setSlotConfig: Bool) {
         let playerView: UIView = controller.view
         if playerView.superview !== hostContainer {
-            // Minimize black flash: do the reparent without implicit animation.
+            // Reparent without implicit animation to minimize black flash.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             playerView.removeFromSuperview()
@@ -457,20 +444,15 @@ import QuartzCore
             CATransaction.commit()
         }
 
-        // Slot config only on the handoff path (setAutomaticPipView), not at init —
-        // arming every controller at init would re-create the two-armed-controllers
-        // problem for the list↔detail dedicated-VC case (which has no handoff).
+        // Slot config only on the handoff path, not at init — arming every
+        // controller at init would re-arm two controllers in the list↔detail case.
         if setSlotConfig {
-            // This on-screen view owns the controller now (delegate for PiP/restore).
             controller.delegate = self
-            // Floating slot hides native controls; inline slot keeps its controls
-            // and zoom (videoGravity) untouched per the host's settings.
+            // Floating slot hides controls; inline slot keeps controls + zoom.
             controller.showsPlaybackControls = collapsed ? false : showNativeControls
             if !collapsed {
                 controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
             }
-            // Keep auto-PiP armed on the single original controller in whichever
-            // slot it sits — never recreated, so iOS honors it.
             if #available(iOS 14.2, *), controller.allowsPictureInPicturePlayback,
                canStartPictureInPictureAutomatically {
                 controller.canStartPictureInPictureAutomaticallyFromInline = true
@@ -1095,10 +1077,8 @@ import QuartzCore
         // we need to transfer automatic PiP to another view using the same controller
         if #available(iOS 14.2, *), let controllerIdValue = controllerId,
            SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
-            // Reparent model: one shared controller, never recreated. Don't toggle
-            // its auto flag or run setAutomaticPiPEnabled on disposal (both views
-            // share it) — just unregister. setAutomaticPipView keeps it in the
-            // correct on-screen host.
+            // Reparent model: one shared controller. Don't toggle its flag or run
+            // setAutomaticPiPEnabled on disposal (both views share it) — just unregister.
             SharedPlayerManager.shared.unregisterVideoPlayerView(viewId: viewId)
         } else if #available(iOS 14.2, *), let controllerIdValue = controllerId {
             let wasPrimaryView = SharedPlayerManager.shared.isPrimaryView(viewId, for: controllerIdValue)
@@ -1212,16 +1192,12 @@ import QuartzCore
             }
         }
 
-        // Floating host disposed: it shares the ONE controller (never a dedicated
-        // one now), so do NOT nil its player or recreate it. If the shared
-        // controller's view is still parented in this disposing floating host,
-        // detach it — it's retained by the controller and re-mounted into the
-        // inline host on the next setAutomaticPipView(expand).
+        // Floating host shares the ONE controller — never nil its player. Just
+        // detach its view if still parented here; it re-mounts on the next expand.
         if isDartFullscreenView {
             if playerViewController.viewIfLoaded?.superview === hostContainer {
                 playerViewController.viewIfLoaded?.removeFromSuperview()
             }
-            print("✅ Floating host disposed - shared controller/player kept alive")
         }
 
         // CRITICAL: For shared controllers, player and playerViewController are NOT disposed here
@@ -1255,10 +1231,8 @@ import QuartzCore
         }
 
         if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
-            // Reparent model: ONE original controller, moved into the on-screen
-            // host. Both inline and floating views reference the same controller,
-            // so just re-assert its auto flag (never disable — that would disarm
-            // the single controller). setAutomaticPipView placed it in the right host.
+            // One shared controller, already in the on-screen host — just re-assert
+            // its flag (never disable; both views share it).
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         } else {
             // No handoff context: legacy last-moment re-arm.

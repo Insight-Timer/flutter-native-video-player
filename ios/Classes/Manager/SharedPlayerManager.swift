@@ -32,10 +32,8 @@ class SharedPlayerManager: NSObject {
     /// This ensures we enable PiP on the correct view when multiple views exist (list + detail)
     private var primaryViewIdForController: [Int: Int64] = [:]
 
-    /// Last fullscreenContext requested via setAutomaticPipView per controller
-    /// (false = expanded/inline on screen, true = collapsed/floating on screen).
-    /// Re-applied when the matching view registers so a collapse/expand signal
-    /// that arrived before the view existed still takes effect.
+    /// Last fullscreenContext from setAutomaticPipView (false = inline, true =
+    /// floating on screen). Re-applied when the matching view registers later.
     private var lastAutoPipContext: [Int: Bool] = [:]
 
     /// Store references to ALL active VideoPlayerView instances
@@ -576,11 +574,9 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
-    /// Moves the ONE original AVPlayerViewController's view between the inline and
-    /// floating host containers as the floating player collapses/expands, so iOS
-    /// built-in auto-PiP keeps firing from it (it's never recreated). Collapse
-    /// (fullscreenContext=true) reparents into the floating host; expand (false)
-    /// back into the inline host. The shared AVPlayer/controller are untouched.
+    /// Reparents the ONE original controller's view into the on-screen host as the
+    /// floating player collapses (→ floating host) / expands (→ inline host), so
+    /// iOS keeps auto-PiP'ing it. The shared AVPlayer/controller are never recreated.
     @available(iOS 14.2, *)
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
@@ -612,26 +608,21 @@ class SharedPlayerManager: NSObject {
         controllerWithAutomaticPiP = controllerId
     }
 
-    /// The last collapse/expand context for a controller, or nil if the app has
-    /// never called setAutomaticPipView. When non-nil, setAutomaticPipView owns
-    /// auto-PiP arming and legacy paths must not arm independently.
+    /// Last collapse/expand context, or nil if setAutomaticPipView was never called.
+    /// When non-nil it owns auto-PiP arming; legacy paths must not arm independently.
     func automaticPipContext(for controllerId: Int) -> Bool? {
         return lastAutoPipContext[controllerId]
     }
 
-    /// True if a floating-player handoff has designated the OTHER view (opposite
-    /// fullscreen role) as the on-screen PiP target. Arming sites that fire on
-    /// play/registration use this so they don't steal auto-PiP back from the
-    /// view the collapse/expand signal chose.
+    /// True if the handoff has chosen the OTHER view as on-screen target, so
+    /// play/registration arming doesn't steal auto-PiP back from it.
     func isAutomaticPipTargetElsewhere(thisViewIsFullscreen: Bool, for controllerId: Int) -> Bool {
         guard let fullscreenContext = lastAutoPipContext[controllerId] else { return false }
         return fullscreenContext != thisViewIsFullscreen
     }
 
-    /// Re-applies the last collapse/expand context when a view registers, but only
-    /// if that view is the intended on-screen target — so a signal that arrived
-    /// before the target existed takes effect, without a stale context detaching a
-    /// freshly created visible view.
+    /// Re-applies the last context when a view registers, but only if that view is
+    /// the intended target (so a stale context can't detach a fresh visible view).
     @available(iOS 14.2, *)
     func reapplyAutomaticPipContext(for controllerId: Int, registeringIsFullscreen: Bool) {
         guard let fullscreenContext = lastAutoPipContext[controllerId],
