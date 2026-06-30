@@ -1186,11 +1186,16 @@ import QuartzCore
             // churn, which raced and could leave the flag wrong by this moment.
             let isTarget = (context == isDartFullscreenView)
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = isTarget
+            // Is the armed (target) controller's view actually attached to a window?
+            // viewIfLoaded avoids forcing a view load (no behavior change).
+            let armedView = SharedPlayerManager.shared.automaticPipTargetView(for: controllerIdValue)
+            let armedViewInWindow = (armedView?.playerViewController.viewIfLoaded?.window) != nil
             SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
                 "stage": "willResignActive",
                 "view": isDartFullscreenView ? "floating" : "inline",
                 "armedController": context ? "floating" : "inline",
-                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline,
+                "viewInWindow": armedViewInWindow
             ], for: controllerIdValue)
         } else {
             // No handoff context: legacy last-moment re-arm.
@@ -1200,7 +1205,8 @@ import QuartzCore
                 "stage": "willResignActive",
                 "view": isDartFullscreenView ? "floating" : "inline",
                 "armedController": "legacyPrimary",
-                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline
+                "autoFlag": playerViewController.canStartPictureInPictureAutomaticallyFromInline,
+                "viewInWindow": (playerViewController.viewIfLoaded?.window) != nil
             ], for: controllerIdValue)
         }
     }

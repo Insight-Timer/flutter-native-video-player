@@ -639,6 +639,20 @@ class SharedPlayerManager: NSObject {
         return lastAutoPipContext[controllerId]
     }
 
+    /// The live view currently designated as the on-screen auto-PiP target
+    /// (matching the last collapse/expand context), if any. Used for diagnostics.
+    func automaticPipTargetView(for controllerId: Int) -> VideoPlayerView? {
+        guard let context = lastAutoPipContext[controllerId] else { return nil }
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        for (_, wrapper) in videoPlayerViews {
+            if let view = wrapper.view, view.controllerId == controllerId,
+               view.isDartFullscreenView == context {
+                return view
+            }
+        }
+        return nil
+    }
+
     /// True if a floating-player handoff has designated the OTHER view (opposite
     /// fullscreen role) as the on-screen PiP target. Arming sites that fire on
     /// play/registration use this so they don't steal auto-PiP back from the
