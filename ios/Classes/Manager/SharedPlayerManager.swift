@@ -576,46 +576,27 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
-    /// Keeps exactly ONE AVPlayerViewController bound to the shared player as the
-    /// floating player collapses/expands, so iOS built-in auto-PiP fires from the
-    /// on-screen view. Collapse (fullscreenContext=true) releases the inline
-    /// controller and arms the floating one; expand (false) does the reverse.
-    /// The shared AVPlayer is untouched, so playback/audio continue.
+    /// Moves the ONE original AVPlayerViewController's view between the inline and
+    /// floating host containers as the floating player collapses/expands, so iOS
+    /// built-in auto-PiP keeps firing from it (it's never recreated). Collapse
+    /// (fullscreenContext=true) reparents into the floating host; expand (false)
+    /// back into the inline host. The shared AVPlayer/controller are untouched.
     @available(iOS 14.2, *)
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         lastAutoPipContext[controllerId] = fullscreenContext
 
-        guard let sharedPlayer = players[controllerId] else { return }
+        // The single original controller, created once and never recreated.
+        guard let originalVC = playerViewControllers[controllerId] else { return }
 
         // Target = the on-screen view: floating when collapsed, inline when expanded.
         var targetView: VideoPlayerView?
-        var otherViews: [VideoPlayerView] = []
         for (_, wrapper) in videoPlayerViews {
-            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
-            if view.isDartFullscreenView == fullscreenContext {
+            if let view = wrapper.view, view.controllerId == controllerId,
+               view.isDartFullscreenView == fullscreenContext {
                 targetView = view
-            } else {
-                otherViews.append(view)
+                break
             }
-        }
-
-        // Release every other AVPlayerViewController for this controller so only
-        // the target stays bound to the player (two bound controllers block auto-PiP).
-        for view in otherViews {
-            view.detachPlayerForPipHandoff()
-        }
-        // Release the kept-alive shared controller too, when the inline view was
-        // disposed but its VC persists (else it stays bound and blocks auto-PiP).
-        // Skip if it's the target's VC or already handled as a live other view.
-        if let sharedVC = playerViewControllers[controllerId],
-           sharedVC !== targetView?.playerViewController,
-           !otherViews.contains(where: { $0.playerViewController === sharedVC }) {
-            sharedVC.canStartPictureInPictureAutomaticallyFromInline = false
-            sharedVC.player = nil
-            sendControllerEvent("pipDiagnostic", data: [
-                "stage": "controllerReleased", "view": "sharedKeepAlive"
-            ], for: controllerId)
         }
 
         guard let target = targetView else {
@@ -626,10 +607,15 @@ class SharedPlayerManager: NSObject {
             return
         }
 
-        // Bind + arm the single on-screen controller for built-in auto-PiP.
+        // Reparent the one original controller's view into the target's host and
+        // apply the slot config (delegate/controls/zoom). Never released/recreated.
+        sendControllerEvent("pipDiagnostic", data: [
+            "stage": "reparent", "view": fullscreenContext ? "floating" : "inline"
+        ], for: controllerId)
+        target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
+
         setPrimaryView(target.viewId, for: controllerId)
         controllerWithAutomaticPiP = controllerId
-        target.attachPlayerAndArmPip(sharedPlayer)
     }
 
     /// The last collapse/expand context for a controller, or nil if the app has

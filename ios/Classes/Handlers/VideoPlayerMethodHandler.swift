@@ -982,49 +982,6 @@ extension VideoPlayerView {
 
     // MARK: - Floating-player PiP handoff (exactly one bound AVPlayerViewController)
 
-    /// Releases THIS view's AVPlayerViewController from the shared player so it no
-    /// longer competes for auto-PiP. The shared AVPlayer keeps playing; only this
-    /// view-controller is detached. No-op while this view's PiP is active.
-    @available(iOS 14.2, *)
-    func detachPlayerForPipHandoff() {
-        guard !isPipCurrentlyActive else { return }
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-        playerViewController.player = nil
-        if let controllerIdValue = controllerId {
-            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
-                "stage": "controllerReleased",
-                "view": isDartFullscreenView ? "floating" : "inline"
-            ], for: controllerIdValue)
-        }
-    }
-
-    /// Re-binds THIS view's AVPlayerViewController to the shared player and arms
-    /// built-in auto-PiP on it, making it the one on-screen controller iOS uses.
-    @available(iOS 14.2, *)
-    func attachPlayerAndArmPip(_ sharedPlayer: AVPlayer) {
-        if playerViewController.player !== sharedPlayer {
-            playerViewController.player = sharedPlayer
-        }
-        let allows = playerViewController.allowsPictureInPicturePlayback
-        let arm = allows && canStartPictureInPictureAutomatically
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline = arm
-
-        if let controllerIdValue = controllerId {
-            let viewLabel = isDartFullscreenView ? "floating" : "inline"
-            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
-                "stage": "controllerRestored", "view": viewLabel, "allowsPip": allows
-            ], for: controllerIdValue)
-            // hasLayer comes from findPlayerLayer() (hierarchy read, no controller
-            // created — so it can't poison the built-in PiP the way a standalone
-            // AVPictureInPictureController did). The real possible/failed signal
-            // arrives via the pipWillStart / pipFailedToStart diagnostics below.
-            SharedPlayerManager.shared.sendControllerEvent("pipDiagnostic", data: [
-                "stage": "autoPipArmed", "view": viewLabel, "autoFlag": arm,
-                "hasLayer": findPlayerLayer() != nil,
-                "isPipSupported": AVPictureInPictureController.isPictureInPictureSupported()
-            ], for: controllerIdValue)
-        }
-    }
 
     func handleExitPictureInPicture(result: @escaping FlutterResult) {
         if #available(iOS 14.0, *) {
