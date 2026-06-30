@@ -984,65 +984,53 @@ extension VideoPlayerView {
         return nil
     }
 
-    /// (Re)creates the single custom automatic-PiP controller bound to THIS
-    /// view's player layer, with the auto-start flag on. Replaces
-    /// AVPlayerViewController's built-in auto PiP so PiP targets the on-screen
-    /// (inline or floating) view even though two controllers share one player.
-    /// Retries while the layer is still being attached.
+    /// (Re)creates the single dedicated PiP controller bound to THIS view's
+    /// player layer, with the auto-start flag on. Replaces AVPlayerViewController's
+    /// built-in auto PiP so PiP targets the on-screen (inline or floating) view
+    /// even though two controllers share one player. Mirrors the manual-PiP
+    /// readiness pattern: retries until the layer is attached and PiP is possible.
     @available(iOS 14.2, *)
     func bindAutomaticPipController(attempt: Int = 0) {
         let maxAttempts = 5
-        guard let controllerIdValue = controllerId else {
-            bindAutomaticPipControllerNow()
-            return
-        }
         // Never disturb an active or manual PiP session.
-        guard !SharedPlayerManager.shared.isManualPiPActive(controllerIdValue),
-              !isPipCurrentlyActive else { return }
+        if let controllerIdValue = controllerId,
+           SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) { return }
+        guard !isPipCurrentlyActive else { return }
         guard playerViewController.allowsPictureInPicturePlayback,
               canStartPictureInPictureAutomatically else { return }
 
+        // Wait for the layer to be attached before creating the controller.
         guard let layer = findPlayerLayer() else {
             if attempt < maxAttempts {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                     self?.bindAutomaticPipController(attempt: attempt + 1)
                 }
-            } else {
+            } else if let controllerIdValue = controllerId {
                 // Layer not attached yet — let the player-ready hook retry later.
                 SharedPlayerManager.shared.setPendingAutomaticPipBind(for: controllerIdValue, fullscreenContext: isDartFullscreenView)
             }
             return
         }
+
         if pipController == nil {
             pipController = try? AVPictureInPictureController(playerLayer: layer)
             pipController?.delegate = self
         }
         pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-        SharedPlayerManager.shared.clearPendingAutomaticPipBind(for: controllerIdValue)
-        print("🎬 Bound custom automatic-PiP controller on view \(viewId) (fullscreen: \(isDartFullscreenView))")
-    }
 
-    /// Non-shared-player path: bind without controller-level bookkeeping.
-    @available(iOS 14.2, *)
-    private func bindAutomaticPipControllerNow() {
-        guard playerViewController.allowsPictureInPicturePlayback,
-              canStartPictureInPictureAutomatically, !isPipCurrentlyActive,
-              let layer = findPlayerLayer() else { return }
-        if pipController == nil {
-            pipController = try? AVPictureInPictureController(playerLayer: layer)
-            pipController?.delegate = self
+        // Confirm PiP is actually possible, retrying like the manual path; the
+        // controller stays armed across retries so it fires once iOS is ready.
+        if let pip = pipController, !pip.isPictureInPicturePossible, attempt < maxAttempts {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.bindAutomaticPipController(attempt: attempt + 1)
+            }
+            return
         }
-        pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-    }
 
-    /// Tears down the custom automatic-PiP controller on this view so only one
-    /// stays alive. No-op while a PiP session is active (manual or automatic).
-    @available(iOS 14.0, *)
-    func tearDownAutomaticPipController() {
-        guard !isPipCurrentlyActive else { return }
-        if let pip = pipController, pip.isPictureInPictureActive { return }
-        pipController?.delegate = nil
-        pipController = nil
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.clearPendingAutomaticPipBind(for: controllerIdValue)
+        }
+        print("🎬 Bound dedicated PiP controller on view \(viewId) (fullscreen: \(isDartFullscreenView))")
     }
 
     func handleExitPictureInPicture(result: @escaping FlutterResult) {

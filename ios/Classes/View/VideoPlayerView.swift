@@ -21,7 +21,29 @@ import QuartzCore
     var lastBitrateCheck: TimeInterval = 0
     let bitrateCheckInterval: TimeInterval = 5.0 // Check every 5 seconds
     var controllerId: Int?
-    var pipController: AVPictureInPictureController?
+
+    /// Backing store for the PiP controller of a non-shared player (no controllerId).
+    private var localPipController: AVPictureInPictureController?
+
+    /// The single PiP controller for this player. For shared players it lives in
+    /// SharedPlayerManager (one per controllerId), so the inline and floating
+    /// views — and the manual and automatic PiP paths — all share one instance
+    /// and can't fight. Non-shared players keep a local instance.
+    var pipController: AVPictureInPictureController? {
+        get {
+            if let controllerIdValue = controllerId {
+                return SharedPlayerManager.shared.automaticPipController(for: controllerIdValue)
+            }
+            return localPipController
+        }
+        set {
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setAutomaticPipController(newValue, for: controllerIdValue)
+            } else {
+                localPipController = newValue
+            }
+        }
+    }
 
     // Track if PiP is currently active (for both automatic and manual PiP)
     var isPipCurrentlyActive: Bool = false
