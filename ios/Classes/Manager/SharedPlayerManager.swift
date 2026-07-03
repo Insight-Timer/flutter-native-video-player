@@ -600,6 +600,16 @@ class SharedPlayerManager: NSObject {
             return
         }
 
+        // Disarm a previously armed DIFFERENT controller so an auto-advance to a
+        // new controller can't leave two controllers armed at background time.
+        if let previous = controllerWithAutomaticPiP, previous != controllerId {
+            for (_, wrapper) in videoPlayerViews {
+                if let view = wrapper.view, view.controllerId == previous {
+                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                }
+            }
+        }
+
         // Reparent the one original controller's view into the target's host and
         // apply the slot config (delegate/controls/zoom). Never released/recreated.
         target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)

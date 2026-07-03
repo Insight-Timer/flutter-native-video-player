@@ -158,6 +158,14 @@ import QuartzCore
         let argsDict = args as? [String: Any]
         let isDartFullscreen = argsDict?["isDartFullscreen"] as? Bool ?? false
 
+        // True when a floating collapse/expand handoff is already active for this
+        // controller. Then setAutomaticPipView owns the shared controller's slot,
+        // so this view (a recreated inline) must reuse it and not reconfigure/mount.
+        var hasHandoffContext = false
+        if #available(iOS 14.2, *), let cid = argsDict?["controllerId"] as? Int {
+            hasHandoffContext = SharedPlayerManager.shared.automaticPipContext(for: cid) != nil
+        }
+
         if let args = argsDict,
            let controllerIdValue = args["controllerId"] as? Int {
             controllerId = controllerIdValue
@@ -177,18 +185,19 @@ import QuartzCore
                 playerViewController = sharedViewController
                 isDartFullscreenView = true
             } else {
-                if alreadyExisted {
-                    // Second or later platform view for this controller (e.g. detail screen).
-                    // Use a dedicated AVPlayerViewController with the shared player so this
-                    // view has its own layer; the shared VC stays in SharedPlayerManager for PiP.
-                    // This avoids black screen when navigating list↔detail (one UIView per slot).
+                if alreadyExisted && !hasHandoffContext {
+                    // Second platform view for this controller with NO floating handoff
+                    // (list↔detail): a dedicated VC per slot avoids black screen.
                     let displayVC = AVPlayerViewController()
                     displayVC.player = sharedPlayer
                     playerViewController = displayVC
                     print("✅ Created dedicated AVPlayerViewController for shared controller (controller ID: \(controllerIdValue)) - avoids black screen when navigating list↔detail")
                 } else {
+                    // First view, or a recreated inline while a floating handoff is
+                    // active: reuse the ONE shared controller so no second controller
+                    // is bound to the player and blocks auto-PiP.
                     playerViewController = sharedViewController
-                    print("✅ Created new shared player AND view controller for controller ID: \(controllerIdValue)")
+                    print("✅ Reusing the shared AVPlayerViewController for controller ID: \(controllerIdValue)")
                 }
             }
         } else {
@@ -214,9 +223,10 @@ import QuartzCore
         showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
 
-        // Floating host must not reconfigure the shared controller — setAutomaticPipView
-        // owns its slot config on collapse; doing it here steals the inline view's setup.
-        if !isDartFullscreenView {
+        // Don't reconfigure the shared controller when setAutomaticPipView owns it:
+        // the floating host, or a recreated inline while a handoff is active. Doing
+        // so would steal the on-screen slot's delegate/zoom/controls.
+        if !isDartFullscreenView && !hasHandoffContext {
             playerViewController.showsPlaybackControls = showControls
             playerViewController.delegate = self
             applyVideoGravity(useAspectFill)
@@ -418,8 +428,10 @@ import QuartzCore
         }
 
         // Mount the controller's view into the host. The floating host stays empty
-        // until collapse moves the shared controller's view in.
-        if !isDartFullscreenView {
+        // until collapse moves the shared controller's view in. When a handoff is
+        // already active, skip — reapplyAutomaticPipContext (in registration) mounts
+        // the shared view into the correct current slot.
+        if !isDartFullscreenView && !hasHandoffContext {
             mountControllerView(playerViewController, collapsed: false, setSlotConfig: false)
         }
     }

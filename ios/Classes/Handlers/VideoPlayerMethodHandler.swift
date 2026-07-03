@@ -613,7 +613,9 @@ extension VideoPlayerView {
             return
         }
 
-        // Set controls visibility for embedded player
+        // Set controls visibility for embedded player, and keep the inline-slot
+        // cache in sync so an expand handoff doesn't revert this runtime toggle.
+        showNativeControls = show
         playerViewController.showsPlaybackControls = show
 
         // Also set for fullscreen player if it exists
