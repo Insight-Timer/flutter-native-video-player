@@ -574,16 +574,19 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
-    /// Reparents the ONE original controller's view into the on-screen host as the
-    /// floating player collapses (→ floating host) / expands (→ inline host), so
-    /// iOS keeps auto-PiP'ing it. The shared AVPlayer/controller are never recreated.
+    /// Makes the target view (floating when collapsed, inline when expanded) the
+    /// fully-active one: the shared controller's view is reparented into its host,
+    /// re-attached to the player so it renders live frames, and armed for auto-PiP.
+    /// Every other (dedicated) controller on the same AVPlayer is detached +
+    /// disarmed so it can't steal rendering (extra AVPlayerLayers go black) or PiP.
     @available(iOS 14.2, *)
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         lastAutoPipContext[controllerId] = fullscreenContext
 
-        // The single original controller, created once and never recreated.
+        // The single original controller — the only one iOS auto-PiPs.
         guard let originalVC = playerViewControllers[controllerId] else { return }
+        let sharedPlayer = players[controllerId]
 
         // Target = the on-screen view: floating when collapsed, inline when expanded.
         var targetView: VideoPlayerView?
@@ -600,8 +603,23 @@ class SharedPlayerManager: NSObject {
             return
         }
 
-        // Disarm a previously armed DIFFERENT controller so an auto-advance to a
-        // new controller can't leave two controllers armed at background time.
+        // Ensure only the shared controller's layer renders + is armed. Any
+        // dedicated controller on this player (list↔detail leftover, target or not)
+        // is detached and its view removed so extra AVPlayerLayers don't go black
+        // or hold PiP; other views sharing the one controller are just disarmed
+        // (the mount below re-arms the target).
+        for (_, wrapper) in videoPlayerViews {
+            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
+            let vc = view.playerViewController
+            if vc !== originalVC {
+                vc.canStartPictureInPictureAutomaticallyFromInline = false
+                vc.player = nil
+                vc.viewIfLoaded?.removeFromSuperview()
+            } else if view.viewId != target.viewId {
+                vc.canStartPictureInPictureAutomaticallyFromInline = false
+            }
+        }
+        // Also disarm a previously armed DIFFERENT controllerId (auto-advance).
         if let previous = controllerWithAutomaticPiP, previous != controllerId {
             for (_, wrapper) in videoPlayerViews {
                 if let view = wrapper.view, view.controllerId == previous {
@@ -610,8 +628,11 @@ class SharedPlayerManager: NSObject {
             }
         }
 
-        // Reparent the one original controller's view into the target's host and
-        // apply the slot config (delegate/controls/zoom). Never released/recreated.
+        // Re-attach the shared player to the shared controller so its layer becomes
+        // the active renderer, then reparent its view into the target host + arm.
+        if let sharedPlayer = sharedPlayer, originalVC.player !== sharedPlayer {
+            originalVC.player = sharedPlayer
+        }
         target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)

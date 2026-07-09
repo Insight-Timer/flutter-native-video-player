@@ -465,9 +465,15 @@ import QuartzCore
             if !collapsed {
                 controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
             }
-            if #available(iOS 14.2, *), controller.allowsPictureInPicturePlayback,
-               canStartPictureInPictureAutomatically {
-                controller.canStartPictureInPictureAutomaticallyFromInline = true
+            // Re-arm auto-PiP. Restore allowsPictureInPicturePlayback first — a prior
+            // PiP session can leave it false, which would silently skip arming and
+            // break auto-PiP on the next background.
+            if #available(iOS 14.2, *), canStartPictureInPictureAutomatically {
+                let allowsPip = controllerId.flatMap {
+                    SharedPlayerManager.shared.getPipSettings(for: $0)?.allowsPictureInPicture
+                } ?? true
+                controller.allowsPictureInPicturePlayback = allowsPip
+                controller.canStartPictureInPictureAutomaticallyFromInline = allowsPip
             }
         }
     }
