@@ -600,8 +600,13 @@ class SharedPlayerManager: NSObject {
 
         guard let target = targetView else {
             // Target view not registered yet — re-applied when it registers.
+            print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → NO TARGET VIEW registered yet")
             return
         }
+
+        // FLTR-20376 TEMP: trace the collapse/expand hand-off.
+        let liveViews = videoPlayerViews.values.compactMap { $0.view }.filter { $0.controllerId == controllerId }
+        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId) targetVCisOriginal=\(target.playerViewController === originalVC) liveViews=\(liveViews.map { "\($0.viewId)/\($0.isDartFullscreenView ? "F" : "I")" }) originalVC=\(ObjectIdentifier(originalVC))")
 
         // Ensure only the shared controller's layer renders + is armed. Any
         // dedicated controller on this player (list↔detail leftover, target or not)

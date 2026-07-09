@@ -444,7 +444,8 @@ import QuartzCore
     /// setSlotConfig it also applies the slot config (delegate/controls/zoom/arm).
     func mountControllerView(_ controller: AVPlayerViewController, collapsed: Bool, setSlotConfig: Bool) {
         let playerView: UIView = controller.view
-        if playerView.superview !== hostContainer {
+        let didReparent = playerView.superview !== hostContainer
+        if didReparent {
             // Reparent without implicit animation to minimize black flash.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -454,6 +455,18 @@ import QuartzCore
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             hostContainer.addSubview(playerView)
             CATransaction.commit()
+        }
+
+        // Move the controller into the host's on-screen view-controller hierarchy.
+        // AVKit auto-PiP can silently no-op when the VC's view is reparented as a
+        // bare subview without matching VC containment.
+        if setSlotConfig, let parentVC = nearestParentViewController(of: hostContainer) {
+            if controller.parent !== parentVC {
+                controller.willMove(toParent: nil)
+                controller.removeFromParent()
+                parentVC.addChild(controller)
+                controller.didMove(toParent: parentVC)
+            }
         }
 
         // Slot config only on the handoff path, not at init — arming every
@@ -468,14 +481,29 @@ import QuartzCore
             // Re-arm auto-PiP. Restore allowsPictureInPicturePlayback first — a prior
             // PiP session can leave it false, which would silently skip arming and
             // break auto-PiP on the next background.
+            var armFlag = false
             if #available(iOS 14.2, *), canStartPictureInPictureAutomatically {
                 let allowsPip = controllerId.flatMap {
                     SharedPlayerManager.shared.getPipSettings(for: $0)?.allowsPictureInPicture
                 } ?? true
                 controller.allowsPictureInPicturePlayback = allowsPip
                 controller.canStartPictureInPictureAutomaticallyFromInline = allowsPip
+                armFlag = allowsPip
             }
+            // FLTR-20376 TEMP: pinpoint why collapse→bg doesn't auto-PiP the floating view.
+            print("🐛 [PIP] mount view=\(isDartFullscreenView ? "floating" : "inline") viewId=\(viewId) reparented=\(didReparent) canStartAuto(instance)=\(canStartPictureInPictureAutomatically) allowsPip=\(controller.allowsPictureInPicturePlayback) armedFlag=\(armFlag) vcHasParent=\(controller.parent != nil) viewInWindow=\(controller.viewIfLoaded?.window != nil) vc=\(ObjectIdentifier(controller))")
         }
+    }
+
+    /// Walks the responder chain to find the view controller managing `view`,
+    /// so a reparented AVPlayerViewController can be re-hosted via VC containment.
+    private func nearestParentViewController(of view: UIView) -> UIViewController? {
+        var responder: UIResponder? = view.next
+        while let current = responder {
+            if let vc = current as? UIViewController { return vc }
+            responder = current.next
+        }
+        return nil
     }
 
     // MARK: - Native Layout Overlay
