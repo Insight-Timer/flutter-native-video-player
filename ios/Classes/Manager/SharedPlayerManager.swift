@@ -619,12 +619,11 @@ class SharedPlayerManager: NSObject {
                 vc.canStartPictureInPictureAutomaticallyFromInline = false
             }
         }
-        // Also disarm a previously armed DIFFERENT controllerId (auto-advance).
-        if let previous = controllerWithAutomaticPiP, previous != controllerId {
-            for (_, wrapper) in videoPlayerViews {
-                if let view = wrapper.view, view.controllerId == previous {
-                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                }
+        // Disarm every OTHER controller's views so only this on-screen controller
+        // stays armed, even when several are alive (adjacent playlist tracks).
+        for (_, wrapper) in videoPlayerViews {
+            if let view = wrapper.view, view.controllerId != controllerId {
+                view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             }
         }
 
@@ -677,6 +676,22 @@ class SharedPlayerManager: NSObject {
         }
         
         if enabled {
+            // Never arm a controller with no live views (e.g. a disposed playlist
+            // track still lingering in a caller's bookkeeping).
+            guard videoPlayerViews.contains(where: { $0.value.view?.controllerId == controllerId }) else {
+                print("⚠️ Skipping auto-PiP arm — no live views for controller \(controllerId)")
+                return
+            }
+
+            // When a floating handoff has chosen an on-screen controller, only that
+            // one may arm — stop a background/adjacent playlist controller (or a
+            // stale disposed one) from re-arming itself and contending.
+            if let active = controllerWithAutomaticPiP, active != controllerId,
+               lastAutoPipContext[active] != nil {
+                print("⚠️ Skipping auto-PiP arm for \(controllerId) — controller \(active) is the on-screen target")
+                return
+            }
+
             // Check if manual PiP is active for this controller
             if isManualPiPActive(controllerId) {
                 print("⚠️ Cannot enable automatic PiP for controller \(controllerId) - manual PiP is active")
