@@ -149,8 +149,10 @@ class NativeVideoPlayerController {
   final bool showNativeControls;
 
   /// Whether to render video in aspect-fill mode (zoom/crop to fill).
-  /// When false, uses aspect-fit.
-  final bool useAspectFill;
+  /// When false, uses aspect-fit. Mutable so [setUseAspectFill] updates it and
+  /// a platform view re-created later (e.g. after reparenting) picks up the
+  /// current mode via [creationParams] instead of reverting to the initial one.
+  bool useAspectFill;
 
   /// BuildContext getter for showing Dart fullscreen dialog
   /// Returns a mounted context from any registered platform view
@@ -2312,6 +2314,9 @@ class NativeVideoPlayerController {
 
   /// Sets native render mode to aspect-fill (true) or aspect-fit (false).
   Future<void> setUseAspectFill(bool enabled) async {
+    // Persist so a platform view created after this call (e.g. the surface is
+    // reparented between inline and full-screen) comes up in the current mode.
+    useAspectFill = enabled;
     await _methodChannel?.setUseAspectFill(enabled);
   }
 
