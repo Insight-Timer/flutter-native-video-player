@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.util.Log
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -21,6 +22,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.huddlecommunity.native_video_player.R
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerMethodHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler
@@ -156,7 +158,16 @@ class VideoPlayerView(
 
         // Create PlayerView and attach player
         val showNativeControls = args?.get("showNativeControls") as? Boolean ?: true
-        playerView = PlayerView(context).apply {
+        // The floating player (isDartFullscreen) needs a TextureView-backed
+        // PlayerView so a Flutter ClipRRect can round its corners on all devices;
+        // the full-screen view keeps the default SurfaceView.
+        val isDartFullscreen = args?.get("isDartFullscreen") as? Boolean ?: false
+        val basePlayerView = if (isDartFullscreen) {
+            LayoutInflater.from(context).inflate(R.layout.native_video_player_texture_view, null) as PlayerView
+        } else {
+            PlayerView(context)
+        }
+        playerView = basePlayerView.apply {
             this.player = this@VideoPlayerView.player
             useController = showNativeControls
             resizeMode = resolveResizeMode(useAspectFill)
