@@ -445,16 +445,22 @@ import QuartzCore
     func mountControllerView(_ controller: AVPlayerViewController, collapsed: Bool, setSlotConfig: Bool) {
         let playerView: UIView = controller.view
         let didReparent = playerView.superview !== hostContainer
+        let hadWindow = playerView.window != nil
         if didReparent {
-            // Reparent without implicit animation to minimize black flash.
+            // Move atomically — do NOT call removeFromSuperview first. An explicit
+            // remove drops the view out of the window (window→nil), which makes
+            // AVPlayerViewController tear down its internal PiP controller and never
+            // recreate it, permanently killing auto-PiP for the session. addSubview
+            // moves it in one step; when both hosts share the window the view's
+            // window never becomes nil, so AVKit keeps its PiP eligibility.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            playerView.removeFromSuperview()
             playerView.translatesAutoresizingMaskIntoConstraints = true
+            hostContainer.addSubview(playerView)
             playerView.frame = hostContainer.bounds
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            hostContainer.addSubview(playerView)
             CATransaction.commit()
+            print("🐛 [PIP] reparent(atomic) view=\(isDartFullscreenView ? "F" : "I") hadWindow=\(hadWindow) nowWindow=\(playerView.window != nil)")
         }
 
         // Slot config only on the handoff path, not at init — arming every
