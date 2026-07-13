@@ -574,19 +574,16 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
-    /// Makes the target view (floating when collapsed, inline when expanded) the
-    /// fully-active one: the shared controller's view is reparented into its host,
-    /// re-attached to the player so it renders live frames, and armed for auto-PiP.
-    /// Every other (dedicated) controller on the same AVPlayer is detached +
-    /// disarmed so it can't steal rendering (extra AVPlayerLayers go black) or PiP.
+    /// Reparents the one shared controller's view into the on-screen target host
+    /// (floating when collapsed, inline when expanded) and arms it — the c46460b
+    /// behaviour that produced a real OS PiP window. Also disarms every OTHER
+    /// controller so adjacent playlist tracks don't stay armed (Issue B).
     @available(iOS 14.2, *)
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         lastAutoPipContext[controllerId] = fullscreenContext
 
-        // The single original controller — the only one iOS auto-PiPs.
         guard let originalVC = playerViewControllers[controllerId] else { return }
-        let sharedPlayer = players[controllerId]
 
         // Target = the on-screen view: floating when collapsed, inline when expanded.
         var targetView: VideoPlayerView?
@@ -600,44 +597,19 @@ class SharedPlayerManager: NSObject {
 
         guard let target = targetView else {
             // Target view not registered yet — re-applied when it registers.
-            print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → NO TARGET VIEW registered yet")
+            print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → no target view yet")
             return
         }
 
-        // FLTR-20376 TEMP: trace the collapse/expand hand-off + VC topology.
-        let liveViews = videoPlayerViews.values.compactMap { $0.view }.filter { $0.controllerId == controllerId }
-        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId) views=\(liveViews.map { "\($0.viewId)/\($0.isDartFullscreenView ? "F" : "I")/\($0.playerViewController === originalVC ? "orig" : "DEDICATED")" }) originalVC=\(ObjectIdentifier(originalVC))")
-
-        // Ensure only the shared controller's layer renders + is armed. Any
-        // dedicated controller on this player (list↔detail leftover, target or not)
-        // is detached and its view removed so extra AVPlayerLayers don't go black
-        // or hold PiP; other views sharing the one controller are just disarmed
-        // (the mount below re-arms the target).
-        for (_, wrapper) in videoPlayerViews {
-            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
-            let vc = view.playerViewController
-            if vc !== originalVC {
-                vc.canStartPictureInPictureAutomaticallyFromInline = false
-                vc.player = nil
-                vc.viewIfLoaded?.removeFromSuperview()
-            } else if view.viewId != target.viewId {
-                vc.canStartPictureInPictureAutomaticallyFromInline = false
-            }
-        }
-        // Disarm every OTHER controller's views so only this on-screen controller
-        // stays armed, even when several are alive (adjacent playlist tracks).
+        // Playlist bookkeeping: disarm every OTHER controller's views so only the
+        // on-screen controller stays armed when several tracks are alive.
         for (_, wrapper) in videoPlayerViews {
             if let view = wrapper.view, view.controllerId != controllerId {
                 view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             }
         }
 
-        // Ensure the shared controller renders in the new host, then mark it the
-        // target. The actual auto-PiP arm happens at willResignActive (the only
-        // arm AVKit honors); setAutomaticPipView just chooses the on-screen view.
-        if let sharedPlayer = sharedPlayer, originalVC.player !== sharedPlayer {
-            originalVC.player = sharedPlayer
-        }
+        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId)/\(fullscreenContext ? "F" : "I")")
         target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)

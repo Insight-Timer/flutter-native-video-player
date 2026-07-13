@@ -445,22 +445,17 @@ import QuartzCore
     func mountControllerView(_ controller: AVPlayerViewController, collapsed: Bool, setSlotConfig: Bool) {
         let playerView: UIView = controller.view
         let didReparent = playerView.superview !== hostContainer
-        let hadWindow = playerView.window != nil
         if didReparent {
-            // Move atomically — do NOT call removeFromSuperview first. An explicit
-            // remove drops the view out of the window (window→nil), which makes
-            // AVPlayerViewController tear down its internal PiP controller and never
-            // recreate it, permanently killing auto-PiP for the session. addSubview
-            // moves it in one step; when both hosts share the window the view's
-            // window never becomes nil, so AVKit keeps its PiP eligibility.
+            // c46460b reparent (this produced a real OS PiP window). Do NOT nil the
+            // player or write allowsPictureInPicturePlayback around this.
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            playerView.removeFromSuperview()
             playerView.translatesAutoresizingMaskIntoConstraints = true
-            hostContainer.addSubview(playerView)
             playerView.frame = hostContainer.bounds
             playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            hostContainer.addSubview(playerView)
             CATransaction.commit()
-            print("🐛 [PIP] reparent(atomic) view=\(isDartFullscreenView ? "F" : "I") hadWindow=\(hadWindow) nowWindow=\(playerView.window != nil)")
         }
 
         // Slot config only on the handoff path, not at init — arming every
@@ -472,20 +467,14 @@ import QuartzCore
             if !collapsed {
                 controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
             }
-            // Re-arm auto-PiP. Restore allowsPictureInPicturePlayback first — a prior
-            // PiP session can leave it false, which would silently skip arming and
-            // break auto-PiP on the next background.
+            // c46460b arm: only READ allowsPictureInPicturePlayback (never write it).
             var armFlag = false
-            if #available(iOS 14.2, *), canStartPictureInPictureAutomatically {
-                let allowsPip = controllerId.flatMap {
-                    SharedPlayerManager.shared.getPipSettings(for: $0)?.allowsPictureInPicture
-                } ?? true
-                controller.allowsPictureInPicturePlayback = allowsPip
-                controller.canStartPictureInPictureAutomaticallyFromInline = allowsPip
-                armFlag = allowsPip
+            if #available(iOS 14.2, *), controller.allowsPictureInPicturePlayback,
+               canStartPictureInPictureAutomatically {
+                controller.canStartPictureInPictureAutomaticallyFromInline = true
+                armFlag = true
             }
-            // FLTR-20376 TEMP: pinpoint why collapse→bg doesn't auto-PiP the floating view.
-            print("🐛 [PIP] mount view=\(isDartFullscreenView ? "floating" : "inline") viewId=\(viewId) reparented=\(didReparent) canStartAuto(instance)=\(canStartPictureInPictureAutomatically) allowsPip=\(controller.allowsPictureInPicturePlayback) armedFlag=\(armFlag) viewInWindow=\(controller.viewIfLoaded?.window != nil) hostBounds=\(hostContainer.bounds) vc=\(ObjectIdentifier(controller))")
+            print("🐛 [PIP] mount view=\(isDartFullscreenView ? "floating" : "inline") viewId=\(viewId) reparented=\(didReparent) armed=\(armFlag) viewInWindow=\(controller.viewIfLoaded?.window != nil) vc=\(ObjectIdentifier(controller))")
         }
     }
 
@@ -1255,19 +1244,20 @@ import QuartzCore
         guard canStartPictureInPictureAutomatically else { return }
 
         guard let controllerIdValue = controllerId else {
-            // Non-shared player: refresh the flag (off→on) so AVKit re-evaluates.
-            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+            // Non-shared player: arm self.
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             return
         }
 
-        // Re-arm the on-screen target (the last setAutomaticPipView target = the
-        // primary view) right before backgrounding. This is the ONLY arm AVKit
-        // honors, and it must be a real off→on refresh — setAutomaticPipView's
-        // collapse-time arm is already `true`, so simply re-setting `true` here is
-        // a no-op AVKit ignores. setAutomaticPiPEnabled disables all views then
-        // re-enables the primary, giving the off→on transition AVKit acts on.
-        SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+        // c46460b behaviour: with a collapse/expand handoff active, just re-assert
+        // this view's flag (the shared controller is already the on-screen target).
+        // Without a handoff, fall back to the legacy primary-view re-arm.
+        if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+        } else {
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+            SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
+        }
     }
 
     /// Called when app enters background (including screen lock)
