@@ -42,18 +42,6 @@ class SharedPlayerManager: NSObject {
     /// would leave the on-screen slot with no active player and never PiP.
     private var playerOwningViewId: [Int: Int64] = [:]
 
-    /// The last collapse/expand context across ANY controller. Carries the collapsed
-    /// state across a playlist track auto-advance, whose new controller's own
-    /// setAutomaticPipView(…, true) call is lost (fired before its native views
-    /// register), so the new floating preview can inherit the collapsed presentation.
-    private var lastGlobalAutoPipContext: Bool?
-
-    /// Bumped whenever a new player is created. Used to reset the global collapse
-    /// context on a real session end (player set empties and STAYS empty) without
-    /// resetting during a playlist auto-advance (which creates the next controller
-    /// in the same runloop, bumping this and cancelling the pending reset).
-    private var playerCreationGeneration = 0
-
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
     /// We need weak references to avoid retain cycles
@@ -134,7 +122,6 @@ class SharedPlayerManager: NSObject {
         }
 
         // Create new player
-        playerCreationGeneration += 1  // cancels any pending session-end reset
         let newPlayer = AVPlayer()
         configurePlayerForBackgroundPlayback(newPlayer)
         players[controllerId] = newPlayer
@@ -388,25 +375,6 @@ class SharedPlayerManager: NSObject {
         loopingByController.removeValue(forKey: controllerId)
         completionClaimed.removeValue(forKey: controllerId)
 
-        // Session end: if the player set is now empty, reset the global collapse
-        // context so a fresh (expanded) start doesn't inherit a stale collapsed
-        // one. Deferred + generation-gated so a playlist auto-advance — which
-        // creates the next controller in the same runloop (bumping the generation)
-        // — cancels this and keeps continuity.
-        if players.isEmpty {
-            let gen = playerCreationGeneration
-            // Small delay so a near-instant auto-advance (which bumps the
-            // generation when its controller is created) reliably cancels this,
-            // while a genuine reopen (seconds later) still resets.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self = self else { return }
-                if self.players.isEmpty && self.playerCreationGeneration == gen {
-                    self.lastGlobalAutoPipContext = nil
-                    print("🐛 [PIP] session ended (players empty) — reset global collapse context")
-                }
-            }
-        }
-
         print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
 
@@ -424,7 +392,6 @@ class SharedPlayerManager: NSObject {
         primaryViewIdForController.removeAll()
         lastAutoPipContext.removeAll()
         playerOwningViewId.removeAll()
-        lastGlobalAutoPipContext = nil
         pipSettings.removeAll()
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
@@ -623,7 +590,6 @@ class SharedPlayerManager: NSObject {
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         lastAutoPipContext[controllerId] = fullscreenContext
-        lastGlobalAutoPipContext = fullscreenContext
 
         guard let originalVC = playerViewControllers[controllerId] else { return }
 
@@ -672,38 +638,24 @@ class SharedPlayerManager: NSObject {
         target.mountControllerView(pipVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)
+
+        // Arm the controller when it isn't already the active auto-PiP one — e.g. a
+        // playlist track just auto-advanced, so the new controller gets "Set primary
+        // view" but never the canStartAuto false→true / active-controller arm. Mark
+        // it active first so setAutomaticPiPEnabled's own guard doesn't skip it, then
+        // run the full arm. Skipped on a normal collapse (already active) — the mount
+        // above handles that — so there's no re-arm churn.
+        let wasAlreadyActive = (controllerWithAutomaticPiP == controllerId)
         controllerWithAutomaticPiP = controllerId
+        if !wasAlreadyActive {
+            setAutomaticPiPEnabled(for: controllerId, enabled: true)
+        }
     }
 
     /// Records the viewId whose VC owns/renders the live player (the view that
     /// played). Used by setAutomaticPipView to arm the correct VC.
     func setPlayerOwningView(_ viewId: Int64, for controllerId: Int) {
         playerOwningViewId[controllerId] = viewId
-        if #available(iOS 14.2, *) {
-            inheritCollapsedContextIfNeeded(for: controllerId)
-        }
-    }
-
-    /// When the app is collapsed globally and a newly-current track's controller
-    /// becomes the player-owner with a floating view registered, apply the
-    /// collapsed presentation automatically (once). The new controller's own
-    /// setAutomaticPipView(…, true) is lost because it fires before its native
-    /// views register, so the floating preview would otherwise stay black.
-    @available(iOS 14.2, *)
-    func inheritCollapsedContextIfNeeded(for controllerId: Int) {
-        guard lastGlobalAutoPipContext == true else { return }
-        // Skip if this controller already has its own context (avoid re-arming a
-        // controller that was set up normally — that destabilizes PiP).
-        guard lastAutoPipContext[controllerId] == nil else { return }
-        // Must be the now-playing track and have a floating view registered.
-        guard playerOwningViewId[controllerId] != nil else { return }
-        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
-        let hasFloating = videoPlayerViews.values.contains {
-            $0.view?.controllerId == controllerId && $0.view?.isDartFullscreenView == true
-        }
-        guard hasFloating else { return }
-        print("🐛 [PIP] inheriting collapsed context for new controller \(controllerId)")
-        setAutomaticPipView(for: controllerId, fullscreenContext: true)
     }
 
     /// Last collapse/expand context, or nil if setAutomaticPipView was never called.
