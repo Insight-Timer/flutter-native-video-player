@@ -338,6 +338,13 @@ extension VideoPlayerView {
             print("   → currentMediaInfo was nil and SharedPlayerManager has no cached info for controller \(controllerId ?? -1)")
         }
 
+        // Record that THIS view's controller owns/renders the live player — the
+        // collapse/expand handoff arms this view's VC (not a fixed original VC that
+        // may render nothing in a playlist, where the inline dedicated VC plays).
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setPlayerOwningView(viewId, for: controllerIdValue)
+        }
+
         // Mark this view as the primary (active) view for this controller, unless
         // a collapse/expand handoff has designated the other view as on-screen.
         if let controllerIdValue = controllerId,

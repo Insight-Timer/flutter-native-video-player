@@ -36,6 +36,12 @@ class SharedPlayerManager: NSObject {
     /// floating on screen). Re-applied when the matching view registers later.
     private var lastAutoPipContext: [Int: Bool] = [:]
 
+    /// The viewId whose VC owns/renders the live AVPlayer (the view that played).
+    /// setAutomaticPipView arms/reparents THIS view's VC — in a playlist the inline
+    /// dedicated VC plays, not the floating "original" VC, so arming the original
+    /// would leave the on-screen slot with no active player and never PiP.
+    private var playerOwningViewId: [Int: Int64] = [:]
+
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
     /// We need weak references to avoid retain cycles
@@ -345,6 +351,7 @@ class SharedPlayerManager: NSObject {
         // Clear primary view tracking
         primaryViewIdForController.removeValue(forKey: controllerId)
         lastAutoPipContext.removeValue(forKey: controllerId)
+        playerOwningViewId.removeValue(forKey: controllerId)
 
         // Remove PiP settings
         pipSettings.removeValue(forKey: controllerId)
@@ -384,6 +391,7 @@ class SharedPlayerManager: NSObject {
         videoPlayerViews.removeAll()
         primaryViewIdForController.removeAll()
         lastAutoPipContext.removeAll()
+        playerOwningViewId.removeAll()
         pipSettings.removeAll()
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
@@ -585,6 +593,16 @@ class SharedPlayerManager: NSObject {
 
         guard let originalVC = playerViewControllers[controllerId] else { return }
 
+        // The VC that owns/renders the live player = the playing view's VC. Single
+        // video: that IS the original VC (target reuses it → identical behaviour).
+        // Playlist: the inline dedicated VC plays, so arm THAT, not the floating
+        // original VC (which owns no active player → floating stays black, no PiP).
+        var pipVC = originalVC
+        if let ownerId = playerOwningViewId[controllerId],
+           let ownerView = videoPlayerViews["\(ownerId)"]?.view {
+            pipVC = ownerView.playerViewController
+        }
+
         // Target = the on-screen view: floating when collapsed, inline when expanded.
         var targetView: VideoPlayerView?
         for (_, wrapper) in videoPlayerViews {
@@ -609,11 +627,24 @@ class SharedPlayerManager: NSObject {
             }
         }
 
-        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId)/\(fullscreenContext ? "F" : "I")")
-        target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
+        // Ensure the VC being armed owns the live player. Gated so it's a no-op for
+        // single video (VC already owns it → unchanged). NEVER nil the player —
+        // that teardown is what killed single-video PiP; only attach-if-different.
+        if let sharedPlayer = players[controllerId], pipVC.player !== sharedPlayer {
+            pipVC.player = sharedPlayer
+        }
+
+        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId)/\(fullscreenContext ? "F" : "I") pipVCisOriginal=\(pipVC === originalVC) pipVCownsPlayer=\(pipVC.player === players[controllerId])")
+        target.mountControllerView(pipVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)
         controllerWithAutomaticPiP = controllerId
+    }
+
+    /// Records the viewId whose VC owns/renders the live player (the view that
+    /// played). Used by setAutomaticPipView to arm the correct VC.
+    func setPlayerOwningView(_ viewId: Int64, for controllerId: Int) {
+        playerOwningViewId[controllerId] = viewId
     }
 
     /// Last collapse/expand context, or nil if setAutomaticPipView was never called.
