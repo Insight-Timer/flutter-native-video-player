@@ -48,6 +48,12 @@ class SharedPlayerManager: NSObject {
     /// register), so the new floating preview can inherit the collapsed presentation.
     private var lastGlobalAutoPipContext: Bool?
 
+    /// Bumped whenever a new player is created. Used to reset the global collapse
+    /// context on a real session end (player set empties and STAYS empty) without
+    /// resetting during a playlist auto-advance (which creates the next controller
+    /// in the same runloop, bumping this and cancelling the pending reset).
+    private var playerCreationGeneration = 0
+
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
     /// We need weak references to avoid retain cycles
@@ -128,6 +134,7 @@ class SharedPlayerManager: NSObject {
         }
 
         // Create new player
+        playerCreationGeneration += 1  // cancels any pending session-end reset
         let newPlayer = AVPlayer()
         configurePlayerForBackgroundPlayback(newPlayer)
         players[controllerId] = newPlayer
@@ -380,6 +387,25 @@ class SharedPlayerManager: NSObject {
         // Clear looping and completion-claim state
         loopingByController.removeValue(forKey: controllerId)
         completionClaimed.removeValue(forKey: controllerId)
+
+        // Session end: if the player set is now empty, reset the global collapse
+        // context so a fresh (expanded) start doesn't inherit a stale collapsed
+        // one. Deferred + generation-gated so a playlist auto-advance — which
+        // creates the next controller in the same runloop (bumping the generation)
+        // — cancels this and keeps continuity.
+        if players.isEmpty {
+            let gen = playerCreationGeneration
+            // Small delay so a near-instant auto-advance (which bumps the
+            // generation when its controller is created) reliably cancels this,
+            // while a genuine reopen (seconds later) still resets.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self = self else { return }
+                if self.players.isEmpty && self.playerCreationGeneration == gen {
+                    self.lastGlobalAutoPipContext = nil
+                    print("🐛 [PIP] session ended (players empty) — reset global collapse context")
+                }
+            }
+        }
 
         print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
