@@ -42,6 +42,12 @@ class SharedPlayerManager: NSObject {
     /// would leave the on-screen slot with no active player and never PiP.
     private var playerOwningViewId: [Int: Int64] = [:]
 
+    /// The last collapse/expand context across ANY controller. Carries the collapsed
+    /// state across a playlist track auto-advance, whose new controller's own
+    /// setAutomaticPipView(…, true) call is lost (fired before its native views
+    /// register), so the new floating preview can inherit the collapsed presentation.
+    private var lastGlobalAutoPipContext: Bool?
+
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
     /// We need weak references to avoid retain cycles
@@ -392,6 +398,7 @@ class SharedPlayerManager: NSObject {
         primaryViewIdForController.removeAll()
         lastAutoPipContext.removeAll()
         playerOwningViewId.removeAll()
+        lastGlobalAutoPipContext = nil
         pipSettings.removeAll()
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
@@ -590,6 +597,7 @@ class SharedPlayerManager: NSObject {
     func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         lastAutoPipContext[controllerId] = fullscreenContext
+        lastGlobalAutoPipContext = fullscreenContext
 
         guard let originalVC = playerViewControllers[controllerId] else { return }
 
@@ -645,6 +653,31 @@ class SharedPlayerManager: NSObject {
     /// played). Used by setAutomaticPipView to arm the correct VC.
     func setPlayerOwningView(_ viewId: Int64, for controllerId: Int) {
         playerOwningViewId[controllerId] = viewId
+        if #available(iOS 14.2, *) {
+            inheritCollapsedContextIfNeeded(for: controllerId)
+        }
+    }
+
+    /// When the app is collapsed globally and a newly-current track's controller
+    /// becomes the player-owner with a floating view registered, apply the
+    /// collapsed presentation automatically (once). The new controller's own
+    /// setAutomaticPipView(…, true) is lost because it fires before its native
+    /// views register, so the floating preview would otherwise stay black.
+    @available(iOS 14.2, *)
+    func inheritCollapsedContextIfNeeded(for controllerId: Int) {
+        guard lastGlobalAutoPipContext == true else { return }
+        // Skip if this controller already has its own context (avoid re-arming a
+        // controller that was set up normally — that destabilizes PiP).
+        guard lastAutoPipContext[controllerId] == nil else { return }
+        // Must be the now-playing track and have a floating view registered.
+        guard playerOwningViewId[controllerId] != nil else { return }
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        let hasFloating = videoPlayerViews.values.contains {
+            $0.view?.controllerId == controllerId && $0.view?.isDartFullscreenView == true
+        }
+        guard hasFloating else { return }
+        print("🐛 [PIP] inheriting collapsed context for new controller \(controllerId)")
+        setAutomaticPipView(for: controllerId, fullscreenContext: true)
     }
 
     /// Last collapse/expand context, or nil if setAutomaticPipView was never called.

@@ -355,6 +355,11 @@ import QuartzCore
                 // Re-apply any pending collapse/expand handoff for this controller
                 // (e.g. the floating view registering after the collapse signal).
                 SharedPlayerManager.shared.reapplyAutomaticPipContext(for: controllerIdValue, registeringIsFullscreen: isDartFullscreenView)
+
+                // Track auto-advance while collapsed: a new track's floating view
+                // inherits the collapsed presentation (its own setAutomaticPipView
+                // call was lost before this view registered).
+                SharedPlayerManager.shared.inheritCollapsedContextIfNeeded(for: controllerIdValue)
             }
         }
 
