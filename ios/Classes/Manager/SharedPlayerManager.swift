@@ -632,23 +632,13 @@ class SharedPlayerManager: NSObject {
             }
         }
 
-        target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
-
-        // Nudge: force the shared controller's layer to (re)become the active
-        // renderer for the player in its new host, so AVKit re-evaluates auto-PiP
-        // eligibility for the moved-to slot (a plain reparent can leave the layer
-        // ineligible even when armed + on-screen). player keeps playing throughout.
-        if let sharedPlayer = sharedPlayer {
-            originalVC.player = nil
+        // Ensure the shared controller renders in the new host, then mark it the
+        // target. The actual auto-PiP arm happens at willResignActive (the only
+        // arm AVKit honors); setAutomaticPipView just chooses the on-screen view.
+        if let sharedPlayer = sharedPlayer, originalVC.player !== sharedPlayer {
             originalVC.player = sharedPlayer
-            originalVC.viewIfLoaded?.setNeedsLayout()
-            originalVC.viewIfLoaded?.layoutIfNeeded()
-            // Re-assert arming: changing .player can reset the auto flag.
-            if originalVC.allowsPictureInPicturePlayback {
-                originalVC.canStartPictureInPictureAutomaticallyFromInline = true
-            }
-            print("🐛 [PIP] nudge: re-attached player to originalVC in \(fullscreenContext ? "floating" : "inline") host, frame=\(originalVC.viewIfLoaded?.frame ?? .zero) canStart=\(originalVC.canStartPictureInPictureAutomaticallyFromInline)")
         }
+        target.mountControllerView(originalVC, collapsed: fullscreenContext, setSlotConfig: true)
 
         setPrimaryView(target.viewId, for: controllerId)
         controllerWithAutomaticPiP = controllerId

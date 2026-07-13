@@ -1249,20 +1249,19 @@ import QuartzCore
         guard canStartPictureInPictureAutomatically else { return }
 
         guard let controllerIdValue = controllerId else {
-            // Non-shared player: arm self.
+            // Non-shared player: refresh the flag (off→on) so AVKit re-evaluates.
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             return
         }
 
-        if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
-            // One shared controller, already in the on-screen host — just re-assert
-            // its flag (never disable; both views share it).
-            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-        } else {
-            // No handoff context: legacy last-moment re-arm.
-            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-            SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-        }
+        // Re-arm the on-screen target (the last setAutomaticPipView target = the
+        // primary view) right before backgrounding. This is the ONLY arm AVKit
+        // honors, and it must be a real off→on refresh — setAutomaticPipView's
+        // collapse-time arm is already `true`, so simply re-setting `true` here is
+        // a no-op AVKit ignores. setAutomaticPiPEnabled disables all views then
+        // re-enables the primary, giving the off→on transition AVKit acts on.
+        SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
     }
 
     /// Called when app enters background (including screen lock)
