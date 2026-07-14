@@ -753,8 +753,7 @@ extension VideoPlayerView {
         drmHandler?.cleanup()
         drmHandler = nil
 
-        // Whole-controller teardown: clear Now Playing outright instead of
-        // transferring ownership to a sibling view that dies with the controller
+        // Clear Now Playing outright — never transfer to a sibling dying with the controller
         clearNowPlayingOnControllerDispose()
 
         // Remove from shared manager if this is a shared player

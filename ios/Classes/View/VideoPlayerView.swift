@@ -792,9 +792,8 @@ import QuartzCore
         result(nil)
     }
 
-    /// View-level teardown (deinit): cleans up remote command ownership,
-    /// attempting to transfer to another live view of the same controller.
-    /// Whole-controller teardown uses clearNowPlayingOnControllerDispose instead.
+    /// View-level (deinit) cleanup: transfers ownership to a surviving sibling view.
+    /// Controller teardown uses clearNowPlayingOnControllerDispose instead.
     func cleanupRemoteCommandOwnership() {
         // Only proceed if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -876,12 +875,8 @@ import QuartzCore
         }
     }
 
-    /// Controller-level teardown counterpart of cleanupRemoteCommandOwnership.
-    /// handleDispose tears down the whole controller, so every sibling view dies
-    /// with it — transferring ownership would republish Now Playing info that
-    /// nothing clears afterwards (view deinit is not guaranteed to run). Clear
-    /// instead, but only info written by a view of this controller so another
-    /// player's setup (audio fork, ambient mixer) is left alone.
+    /// Controller teardown: siblings die too, so transferring ownership would
+    /// republish info nothing clears. Clear only what this controller's views own.
     func clearNowPlayingOnControllerDispose() {
         var controllerViewIds: Set<Int64> = [viewId]
         if let controllerIdValue = controllerId {
@@ -899,9 +894,7 @@ import QuartzCore
             print("🗑️ Controller dispose - clearing Now Playing info owned by view \(taggedId)")
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         }
-        // Remote command targets are left registered — same rationale as
-        // cleanupRemoteCommandOwnership: handlers bail out once ownership is
-        // cleared and their [weak self] goes nil.
+        // Command targets stay registered; handlers no-op once ownership is cleared.
     }
 
     /// Emits all current player states to ensure UI is in sync
