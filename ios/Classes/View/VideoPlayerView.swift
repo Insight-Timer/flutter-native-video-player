@@ -891,7 +891,6 @@ import QuartzCore
 
         let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
         if let taggedId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(taggedId) {
-            print("🗑️ Controller dispose - clearing Now Playing info owned by view \(taggedId)")
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         }
         // Command targets stay registered; handlers no-op once ownership is cleared.
