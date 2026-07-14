@@ -792,8 +792,9 @@ import QuartzCore
         result(nil)
     }
 
-    /// Cleans up remote command ownership, attempting to transfer to another view if possible
-    /// This is called from both deinit and handleDispose to avoid duplication
+    /// View-level teardown (deinit): cleans up remote command ownership,
+    /// attempting to transfer to another live view of the same controller.
+    /// Whole-controller teardown uses clearNowPlayingOnControllerDispose instead.
     func cleanupRemoteCommandOwnership() {
         // Only proceed if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -873,6 +874,34 @@ import QuartzCore
                 // .commandFailed without side effects.
             }
         }
+    }
+
+    /// Controller-level teardown counterpart of cleanupRemoteCommandOwnership.
+    /// handleDispose tears down the whole controller, so every sibling view dies
+    /// with it — transferring ownership would republish Now Playing info that
+    /// nothing clears afterwards (view deinit is not guaranteed to run). Clear
+    /// instead, but only info written by a view of this controller so another
+    /// player's setup (audio fork, ambient mixer) is left alone.
+    func clearNowPlayingOnControllerDispose() {
+        var controllerViewIds: Set<Int64> = [viewId]
+        if let controllerIdValue = controllerId {
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue) {
+                controllerViewIds.insert(view.viewId)
+            }
+        }
+
+        if let ownerId = RemoteCommandManager.shared.getCurrentOwner(), controllerViewIds.contains(ownerId) {
+            RemoteCommandManager.shared.clearOwner(ownerId)
+        }
+
+        let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        if let taggedId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(taggedId) {
+            print("🗑️ Controller dispose - clearing Now Playing info owned by view \(taggedId)")
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+        // Remote command targets are left registered — same rationale as
+        // cleanupRemoteCommandOwnership: handlers bail out once ownership is
+        // cleared and their [weak self] goes nil.
     }
 
     /// Emits all current player states to ensure UI is in sync
