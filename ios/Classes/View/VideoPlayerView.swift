@@ -355,6 +355,20 @@ import QuartzCore
                 // Re-apply any pending collapse/expand handoff for this controller
                 // (e.g. the floating view registering after the collapse signal).
                 SharedPlayerManager.shared.reapplyAutomaticPipContext(for: controllerIdValue, registeringIsFullscreen: isDartFullscreenView)
+
+                // A player restored directly into the collapsed state creates its floating
+                // (isDartFullscreen) view without a prior expand→collapse handoff, so the
+                // reapply above no-ops (no PiP context set yet) and the shared player view is
+                // only ever mounted into the offscreen inline host — leaving the floating
+                // preview blank, even while playing. Mount the shared controller's view into
+                // this floating host now, unless a handoff has explicitly targeted the inline
+                // (expanded) view. mountControllerView is idempotent, so this is a no-op when
+                // the normal handoff already mounted it.
+                if isDartFullscreenView,
+                   SharedPlayerManager.shared.hasPlayer(for: controllerIdValue),
+                   SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != false {
+                    mountControllerView(playerViewController, collapsed: true, setSlotConfig: true)
+                }
             }
         }
 
