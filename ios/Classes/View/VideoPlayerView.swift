@@ -792,8 +792,8 @@ import QuartzCore
         result(nil)
     }
 
-    /// Cleans up remote command ownership, attempting to transfer to another view if possible
-    /// This is called from both deinit and handleDispose to avoid duplication
+    /// View-level (deinit) cleanup: transfers ownership to a surviving sibling view.
+    /// Controller teardown uses clearNowPlayingOnControllerDispose instead.
     func cleanupRemoteCommandOwnership() {
         // Only proceed if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -873,6 +873,27 @@ import QuartzCore
                 // .commandFailed without side effects.
             }
         }
+    }
+
+    /// Controller teardown: siblings die too, so transferring ownership would
+    /// republish info nothing clears. Clear only what this controller's views own.
+    func clearNowPlayingOnControllerDispose() {
+        var controllerViewIds: Set<Int64> = [viewId]
+        if let controllerIdValue = controllerId {
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue) {
+                controllerViewIds.insert(view.viewId)
+            }
+        }
+
+        if let ownerId = RemoteCommandManager.shared.getCurrentOwner(), controllerViewIds.contains(ownerId) {
+            RemoteCommandManager.shared.clearOwner(ownerId)
+        }
+
+        let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        if let taggedId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(taggedId) {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+        // Command targets stay registered; handlers no-op once ownership is cleared.
     }
 
     /// Emits all current player states to ensure UI is in sync

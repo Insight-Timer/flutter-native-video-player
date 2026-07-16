@@ -753,8 +753,8 @@ extension VideoPlayerView {
         drmHandler?.cleanup()
         drmHandler = nil
 
-        // Clean up remote command ownership (transfer to another view if possible)
-        cleanupRemoteCommandOwnership()
+        // Clear Now Playing outright — never transfer to a sibling dying with the controller
+        clearNowPlayingOnControllerDispose()
 
         // Remove from shared manager if this is a shared player
         if let controllerId = controllerId {
