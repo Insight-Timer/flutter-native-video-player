@@ -17,6 +17,9 @@ extension VideoPlayerView {
 
         // Observe player's timeControlStatus to track play/pause state changes
         player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
+        // Views attaching mid-playback (floating handoff) get no KVO callback until
+        // the next transition — seed so the PIP willStop isPlaying read is accurate.
+        isPlaybackActive = player?.timeControlStatus == .playing
 
         // Observe AirPlay connection status
         player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
