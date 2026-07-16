@@ -582,6 +582,11 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
+    /// True when a live AVPlayer exists for this controller.
+    func hasPlayer(for controllerId: Int) -> Bool {
+        return players[controllerId] != nil
+    }
+
     /// Reparents the one shared controller's view into the on-screen target host
     /// (floating when collapsed, inline when expanded) and arms it — the c46460b
     /// behaviour that produced a real OS PiP window. Also disarms every OTHER
