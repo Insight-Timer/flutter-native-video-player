@@ -1164,6 +1164,28 @@ extension VideoPlayerView {
         result(true)
     }
 
+    /// Disallowing external playback drops an active AirPlay session to
+    /// audio-only: video returns to the device, audio stays on the receiver.
+    func handleSetAllowsExternalPlayback(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let allows = args["allows"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'allows' bool parameter",
+                details: nil
+            ))
+            return
+        }
+
+        guard let player = player else {
+            result(nil)
+            return
+        }
+
+        player.allowsExternalPlayback = allows
+        result(nil)
+    }
+
     /// Sets up periodic time observer to update Now Playing elapsed time
     func setupPeriodicTimeObserver() {
         // Remove existing observer if any
