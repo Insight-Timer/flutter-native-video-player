@@ -2203,6 +2203,19 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Toggles AVPlayer's `allowsExternalPlayback`. `false` drops an active
+  /// AirPlay session to audio-only — video returns to the device while audio
+  /// keeps streaming to the receiver. No-op on Android/web.
+  Future<void> setAllowsExternalPlayback(bool allows) async {
+    if (_methodChannel == null) return;
+    if (kIsWeb || !Platform.isIOS) return;
+    try {
+      await _methodChannel!.setAllowsExternalPlayback(allows);
+    } catch (e) {
+      debugPrint('Error setting allowsExternalPlayback: $e');
+    }
+  }
+
   /// Toggles Picture-in-Picture mode
   /// Only works on iOS 14+ and Android 8+
   /// Returns true if the operation was successful
