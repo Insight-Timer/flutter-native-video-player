@@ -508,13 +508,17 @@ extension VideoPlayerView {
             
             let newItem = AVPlayerItem(url: url)
             player?.replaceCurrentItem(with: newItem)
+            // Move item-scoped observers onto the new item; otherwise status /
+            // buffering / presentationSize events stop firing after a quality
+            // switch and `deinit` would try to unregister from the old item.
+            addObservers(to: newItem)
             player?.seek(to: currentTime)
-            
+
             // Only resume playback if it was playing before
             if wasPlaying {
                 player?.play()
             }
-            
+
             sendEvent("qualityChange", data: [
                 "url": urlString,
                 "label": qualityInfo["label"] as? String ?? "",
@@ -595,12 +599,14 @@ extension VideoPlayerView {
         
         let newItem = AVPlayerItem(url: url)
         player?.replaceCurrentItem(with: newItem)
+        // Move item-scoped observers onto the new item (see handleSetQuality).
+        addObservers(to: newItem)
         player?.seek(to: currentTime)
-        
+
         if wasPlaying {
             player?.play()
         }
-        
+
         sendEvent("qualityChange", data: [
             "url": quality.url,
             "label": quality.label,

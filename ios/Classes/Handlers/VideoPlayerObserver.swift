@@ -3,32 +3,48 @@ import Foundation
 
 extension VideoPlayerView {
     func addObservers(to item: AVPlayerItem) {
-        // Idempotent: if observers are already registered on this view,
-        // skip — `deinit`'s matching `removeObserver` block can only
-        // unregister the same observer once per key path.
-        if didRegisterPlayerItemObservers || didRegisterPlayerObservers {
-            return
+        // (Re)register item-scoped observers, moving them off any previously
+        // observed item — safe to call again on a reload or quality switch.
+        registerItemObservers(on: item)
+
+        // Player-scoped observers register once; re-adding would duplicate them.
+        if !didRegisterPlayerObservers {
+            // Observe player's timeControlStatus to track play/pause state changes
+            player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
+
+            // Observe AirPlay connection status
+            player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
+            didRegisterPlayerObservers = true
         }
+
+        // Audio route changes (AirPlay). Not item-scoped — register once.
+        if !didRegisterRouteChangeObserver {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAudioRouteChange),
+                name: AVAudioSession.routeChangeNotification,
+                object: nil
+            )
+            didRegisterRouteChangeObserver = true
+        }
+    }
+
+    /// Registers item-scoped KVO/notification observers on `item`, moving them
+    /// off any previously observed item first. No-op if already on `item`.
+    private func registerItemObservers(on item: AVPlayerItem) {
+        // Already observing this exact item — nothing to do.
+        if observedPlayerItem === item { return }
+
+        // Moving to a new item: tear down observers on the previous one so we
+        // don't leak them and so `deinit` removes from the right item.
+        if let previous = observedPlayerItem {
+            removeItemObservers(from: previous)
+        }
+
         item.addObserver(self, forKeyPath: "status", options: [.new, .old], context: nil)
         item.addObserver(self, forKeyPath: "playbackBufferEmpty", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "playbackLikelyToKeepUp", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
-        didRegisterPlayerItemObservers = true
-
-        // Observe player's timeControlStatus to track play/pause state changes
-        player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
-
-        // Observe AirPlay connection status
-        player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
-        didRegisterPlayerObservers = true
-
-        // Observe audio route changes to detect AirPlay device changes
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioRouteChange),
-            name: AVAudioSession.routeChangeNotification,
-            object: nil
-        )
 
         NotificationCenter.default.addObserver(
             self,
@@ -46,6 +62,19 @@ extension VideoPlayerView {
             name: .AVPlayerItemDidPlayToEndTime,
             object: item
         )
+
+        observedPlayerItem = item
+    }
+
+    /// Removes the item-scoped KVO and notification observers from `item`.
+    /// Must mirror `registerItemObservers(on:)` exactly.
+    func removeItemObservers(from item: AVPlayerItem) {
+        item.removeObserver(self, forKeyPath: "status")
+        item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
+        item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
+        item.removeObserver(self, forKeyPath: "presentationSize")
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemFailedToPlayToEndTime, object: item)
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
     }
 
     public override func observeValue(

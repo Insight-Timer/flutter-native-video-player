@@ -120,16 +120,17 @@ import QuartzCore
     // DRM handler for protected content
     var drmHandler: VideoPlayerDrmHandler?
 
-    // Track which KVO observers were actually registered on this view, so
-    // `deinit` only calls `removeObserver` for them. Without this guard,
-    // secondary / shared-player views that never reach the
-    // `addObservers(to:)` code path (player had no `currentItem` at init
-    // and no later `loadUrl` call routes through this view) would still
-    // attempt to unregister at `deinit` and trip
-    // `_removeObserver:forProperty:` — crashing the app whenever a
-    // floating-preview view is disposed (e.g. playlist track change).
-    var didRegisterPlayerItemObservers: Bool = false
+    // Item the item-scoped KVO observers are currently on. `deinit` removes
+    // from this exact item, not `player?.currentItem` (which may have been
+    // swapped by a reload or quality switch). Weak: if the item deallocates,
+    // KVO cleans up and there's nothing to unregister. Nil for a view that
+    // never registered, so `deinit` safely skips removal.
+    weak var observedPlayerItem: AVPlayerItem?
+
+    // Player and audio-route observers register at most once (the player is
+    // stable for this view's lifetime).
     var didRegisterPlayerObservers: Bool = false
+    var didRegisterRouteChangeObserver: Bool = false
 
 
     public init(
@@ -1061,22 +1062,14 @@ import QuartzCore
             self.timeObserver = nil
         }
 
-        // Only remove observers, don't dispose the player if it's shared
-        // The shared player will be kept alive for reuse.
+        // Only remove observers, don't dispose the player if it's shared.
         //
-        // Gate on the flags set by `addObservers(to:)` — without this,
-        // secondary / shared-player views that never registered (player
-        // had no `currentItem` at init AND never received a fresh
-        // `loadUrl` through this view's method handler) would throw
-        // `_removeObserver:forProperty:` here. Repro: floating-preview
-        // view created for a track that's already playing on the inline
-        // view, then disposed when the user skips tracks.
-        if didRegisterPlayerItemObservers, let item = player?.currentItem {
-            item.removeObserver(self, forKeyPath: "status")
-            item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
-            item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
-            item.removeObserver(self, forKeyPath: "presentationSize")
-            didRegisterPlayerItemObservers = false
+        // Remove from the item we actually observed, not `player?.currentItem`
+        // (may have been swapped by a reload/quality switch); removing from a
+        // never-observed item throws `_removeObserver:forProperty:`.
+        if let observedItem = observedPlayerItem {
+            removeItemObservers(from: observedItem)
+            observedPlayerItem = nil
         }
 
         if didRegisterPlayerObservers {
