@@ -78,6 +78,11 @@ import QuartzCore
     var currentMediaInfo: [String: Any]?
     var timeObserver: Any?
 
+    // AirPlay seek clamp state (see VideoPlayerSeekClampHandler.swift)
+    var seekClampTimeObserver: Any?
+    var seekClampBaselineSeconds: Double?
+    var seekClampAllowanceDeadline: CFTimeInterval = 0
+
     // Track if this is a shared player (to avoid sending duplicate initialization events)
     var isSharedPlayer: Bool = false
 
@@ -1047,6 +1052,8 @@ import QuartzCore
             player?.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
+
+        removeSeekClampObserver()
 
         // Only remove observers, don't dispose the player if it's shared
         // The shared player will be kept alive for reuse

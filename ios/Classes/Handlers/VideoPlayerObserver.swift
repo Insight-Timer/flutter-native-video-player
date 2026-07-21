@@ -201,6 +201,7 @@ extension VideoPlayerView {
             case "externalPlaybackActive":
                 guard let player = player else { return }
                 let isActive = player.isExternalPlaybackActive
+                updateSeekClampForExternalPlayback(isActive: isActive)
 
                 if isActive {
                     // When AirPlay connects, try to get device name with multiple retry attempts
@@ -309,6 +310,9 @@ extension VideoPlayerView {
         } else {
             isLooping = enableLooping
         }
+
+        // Both branches below rewind to the start of the media.
+        allowSeekClampJump(to: 0)
 
         if isLooping {
             // For smooth looping, seek to beginning and continue playing.

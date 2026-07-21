@@ -36,6 +36,9 @@ extension VideoPlayerView {
             print("⚠️ No media info provided during load")
         }
 
+        // Loading a new item legitimately moves the playback position.
+        allowSeekClampJump(to: nil)
+
         sendEvent("loading")
 
         // Determine if this is likely an HLS stream
@@ -406,6 +409,7 @@ extension VideoPlayerView {
                 SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
             }
             let seconds = Double(milliseconds) / 1000.0
+            allowSeekClampJump(to: seconds)
             player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 1000)) { _ in
                 self.sendEvent("seek", data: ["position": milliseconds])
                 self.updateNowPlayingPlaybackTime()
@@ -505,8 +509,9 @@ extension VideoPlayerView {
             // Store current playback state and position
             let wasPlaying = player?.rate != 0
             let currentTime = player?.currentTime() ?? CMTime.zero
-            
+
             let newItem = AVPlayerItem(url: url)
+            allowSeekClampJump(to: CMTimeGetSeconds(currentTime))
             player?.replaceCurrentItem(with: newItem)
             player?.seek(to: currentTime)
             
@@ -592,8 +597,9 @@ extension VideoPlayerView {
         
         let wasPlaying = player?.rate != 0
         let currentTime = player?.currentTime() ?? CMTime.zero
-        
+
         let newItem = AVPlayerItem(url: url)
+        allowSeekClampJump(to: CMTimeGetSeconds(currentTime))
         player?.replaceCurrentItem(with: newItem)
         player?.seek(to: currentTime)
         
