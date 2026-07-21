@@ -312,6 +312,21 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Toggles AVPlayer's `allowsExternalPlayback` (iOS-only).
+  Future<void> setAllowsExternalPlayback(bool allows) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setAllowsExternalPlayback',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'allows': allows,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setAllowsExternalPlayback: $e');
+    }
+  }
+
   /// Toggles `AVPlayerViewController.requiresLinearPlayback` (iOS-only).
   /// When `true`, AVKit hides the scrubber and 15s skip-back/forward
   /// controls in both inline and PIP UIs. No-op on Android.

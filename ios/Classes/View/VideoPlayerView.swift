@@ -565,6 +565,8 @@ import QuartzCore
             handleDisableAutomaticInlinePip(result: result)
         case "setAllowsPictureInPicture":
             handleSetAllowsPictureInPicture(call: call, result: result)
+        case "setAllowsExternalPlayback":
+            handleSetAllowsExternalPlayback(call: call, result: result)
         case "setRequiresLinearPlayback":
             handleSetRequiresLinearPlayback(call: call, result: result)
         case "setShowNativeControls":
