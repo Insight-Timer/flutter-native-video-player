@@ -642,17 +642,23 @@ class SharedPlayerManager: NSObject {
         print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId)/\(fullscreenContext ? "F" : "I") pipVCisOriginal=\(pipVC === originalVC) pipVCownsPlayer=\(pipVC.player === players[controllerId])")
         target.mountControllerView(pipVC, collapsed: fullscreenContext, setSlotConfig: true)
 
+        let previousPrimaryViewId = primaryViewIdForController[controllerId]
         setPrimaryView(target.viewId, for: controllerId)
+        // Re-arm when the on-screen view switched (collapse ↔ expand). The armed view
+        // moves from the inline VC to the floating VC (or back), and AVKit only honors
+        // the auto-PiP flag via an off→on refresh on the new primary view — without it
+        // the first background after collapse never triggers PiP (the next
+        // resume→background cycle would). Same-view calls skip it (no churn).
+        let primaryViewChanged = previousPrimaryViewId != target.viewId
 
         // Arm the controller when it isn't already the active auto-PiP one — e.g. a
         // playlist track just auto-advanced, so the new controller gets "Set primary
         // view" but never the canStartAuto false→true / active-controller arm. Mark
         // it active first so setAutomaticPiPEnabled's own guard doesn't skip it, then
-        // run the full arm. Skipped on a normal collapse (already active) — the mount
-        // above handles that — so there's no re-arm churn.
+        // run the full arm.
         let wasAlreadyActive = (controllerWithAutomaticPiP == controllerId)
         controllerWithAutomaticPiP = controllerId
-        if !wasAlreadyActive {
+        if !wasAlreadyActive || primaryViewChanged {
             setAutomaticPiPEnabled(for: controllerId, enabled: true)
         }
     }
