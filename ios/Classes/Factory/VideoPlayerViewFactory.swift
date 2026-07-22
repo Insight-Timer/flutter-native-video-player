@@ -38,12 +38,14 @@ import UIKit
                 view.handleMethodCall(call: call, result: result)
             } else if call.method == "setAutomaticPipView",
                       let controllerId = args?["controllerId"] as? Int,
-                      let view = registeredViews.values.first(where: { $0.controllerId == controllerId }) {
+                      let view = SharedPlayerManager.shared.liveView(for: controllerId) {
                 // setAutomaticPipView is controller-scoped (handleSetAutomaticPipView
                 // uses the view's own controllerId, not the passed viewId). The
                 // primary viewId can be stale — e.g. the inline view was disposed
-                // while the floating preview is on screen — so fall back to any
-                // live view of the controller instead of failing with NO_VIEW.
+                // while the floating preview is on screen — so fall back to a live
+                // view of the controller (preferring the primary) instead of
+                // failing with NO_VIEW. Uses SharedPlayerManager's live-view set so
+                // a leaked/zombie view is never picked.
                 view.handleMethodCall(call: call, result: result)
             } else {
                 result(FlutterError(code: "NO_VIEW", message: "No view found for method call", details: nil))

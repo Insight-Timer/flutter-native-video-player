@@ -587,6 +587,23 @@ class SharedPlayerManager: NSObject {
         return players[controllerId] != nil
     }
 
+    /// A live (non-disposed) view for the controller, preferring the primary
+    /// view. Reads from `videoPlayerViews`, which drops disposed views, so
+    /// leaked/zombie views (still in the plugin's registeredViews but torn down
+    /// here) are never returned. Used to service controller-scoped calls like
+    /// setAutomaticPipView when the caller's viewId is stale.
+    func liveView(for controllerId: Int) -> VideoPlayerView? {
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        let primaryId = primaryViewIdForController[controllerId]
+        var fallback: VideoPlayerView?
+        for (_, wrapper) in videoPlayerViews {
+            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
+            if view.viewId == primaryId { return view }
+            if fallback == nil { fallback = view }
+        }
+        return fallback
+    }
+
     /// Reparents the one shared controller's view into the on-screen target host
     /// (floating when collapsed, inline when expanded) and arms it — the c46460b
     /// behaviour that produced a real OS PiP window. Also disarms every OTHER
