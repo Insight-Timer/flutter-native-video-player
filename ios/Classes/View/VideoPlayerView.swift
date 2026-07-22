@@ -736,11 +736,23 @@ import QuartzCore
         let emitEvent = { [weak self] in
             guard let self = self,
                   self.isEventChannelActive,
-                  !self.isDisposed,
-                  let eventSink = self.eventSink else {
+                  !self.isDisposed else {
                 return
             }
-            eventSink(event)
+            if let eventSink = self.eventSink {
+                eventSink(event)
+                return
+            }
+            // No listener on this view — e.g. the floating player's secondary shared
+            // view owns the Now Playing command center while Flutter is subscribed to
+            // the other view. Route to whichever sibling view IS subscribed so
+            // play/pause/etc. still reach the Dart controller (single delivery).
+            guard let controllerId = self.controllerId else { return }
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerId)
+            where view !== self && view.eventSink != nil {
+                view.sendEvent(name, data: data)
+                return
+            }
         }
 
         if Thread.isMainThread {
