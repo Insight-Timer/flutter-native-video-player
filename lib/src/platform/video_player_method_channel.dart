@@ -284,7 +284,13 @@ class VideoPlayerMethodChannel {
     try {
       await _methodChannel.invokeMethod<void>(
         'setAutomaticPipView',
-        <String, Object>{'fullscreenContext': fullscreenContext},
+        <String, Object>{
+          // Required by the plugin-level `native_video_player` dispatcher
+          // (VideoPlayerViewFactory) to route the call to the right view —
+          // it is NOT read by handleSetAutomaticPipView itself.
+          'viewId': primaryPlatformViewId,
+          'fullscreenContext': fullscreenContext,
+        },
       );
     } catch (e) {
       debugPrint('Error calling setAutomaticPipView: $e');
