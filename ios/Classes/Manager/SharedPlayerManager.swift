@@ -582,6 +582,14 @@ class SharedPlayerManager: NSObject {
         return primaryViewIdForController[controllerId]
     }
 
+    /// The viewId whose VC owns/renders the live player (recorded on play), or nil
+    /// if no handoff owner was set. During a collapse the on-screen (primary) view
+    /// is a shell whose own VC renders nothing — the owner VC (reparented into it)
+    /// is the one AVKit must see armed.
+    func owningViewId(for controllerId: Int) -> Int64? {
+        return playerOwningViewId[controllerId]
+    }
+
     /// True when a live AVPlayer exists for this controller.
     func hasPlayer(for controllerId: Int) -> Bool {
         return players[controllerId] != nil
@@ -656,18 +664,35 @@ class SharedPlayerManager: NSObject {
             pipVC.player = sharedPlayer
         }
 
-        print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId)/\(fullscreenContext ? "F" : "I") pipVCisOriginal=\(pipVC === originalVC) pipVCownsPlayer=\(pipVC.player === players[controllerId])")
         target.mountControllerView(pipVC, collapsed: fullscreenContext, setSlotConfig: true)
 
+        // When the on-screen host shows a FOREIGN rendering VC (collapse reparents the
+        // inline dedicated VC into the floating host), the host's OWN VC must leave the
+        // window. Two AVPlayerViewControllers bound to the same AVPlayer co-present in
+        // the window make AVKit refuse automatic PiP — the collapsed-background failure.
+        // Detaching reproduces the working expanded state (shell VC off-window).
+        if target.playerViewController !== pipVC {
+            target.playerViewController.viewIfLoaded?.removeFromSuperview()
+        }
+
+        // Arm the view that OWNS the on-screen pipVC, NOT the floating target. On
+        // collapse pipVC is the inline view's dedicated VC reparented into the floating
+        // host; arming the floating target's own (now-detached) shell VC leaves the
+        // visible VC disarmed, so the FIRST background after collapse never triggers PiP
+        // (only the next cycle would). Matching the fullscreen case — where the visible
+        // VC is armed while active — makes PiP fire first-try.
+        var armViewId = target.viewId
+        if let ownerId = playerOwningViewId[controllerId],
+           videoPlayerViews["\(ownerId)"]?.view?.playerViewController === pipVC {
+            armViewId = ownerId
+        }
         let previousPrimaryViewId = primaryViewIdForController[controllerId]
-        setPrimaryView(target.viewId, for: controllerId)
-        print("🟣 [PIP-DBG] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId) targetCanStartAuto(intent)=\(target.canStartPictureInPictureAutomatically) prevPrimary=\(previousPrimaryViewId ?? -1) alreadyActive=\(controllerWithAutomaticPiP == controllerId)")
-        // Re-arm when the on-screen view switched (collapse ↔ expand). The armed view
-        // moves from the inline VC to the floating VC (or back), and AVKit only honors
+        setPrimaryView(armViewId, for: controllerId)
+        // Re-arm when the on-screen view switched (collapse ↔ expand). AVKit only honors
         // the auto-PiP flag via an off→on refresh on the new primary view — without it
-        // the first background after collapse never triggers PiP (the next
-        // resume→background cycle would). Same-view calls skip it (no churn).
-        let primaryViewChanged = previousPrimaryViewId != target.viewId
+        // the first background after collapse never triggers PiP. Same-view calls skip
+        // it (no churn).
+        let primaryViewChanged = previousPrimaryViewId != armViewId
 
         // Arm the controller when it isn't already the active auto-PiP one — e.g. a
         // playlist track just auto-advanced, so the new controller gets "Set primary

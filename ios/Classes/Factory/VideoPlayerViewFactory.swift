@@ -9,11 +9,6 @@ import UIKit
     public static func register(with registrar: FlutterPluginRegistrar) {
         messenger = registrar.messenger()
         print("Registering NativeVideoPlayerPlugin")
-        // Build marker — confirms which plugin build is actually loaded. If this
-        // line is ABSENT after a rebuild, the app is running stale plugin code
-        // (dependency ref not updated / Pods cache). setAutomaticPipView's
-        // controllerId+liveView NO_VIEW fallback lands with this build.
-        print("🏷️ [PIP-BUILD] native_video_player: setAutomaticPipView liveView fallback ACTIVE (69e792e)")
         let factory = VideoPlayerViewFactory(messenger: registrar.messenger())
         registrar.register(factory, withId: "native_video_player")
         print("NativeVideoPlayerPlugin registered with id: native_video_player")
