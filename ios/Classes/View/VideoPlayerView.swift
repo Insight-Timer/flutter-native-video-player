@@ -1282,15 +1282,17 @@ import QuartzCore
         guard canStartPictureInPictureAutomatically else { return }
 
         guard let controllerIdValue = controllerId else {
-            // Non-shared player: arm self.
+            // Non-shared player: arm self with an off→on refresh (see below).
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             return
         }
 
-        // c46460b behaviour: with a collapse/expand handoff active, just re-assert
-        // this view's flag (the shared controller is already the on-screen target).
-        // Without a handoff, fall back to the legacy primary-view re-arm.
+        // AVKit only honors an off→on refresh here (FLTR-20376); a bare `= true` is
+        // ignored, so after PiP is torn down and closed the flag can't recover and no
+        // later background re-enters PiP until the session restarts (FLTR-20540).
         if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         } else {
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
