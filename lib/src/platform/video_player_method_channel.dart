@@ -284,10 +284,7 @@ class VideoPlayerMethodChannel {
     try {
       await _methodChannel.invokeMethod<void>(
         'setAutomaticPipView',
-        <String, Object>{
-          'viewId': primaryPlatformViewId,
-          'fullscreenContext': fullscreenContext,
-        },
+        <String, Object>{'fullscreenContext': fullscreenContext},
       );
     } catch (e) {
       debugPrint('Error calling setAutomaticPipView: $e');
