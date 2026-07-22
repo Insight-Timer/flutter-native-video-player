@@ -1288,10 +1288,17 @@ import QuartzCore
     /// AVKit reads the desired flag value at decision time — fixes the
     /// post-runtime-toggle window where the initial flag set is ignored.
     @objc func handleAppWillResignActive() {
+        print("🟣 [PIP-DBG] willResignActive viewId=\(viewId) cid=\(controllerId ?? -1) dartFullscreen=\(isDartFullscreenView) allowsPiP=\(playerViewController.allowsPictureInPicturePlayback) canStartAuto(intent)=\(canStartPictureInPictureAutomatically) fromInline=\(playerViewController.canStartPictureInPictureAutomaticallyFromInline) rate=\(player?.rate ?? -1)")
         guard #available(iOS 14.2, *) else { return }
         // Don't override an explicit consumer disable.
-        guard playerViewController.allowsPictureInPicturePlayback else { return }
-        guard canStartPictureInPictureAutomatically else { return }
+        guard playerViewController.allowsPictureInPicturePlayback else {
+            print("🟣 [PIP-DBG]   → bail: allowsPictureInPicturePlayback=false (viewId=\(viewId))")
+            return
+        }
+        guard canStartPictureInPictureAutomatically else {
+            print("🟣 [PIP-DBG]   → bail: canStartPictureInPictureAutomatically(intent)=false (viewId=\(viewId), dartFullscreen=\(isDartFullscreenView))")
+            return
+        }
 
         guard let controllerIdValue = controllerId else {
             // Non-shared player: arm self with an off→on refresh (see below).
@@ -1304,9 +1311,11 @@ import QuartzCore
         // ignored, so after PiP is torn down and closed the flag can't recover and no
         // later background re-enters PiP until the session restarts (FLTR-20540).
         if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
+            print("🟣 [PIP-DBG]   → off→on refresh on viewId=\(viewId) (context set)")
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
         } else {
+            print("🟣 [PIP-DBG]   → arm viewId=\(viewId) + setAutomaticPiPEnabled (no context)")
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
         }

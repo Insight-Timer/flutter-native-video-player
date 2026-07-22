@@ -644,6 +644,7 @@ class SharedPlayerManager: NSObject {
 
         let previousPrimaryViewId = primaryViewIdForController[controllerId]
         setPrimaryView(target.viewId, for: controllerId)
+        print("🟣 [PIP-DBG] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) target=viewId \(target.viewId) targetCanStartAuto(intent)=\(target.canStartPictureInPictureAutomatically) prevPrimary=\(previousPrimaryViewId ?? -1) alreadyActive=\(controllerWithAutomaticPiP == controllerId)")
         // Re-arm when the on-screen view switched (collapse ↔ expand). The armed view
         // moves from the inline VC to the floating VC (or back), and AVKit only honors
         // the auto-PiP flag via an off→on refresh on the new primary view — without it
