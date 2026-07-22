@@ -2127,7 +2127,10 @@ class NativeVideoPlayerController {
   /// no-ops on Android/web where the floating package handles PiP.
   Future<void> setAutomaticPipView({required bool fullscreenContext}) async {
     if (_methodChannel == null || (!kIsWeb && Platform.isAndroid)) return;
-    await _methodChannel!.setAutomaticPipView(fullscreenContext: fullscreenContext);
+    await _methodChannel!.setAutomaticPipView(
+      fullscreenContext: fullscreenContext,
+      controllerId: id,
+    );
   }
 
   /// Disables automatic inline Picture-in-Picture mode
