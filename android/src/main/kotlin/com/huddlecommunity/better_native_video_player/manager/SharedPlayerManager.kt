@@ -26,6 +26,13 @@ object SharedPlayerManager {
     // Map<ControllerId, Map<ViewId, SurfaceReconnectCallback>>
     private val activeViews = mutableMapOf<Int, MutableMap<Long, () -> Unit>>()
 
+    // Per-view event handlers for each controller, so an event emitted from a view
+    // with no Flutter listener (e.g. the floating player's secondary shared view) can
+    // be routed to whichever sibling view IS subscribed. Mirrors the iOS sendEvent
+    // sibling-routing fix (FLTR-20471).
+    // Map<ControllerId, Map<ViewId, VideoPlayerEventHandler>>
+    private val eventHandlers = mutableMapOf<Int, MutableMap<Long, VideoPlayerEventHandler>>()
+
     // Store available qualities for each controller
     // This ensures qualities persist across view recreations
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
@@ -74,6 +81,45 @@ object SharedPlayerManager {
         val views = activeViews.getOrPut(controllerId) { mutableMapOf() }
         views[viewId] = reconnectCallback
         Log.d(TAG, "Registered view $viewId for controller $controllerId (total views: ${views.size})")
+    }
+
+    /**
+     * Registers a view's event handler so events can be re-routed to a subscribed
+     * sibling when the emitting view has no Flutter listener.
+     */
+    fun registerEventHandler(controllerId: Int, viewId: Long, handler: VideoPlayerEventHandler) {
+        eventHandlers.getOrPut(controllerId) { mutableMapOf() }[viewId] = handler
+    }
+
+    fun unregisterEventHandler(controllerId: Int, viewId: Long) {
+        eventHandlers[controllerId]?.let { handlers ->
+            handlers.remove(viewId)
+            if (handlers.isEmpty()) eventHandlers.remove(controllerId)
+        }
+    }
+
+    /**
+     * Routes an event to whichever sibling view for [controllerId] currently has a
+     * live Flutter listener (single delivery), skipping [excludingViewId] (the view
+     * that tried to emit but had no listener). Returns true if delivered. Mirrors the
+     * iOS sendEvent findAllViewsForController fallback so system-control play/pause
+     * still reaches the Dart controller when the floating player owns playback.
+     */
+    fun routeEventToSubscribedView(
+        controllerId: Int,
+        excludingViewId: Long?,
+        name: String,
+        data: Map<String, Any>?
+    ): Boolean {
+        val handlers = eventHandlers[controllerId] ?: return false
+        for ((viewId, handler) in handlers) {
+            if (viewId == excludingViewId) continue
+            if (handler.hasActiveSink()) {
+                handler.sendEvent(name, data)
+                return true
+            }
+        }
+        return false
     }
 
     /**
@@ -150,6 +196,7 @@ object SharedPlayerManager {
 
         // Clear active views for this controller
         activeViews.remove(controllerId)
+        eventHandlers.remove(controllerId)
 
         Log.d(TAG, "Removed player for controller $controllerId")
 
