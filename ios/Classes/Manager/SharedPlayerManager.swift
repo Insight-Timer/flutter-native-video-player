@@ -634,12 +634,19 @@ class SharedPlayerManager: NSObject {
         }
 
         // Target = the on-screen view: floating when collapsed, inline when expanded.
+        // A disposed platform view is never unregistered natively (registeredViews
+        // retains it, so its weak wrapper here stays non-nil), so after an audio↔video
+        // toggle the torn-down floating preview lingers alongside its freshly-created
+        // replacement — two isDartFullscreenView matches. Picking the first could
+        // reparent the live VC into the stale, off-screen view → blank floating video.
+        // Pick the most recently created (highest viewId) match, which is always the
+        // live on-screen view.
         var targetView: VideoPlayerView?
         for (_, wrapper) in videoPlayerViews {
-            if let view = wrapper.view, view.controllerId == controllerId,
-               view.isDartFullscreenView == fullscreenContext {
+            guard let view = wrapper.view, view.controllerId == controllerId,
+                  view.isDartFullscreenView == fullscreenContext else { continue }
+            if targetView == nil || view.viewId > targetView!.viewId {
                 targetView = view
-                break
             }
         }
 
