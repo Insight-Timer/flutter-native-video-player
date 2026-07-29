@@ -1,5 +1,26 @@
 import AVKit
 
+extension VideoPlayerView {
+    /// Playback intent for the PIP `willStop` check. The delegate handling the
+    /// stop may be the floating (fullscreen-context) view, whose per-view
+    /// `isPlaybackActive` never saw the shared player's `.playing` edge —
+    /// `timeControlStatus` is observed without `.initial`, and a view created
+    /// before the item loaded registers no KVO at all. Fall back to any sibling
+    /// view for this controller (the inline view always tracks the live state)
+    /// so a PIP entered from the floating player still resumes on close.
+    func pipWasPlayingAcrossViews() -> Bool {
+        func reads(_ view: VideoPlayerView) -> Bool {
+            return view.isPlaybackActive ||
+                (view.lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+        }
+        if reads(self) { return true }
+        guard let controllerIdValue = controllerId else { return false }
+        return SharedPlayerManager.shared
+            .findAllViewsForController(controllerIdValue)
+            .contains { $0 !== self && reads($0) }
+    }
+}
+
 extension VideoPlayerView: AVPlayerViewControllerDelegate {
     public func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         print("🎬 PiP will start (AVPlayerViewController delegate - automatic or system triggered)")
@@ -76,8 +97,9 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
 
         // Active, or only just dismiss-paused. An earlier user pause has an
         // older timestamp → reads as not-playing, so a paused PIP won't resume.
-        let isPlaying = isPlaybackActive ||
-            (lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+        // Aggregated across sibling views so a floating-view delegate (stale
+        // per-view state) still reports the inline view's live playback intent.
+        let isPlaying = pipWasPlayingAcrossViews()
 
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes
@@ -325,8 +347,9 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
 
         // Active, or only just dismiss-paused. An earlier user pause has an
         // older timestamp → reads as not-playing, so a paused PIP won't resume.
-        let isPlaying = isPlaybackActive ||
-            (lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+        // Aggregated across sibling views so a floating-view delegate (stale
+        // per-view state) still reports the inline view's live playback intent.
+        let isPlaying = pipWasPlayingAcrossViews()
 
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes

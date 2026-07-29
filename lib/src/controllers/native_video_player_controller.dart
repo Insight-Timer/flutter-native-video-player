@@ -2122,6 +2122,17 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Points auto-PiP at the inline ([fullscreenContext] false) or the
+  /// Dart-fullscreen/floating ([fullscreenContext] true) view. iOS-only;
+  /// no-ops on Android/web where the floating package handles PiP.
+  Future<void> setAutomaticPipView({required bool fullscreenContext}) async {
+    if (_methodChannel == null || (!kIsWeb && Platform.isAndroid)) return;
+    await _methodChannel!.setAutomaticPipView(
+      fullscreenContext: fullscreenContext,
+      controllerId: id,
+    );
+  }
+
   /// Disables automatic inline Picture-in-Picture mode
   ///
   /// When disabled, PiP will NOT automatically start when the app goes to background.

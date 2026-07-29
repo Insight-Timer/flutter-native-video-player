@@ -23,6 +23,14 @@ import QuartzCore
     var controllerId: Int?
     var pipController: AVPictureInPictureController?
 
+    /// Stable container returned from view(). The one shared controller's view is
+    /// reparented into whichever on-screen host is current (inline ↔ floating).
+    let hostContainer = UIView()
+
+    /// Native-controls visibility for the inline slot, restored after the floating
+    /// slot hides them.
+    var showNativeControls: Bool = true
+
     // Track if PiP is currently active (for both automatic and manual PiP)
     var isPipCurrentlyActive: Bool = false
 
@@ -151,6 +159,14 @@ import QuartzCore
         let argsDict = args as? [String: Any]
         let isDartFullscreen = argsDict?["isDartFullscreen"] as? Bool ?? false
 
+        // True when a floating collapse/expand handoff is already active for this
+        // controller. Then setAutomaticPipView owns the shared controller's slot,
+        // so this view (a recreated inline) must reuse it and not reconfigure/mount.
+        var hasHandoffContext = false
+        if #available(iOS 14.2, *), let cid = argsDict?["controllerId"] as? Int {
+            hasHandoffContext = SharedPlayerManager.shared.automaticPipContext(for: cid) != nil
+        }
+
         if let args = argsDict,
            let controllerIdValue = args["controllerId"] as? Int {
             controllerId = controllerIdValue
@@ -165,26 +181,24 @@ import QuartzCore
             isSharedPlayer = alreadyExisted
 
             if isDartFullscreen {
-                // Dart fullscreen host: use a dedicated AVPlayerViewController (same player) so the inline
-                // view never loses its shared view when this platform view is created or disposed.
-                let dedicatedVC = AVPlayerViewController()
-                dedicatedVC.player = sharedPlayer
-                playerViewController = dedicatedVC
+                // Floating host reuses the ONE shared controller (a second/extra
+                // controller won't auto-PiP); its view is reparented in on collapse.
+                playerViewController = sharedViewController
                 isDartFullscreenView = true
-                print("✅ Created dedicated AVPlayerViewController for Dart fullscreen (controller ID: \(controllerIdValue))")
             } else {
-                if alreadyExisted {
-                    // Second or later platform view for this controller (e.g. detail screen).
-                    // Use a dedicated AVPlayerViewController with the shared player so this
-                    // view has its own layer; the shared VC stays in SharedPlayerManager for PiP.
-                    // This avoids black screen when navigating list↔detail (one UIView per slot).
+                if alreadyExisted && !hasHandoffContext {
+                    // Second platform view for this controller with NO floating handoff
+                    // (list↔detail): a dedicated VC per slot avoids black screen.
                     let displayVC = AVPlayerViewController()
                     displayVC.player = sharedPlayer
                     playerViewController = displayVC
                     print("✅ Created dedicated AVPlayerViewController for shared controller (controller ID: \(controllerIdValue)) - avoids black screen when navigating list↔detail")
                 } else {
+                    // First view, or a recreated inline while a floating handoff is
+                    // active: reuse the ONE shared controller so no second controller
+                    // is bound to the player and blocks auto-PiP.
                     playerViewController = sharedViewController
-                    print("✅ Created new shared player AND view controller for controller ID: \(controllerIdValue)")
+                    print("✅ Reusing the shared AVPlayerViewController for controller ID: \(controllerIdValue)")
                 }
             }
         } else {
@@ -207,13 +221,19 @@ import QuartzCore
 
         // Configure playback controls
         let showControls = (args as? [String: Any])?["showNativeControls"] as? Bool ?? true
-        playerViewController.showsPlaybackControls = showControls
-        playerViewController.delegate = self
+        showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
-        applyVideoGravity(useAspectFill)
 
-        // Disable automatic Now Playing updates - we'll handle it manually
-        playerViewController.updatesNowPlayingInfoCenter = false
+        // Don't reconfigure the shared controller when setAutomaticPipView owns it:
+        // the floating host, or a recreated inline while a handoff is active. Doing
+        // so would steal the on-screen slot's delegate/zoom/controls.
+        if !isDartFullscreenView && !hasHandoffContext {
+            playerViewController.showsPlaybackControls = showControls
+            playerViewController.delegate = self
+            applyVideoGravity(useAspectFill)
+            // Disable automatic Now Playing updates - we'll handle it manually
+            playerViewController.updatesNowPlayingInfoCenter = false
+        }
 
         // Extract configuration from Flutter args
         if let args = args as? [String: Any] {
@@ -269,13 +289,11 @@ import QuartzCore
                 print("✅ PiP settings for non-shared player - allows: \(argsAllowsPiP), autoStart: \(argsCanStartAutomatically)")
             }
 
-            if #available(iOS 14.2, *) {
-                // Start with automatic PiP DISABLED
-                // It will be enabled when this specific player starts playing (if allowed)
-                // This prevents conflicts when multiple players exist
+            if #available(iOS 14.2, *), !isDartFullscreenView {
+                // Start disabled (armed on play/handoff). Skip for the floating host
+                // so it never disarms the already-armed shared controller.
                 playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                print("✅ PiP configured, automatic PiP will be enabled on play if allowed")
-            } else {
+            } else if #unavailable(iOS 14.2) {
                 print("⚠️ Automatic PiP requires iOS 14.2+, current device doesn't support it")
             }
 
@@ -322,16 +340,35 @@ import QuartzCore
                         // Check if manual PiP is active - if so, skip re-enabling automatic PiP
                         if SharedPlayerManager.shared.isManualPiPActive(controllerIdValue) {
                             print("   ⚠️ Skipping automatic PiP re-enable - manual PiP is active")
-                        } else {
-                            // Set this new view as the primary view
+                        } else if !isDartFullscreenView,
+                                  SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) == nil {
+                            // Legacy arming only when setAutomaticPipView was never used;
+                            // otherwise it owns arming (the reapply below targets the view).
                             SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
-                            // Re-apply automatic PiP settings to enable it on this new view
                             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                             print("   → Set new view as primary and enabled automatic PiP (viewId: \(viewId))")
                         }
                     } else {
                         print("   ⚠️ Cannot enable automatic PiP - canStartPictureInPictureAutomatically is false")
                     }
+                }
+
+                // Re-apply any pending collapse/expand handoff for this controller
+                // (e.g. the floating view registering after the collapse signal).
+                SharedPlayerManager.shared.reapplyAutomaticPipContext(for: controllerIdValue, registeringIsFullscreen: isDartFullscreenView)
+
+                // A player restored directly into the collapsed state creates its floating
+                // (isDartFullscreen) view without a prior expand→collapse handoff, so the
+                // reapply above no-ops (no PiP context set yet) and the shared player view is
+                // only ever mounted into the offscreen inline host — leaving the floating
+                // preview blank, even while playing. Mount the shared controller's view into
+                // this floating host now, unless a handoff has explicitly targeted the inline
+                // (expanded) view. mountControllerView is idempotent, so this is a no-op when
+                // the normal handoff already mounted it.
+                if isDartFullscreenView,
+                   SharedPlayerManager.shared.hasPlayer(for: controllerIdValue),
+                   SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != false {
+                    mountControllerView(playerViewController, collapsed: true, setSlotConfig: true)
                 }
             }
         }
@@ -404,11 +441,58 @@ import QuartzCore
         if #available(iOS 11.0, *) {
             setupAirPlayRouteDetector()
         }
+
+        // Mount the controller's view into the host. The floating host stays empty
+        // until collapse moves the shared controller's view in. When a handoff is
+        // already active, skip — reapplyAutomaticPipContext (in registration) mounts
+        // the shared view into the correct current slot.
+        if !isDartFullscreenView && !hasHandoffContext {
+            mountControllerView(playerViewController, collapsed: false, setSlotConfig: false)
+        }
     }
 
     public func view() -> UIView {
-        return playerViewController.view
+        return hostContainer
     }
+
+    /// Reparents `controller`'s view into this view's host container; with
+    /// setSlotConfig it also applies the slot config (delegate/controls/zoom/arm).
+    func mountControllerView(_ controller: AVPlayerViewController, collapsed: Bool, setSlotConfig: Bool) {
+        let playerView: UIView = controller.view
+        let didReparent = playerView.superview !== hostContainer
+        if didReparent {
+            // c46460b reparent (this produced a real OS PiP window). Do NOT nil the
+            // player or write allowsPictureInPicturePlayback around this.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            playerView.removeFromSuperview()
+            playerView.translatesAutoresizingMaskIntoConstraints = true
+            playerView.frame = hostContainer.bounds
+            playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            hostContainer.addSubview(playerView)
+            CATransaction.commit()
+        }
+
+        // Slot config only on the handoff path, not at init — arming every
+        // controller at init would re-arm two controllers in the list↔detail case.
+        if setSlotConfig {
+            controller.delegate = self
+            // Floating slot hides controls; inline slot keeps controls + zoom.
+            controller.showsPlaybackControls = collapsed ? false : showNativeControls
+            if !collapsed {
+                controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
+            }
+            // c46460b arm: only READ allowsPictureInPicturePlayback (never write it).
+            var armFlag = false
+            if #available(iOS 14.2, *), controller.allowsPictureInPicturePlayback,
+               canStartPictureInPictureAutomatically {
+                controller.canStartPictureInPictureAutomaticallyFromInline = true
+                armFlag = true
+            }
+            print("🐛 [PIP] mount view=\(isDartFullscreenView ? "floating" : "inline") viewId=\(viewId) reparented=\(didReparent) armed=\(armFlag) viewInWindow=\(controller.viewIfLoaded?.window != nil) vc=\(ObjectIdentifier(controller))")
+        }
+    }
+
 
     // MARK: - Native Layout Overlay
 
@@ -575,6 +659,8 @@ import QuartzCore
             handleEnableAutomaticInlinePip(result: result)
         case "disableAutomaticInlinePip":
             handleDisableAutomaticInlinePip(result: result)
+        case "setAutomaticPipView":
+            handleSetAutomaticPipView(call: call, result: result)
         case "setAllowsPictureInPicture":
             handleSetAllowsPictureInPicture(call: call, result: result)
         case "setAllowsExternalPlayback":
@@ -651,11 +737,23 @@ import QuartzCore
         let emitEvent = { [weak self] in
             guard let self = self,
                   self.isEventChannelActive,
-                  !self.isDisposed,
-                  let eventSink = self.eventSink else {
+                  !self.isDisposed else {
                 return
             }
-            eventSink(event)
+            if let eventSink = self.eventSink {
+                eventSink(event)
+                return
+            }
+            // No listener on this view — e.g. the floating player's secondary shared
+            // view owns the Now Playing command center while Flutter is subscribed to
+            // the other view. Route to whichever sibling view IS subscribed so
+            // play/pause/etc. still reach the Dart controller (single delivery).
+            guard let controllerId = self.controllerId else { return }
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerId)
+            where view !== self && view.eventSink != nil {
+                view.sendEvent(name, data: data)
+                return
+            }
         }
 
         if Thread.isMainThread {
@@ -724,8 +822,8 @@ import QuartzCore
         result(nil)
     }
 
-    /// Cleans up remote command ownership, attempting to transfer to another view if possible
-    /// This is called from both deinit and handleDispose to avoid duplication
+    /// View-level (deinit) cleanup: transfers ownership to a surviving sibling view.
+    /// Controller teardown uses clearNowPlayingOnControllerDispose instead.
     func cleanupRemoteCommandOwnership() {
         // Only proceed if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -805,6 +903,27 @@ import QuartzCore
                 // .commandFailed without side effects.
             }
         }
+    }
+
+    /// Controller teardown: siblings die too, so transferring ownership would
+    /// republish info nothing clears. Clear only what this controller's views own.
+    func clearNowPlayingOnControllerDispose() {
+        var controllerViewIds: Set<Int64> = [viewId]
+        if let controllerIdValue = controllerId {
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue) {
+                controllerViewIds.insert(view.viewId)
+            }
+        }
+
+        if let ownerId = RemoteCommandManager.shared.getCurrentOwner(), controllerViewIds.contains(ownerId) {
+            RemoteCommandManager.shared.clearOwner(ownerId)
+        }
+
+        let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
+        if let taggedId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(taggedId) {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+        // Command targets stay registered; handlers no-op once ownership is cleared.
     }
 
     /// Emits all current player states to ensure UI is in sync
@@ -1026,7 +1145,12 @@ import QuartzCore
         // Handle automatic PiP transfer for shared players
         // If this was the primary view (the one with automatic PiP enabled) OR if the player is playing,
         // we need to transfer automatic PiP to another view using the same controller
-        if #available(iOS 14.2, *), let controllerIdValue = controllerId {
+        if #available(iOS 14.2, *), let controllerIdValue = controllerId,
+           SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
+            // Reparent model: one shared controller. Don't toggle its flag or run
+            // setAutomaticPiPEnabled on disposal (both views share it) — just unregister.
+            SharedPlayerManager.shared.unregisterVideoPlayerView(viewId: viewId)
+        } else if #available(iOS 14.2, *), let controllerIdValue = controllerId {
             let wasPrimaryView = SharedPlayerManager.shared.isPrimaryView(viewId, for: controllerIdValue)
             let wasAutoEnabled = SharedPlayerManager.shared.isControllerActiveForAutoPiP(controllerIdValue)
             let isPlaying = player?.rate ?? 0 > 0
@@ -1130,11 +1254,12 @@ import QuartzCore
             }
         }
 
-        // For Dart fullscreen platform view, release the dedicated VC's player so it tears down.
-        // The shared player and shared VC (inline view) are left untouched.
+        // Floating host shares the ONE controller — never nil its player. Just
+        // detach its view if still parented here; it re-mounts on the next expand.
         if isDartFullscreenView {
-            playerViewController.player = nil
-            print("✅ Dart fullscreen platform view disposed - released dedicated AVPlayerViewController")
+            if playerViewController.viewIfLoaded?.superview === hostContainer {
+                playerViewController.viewIfLoaded?.removeFromSuperview()
+            }
         }
 
         // CRITICAL: For shared controllers, player and playerViewController are NOT disposed here
@@ -1161,8 +1286,31 @@ import QuartzCore
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
 
-        playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-        if let controllerIdValue = controllerId {
+        guard let controllerIdValue = controllerId else {
+            // Non-shared player: arm self with an off→on refresh (see below).
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+            return
+        }
+
+        // AVKit only honors an off→on refresh here (FLTR-20376); a bare `= true` is
+        // ignored, so after PiP is torn down and closed the flag can't recover and no
+        // later background re-enters PiP until the session restarts (FLTR-20540).
+        if SharedPlayerManager.shared.automaticPipContext(for: controllerIdValue) != nil {
+            // Single-primary invariant: with a shared player only the VC that
+            // owns/renders the live player may arm. On collapse that VC belongs to a
+            // NON-primary view (its dedicated VC is reparented into the floating host),
+            // so gate on the recorded owner — arming a sibling shell VC leaves two VCs
+            // on one player contending, which blocks AVKit's auto-PiP (the collapsed-
+            // background failure). No owner recorded → single-VC case, arm as before.
+            let ownerId = SharedPlayerManager.shared.owningViewId(for: controllerIdValue)
+            let isRenderingView = ownerId == nil || ownerId == viewId
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+            if isRenderingView {
+                playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+            }
+        } else {
+            playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
         }
     }

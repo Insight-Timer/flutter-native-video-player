@@ -322,6 +322,11 @@ class VideoPlayerView(
                 // Emit current state after reconnecting to ensure UI stays in sync
                 emitCurrentState()
             }
+            // Let siblings re-route events here when their own listener is absent
+            // (floating player state sync from the system notification).
+            eventHandler.controllerId = controllerId
+            eventHandler.viewId = viewId
+            SharedPlayerManager.registerEventHandler(controllerId, viewId, eventHandler)
         }
 
         // Setup event channel
@@ -887,6 +892,7 @@ class VideoPlayerView(
             Log.d(TAG, "Detached player from PlayerView to preserve surface for other views")
 
             // Unregister this view and notify remaining views to reconnect their surfaces
+            SharedPlayerManager.unregisterEventHandler(controllerId, viewId)
             SharedPlayerManager.unregisterView(controllerId, viewId)
         } else {
             // Only release if not shared (for non-shared players, fully clean up media session)

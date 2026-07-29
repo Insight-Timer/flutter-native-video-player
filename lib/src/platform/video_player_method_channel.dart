@@ -279,6 +279,35 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Arms auto-PiP on the inline or Dart-fullscreen (floating) view (iOS 14.2+)
+  ///
+  /// [controllerId], when provided, lets the native dispatcher fall back to any
+  /// live view of that controller if [primaryPlatformViewId] is stale (e.g. the
+  /// inline view was disposed while the floating preview is on screen). This
+  /// call is controller-scoped natively, so any live view of the controller can
+  /// service it — without the fallback a stale viewId yields NO_VIEW and the
+  /// collapse/expand context is silently lost.
+  Future<void> setAutomaticPipView({
+    required bool fullscreenContext,
+    int? controllerId,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setAutomaticPipView',
+        <String, Object>{
+          // Used by the plugin-level `native_video_player` dispatcher
+          // (VideoPlayerViewFactory) to route the call to the right view —
+          // NOT read by handleSetAutomaticPipView itself.
+          'viewId': primaryPlatformViewId,
+          'controllerId': ?controllerId,
+          'fullscreenContext': fullscreenContext,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setAutomaticPipView: $e');
+    }
+  }
+
   /// Disables automatic inline Picture-in-Picture mode (iOS 14.2+)
   Future<bool> disableAutomaticInlinePip() async {
     try {
