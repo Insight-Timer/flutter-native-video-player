@@ -75,6 +75,7 @@ class VideoPlayerMethodHandler(
             "getAvailableSubtitleTracks" -> handleGetAvailableSubtitleTracks(result)
             "setSubtitleTrack" -> handleSetSubtitleTrack(call, result)
             "setVideoTrackDisabled" -> handleSetVideoTrackDisabled(call, result)
+            "setNowPlayingSuppressed" -> handleSetNowPlayingSuppressed(call, result)
             "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
             "exitFullScreen" -> handleExitFullScreen(result)
@@ -904,6 +905,24 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
             result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
+        }
+    }
+
+    /**
+     * Hides or restores the media notification without stopping playback. Used when the
+     * floating player is hidden behind another surface (the sleep mixer): the notification
+     * should not linger on a track the user can no longer see, but playback keeps running
+     * so it can be revealed again on return.
+     */
+    private fun handleSetNowPlayingSuppressed(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val suppressed = args?.get("suppressed") as? Boolean ?: false
+            notificationHandler.setNowPlayingSuppressed(suppressed)
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting now playing suppressed: ${e.message}", e)
+            result.error("ERROR", "Failed to set now playing suppressed: ${e.message}", null)
         }
     }
 }

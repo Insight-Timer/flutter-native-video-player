@@ -84,6 +84,12 @@ import QuartzCore
 
     // Store media info for Now Playing
     var currentMediaInfo: [String: Any]?
+
+    // When true, this view's Now Playing info is intentionally hidden (e.g. the
+    // floating player is hidden behind the sleep mixer). Playback keeps running;
+    // only the lock-screen / Control Center metadata is withheld until restored.
+    var isNowPlayingSuppressed: Bool = false
+
     var timeObserver: Any?
 
     // Track if this is a shared player (to avoid sending duplicate initialization events)
@@ -645,6 +651,8 @@ import QuartzCore
             handleSetSubtitleTrack(call: call, result: result)
         case "setVideoTrackDisabled":
             handleSetVideoTrackDisabled(call: call, result: result)
+        case "setNowPlayingSuppressed":
+            handleSetNowPlayingSuppressed(call: call, result: result)
         case "enterFullScreen":
             handleEnterFullScreen(result: result)
         case "exitFullScreen":

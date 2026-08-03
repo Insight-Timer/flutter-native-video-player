@@ -1508,4 +1508,20 @@ extension VideoPlayerView {
 
         result(nil)
     }
+
+    /// Hides or restores this view's lock-screen / Control Center Now Playing
+    /// info without stopping playback (see `setNowPlayingSuppressed`).
+    func handleSetNowPlayingSuppressed(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let suppressed = args["suppressed"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'suppressed' parameter",
+                details: nil
+            ))
+            return
+        }
+        setNowPlayingSuppressed(suppressed)
+        result(nil)
+    }
 }

@@ -1918,6 +1918,21 @@ class NativeVideoPlayerController {
     return channel.setVideoTrackDisabled(disabled);
   }
 
+  /// Hides or restores the lock-screen / notification "Now Playing" entry for
+  /// the current media without stopping playback.
+  ///
+  /// Used when the floating player is hidden behind another surface (the sleep
+  /// mixer): the OS media controls should not linger on a track the user can no
+  /// longer see, but playback keeps running so it can be revealed again on
+  /// return. Returns immediately when the controller hasn't been initialized yet.
+  Future<void> setNowPlayingSuppressed(bool suppressed) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return;
+    }
+    await channel.setNowPlayingSuppressed(suppressed);
+  }
+
   /// Refreshes the system media controls (lock-screen / notification next/prev
   /// availability) for the currently-loaded media without restarting playback.
   ///
