@@ -85,6 +85,8 @@ class VideoPlayerMethodHandler(
             "disconnectAirPlay" -> handleDisconnectAirPlay(result)
             "dispose" -> handleDispose(result)
             "updateTrackNavFlags" -> handleUpdateTrackNavFlags(call, result)
+            // No-op on Android: PiP for the floating player is handled by the Flutter package.
+            "setAutomaticPipView" -> result.success(true)
             else -> result.notImplemented()
         }
     }

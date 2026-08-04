@@ -214,6 +214,10 @@ class NativeVideoPlayerController {
   /// Set of platform view IDs that are using this controller
   final Set<int> _platformViewIds = <int>{};
 
+  /// Secondary "fullscreen-context" view IDs (e.g. the floating mini-preview).
+  /// They render shared frames only and must never become the command target.
+  final Set<int> _fullscreenContextViewIds = <int>{};
+
   /// Primary platform view ID (most recent one registered)
   int? _primaryPlatformViewId;
 
@@ -861,19 +865,25 @@ class NativeVideoPlayerController {
   /// - platformViewId: The unique ID assigned by Flutter to the platform view
   Future<void> onPlatformViewCreated(
     int platformViewId,
-    BuildContext context,
-  ) async {
+    BuildContext context, {
+    bool isFullscreenContext = false,
+  }) async {
     // Check if we're reconnecting BEFORE adding the new view ID
     final bool wasDisconnected = _platformViewIds.isEmpty;
 
     _platformViewIds.add(platformViewId);
+    if (isFullscreenContext) {
+      _fullscreenContextViewIds.add(platformViewId);
+    }
 
     // Store context for Dart fullscreen
     _platformViewContexts[platformViewId] = context;
 
-    // Always update to use the most recent platform view
-    // This ensures commands go to the active view
-    _updateMethodChannel(platformViewId);
+    // Only the inline view owns the method channel; a fullscreen-context view
+    // is adopted only if there's no primary yet.
+    if (!isFullscreenContext || _primaryPlatformViewId == null) {
+      _updateMethodChannel(platformViewId);
+    }
 
     // If we're reconnecting after all platform views were disposed, refresh availability flags
     if (wasDisconnected) {
@@ -1659,16 +1669,20 @@ class NativeVideoPlayerController {
   void onPlatformViewDisposed(int platformViewId) {
     _platformViewIds.remove(platformViewId);
     _platformViewContexts.remove(platformViewId);
+    _fullscreenContextViewIds.remove(platformViewId);
 
     // Cancel the event channel subscription for this platform view
     unawaited(_safeCancelSubscription(_eventSubscriptions[platformViewId]));
     _eventSubscriptions.remove(platformViewId);
 
-    // If the disposed view was the primary view, switch to another active view
+    // If the primary view was disposed, promote another view, preferring an
+    // inline view over a fullscreen-context one.
     if (_primaryPlatformViewId == platformViewId &&
         _platformViewIds.isNotEmpty) {
-      // Use the most recent remaining view
-      final newPrimaryViewId = _platformViewIds.last;
+      final newPrimaryViewId = _platformViewIds.lastWhere(
+        (id) => !_fullscreenContextViewIds.contains(id),
+        orElse: () => _platformViewIds.last,
+      );
       _updateMethodChannel(newPrimaryViewId);
     }
   }
@@ -2110,6 +2124,17 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Points auto-PiP at the inline ([fullscreenContext] false) or the
+  /// Dart-fullscreen/floating ([fullscreenContext] true) view. iOS-only;
+  /// no-ops on Android/web where the floating package handles PiP.
+  Future<void> setAutomaticPipView({required bool fullscreenContext}) async {
+    if (_methodChannel == null || (!kIsWeb && Platform.isAndroid)) return;
+    await _methodChannel!.setAutomaticPipView(
+      fullscreenContext: fullscreenContext,
+      controllerId: id,
+    );
+  }
+
   /// Disables automatic inline Picture-in-Picture mode
   ///
   /// When disabled, PiP will NOT automatically start when the app goes to background.
@@ -2500,6 +2525,7 @@ class NativeVideoPlayerController {
     // Clear platform view references
     _platformViewIds.clear();
     _platformViewContexts.clear();
+    _fullscreenContextViewIds.clear();
     _primaryPlatformViewId = null;
 
     // Clear method channel reference (but don't dispose native player)
