@@ -223,6 +223,23 @@ class VideoPlayerMethodChannel {
     return const VideoTrackDisableResult(VideoTrackDisableStatus.ok);
   }
 
+  /// Hides or restores the lock-screen / notification "Now Playing" entry for
+  /// the current media without stopping playback.
+  ///
+  /// When [suppressed] is true, the native media notification / Control Center
+  /// info is cleared but playback continues; when false, it is republished.
+  /// Used when the floating player is hidden behind another surface (the sleep
+  /// mixer) so the OS controls don't linger on a track the user can't see.
+  Future<void> setNowPlayingSuppressed(bool suppressed) async {
+    await _methodChannel.invokeMethod<dynamic>(
+      'setNowPlayingSuppressed',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'suppressed': suppressed,
+      },
+    );
+  }
+
   /// Checks if Picture-in-Picture is available
   Future<bool> isPictureInPictureAvailable() async {
     try {

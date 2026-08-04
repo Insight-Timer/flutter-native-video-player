@@ -90,6 +90,13 @@ class RemoteCommandManager {
 extension VideoPlayerView {
     /// Sets up the Now Playing info for the Control Center and Lock Screen
     func setupNowPlayingInfo(mediaInfo: [String: Any]) {
+        // Withhold metadata while suppressed (floating player hidden behind the
+        // sleep mixer). restoreNowPlayingIfNeeded clears the flag before calling
+        // back in, so a genuine restore isn't blocked.
+        if isNowPlayingSuppressed {
+            print("🎵 setupNowPlayingInfo skipped for view \(viewId) - Now Playing suppressed")
+            return
+        }
         print("🎵 setupNowPlayingInfo called for view \(viewId)")
         print("   → Media title: \(mediaInfo["title"] ?? "Unknown")")
         print("   → Current Now Playing info before update: \(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String ?? "nil")")
@@ -448,6 +455,10 @@ extension VideoPlayerView {
 
     /// Updates playback time and rate dynamically (e.g., every second or on state change)
     func updateNowPlayingPlaybackTime() {
+        // Don't re-populate metadata we deliberately hid while suppressed.
+        if isNowPlayingSuppressed {
+            return
+        }
         guard let player = player else {
             return
         }
@@ -474,5 +485,45 @@ extension VideoPlayerView {
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = player.rate
         nowPlayingInfo[NowPlayingOwnership.key] = viewId
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
+    }
+
+    /// Hides or restores this view's Now Playing metadata without stopping
+    /// playback. Used when the floating player is hidden behind another surface
+    /// (the sleep mixer): the OS lock-screen / Control Center entry should not
+    /// linger on a track the user can no longer see, but the audio/video keeps
+    /// running so it can be revealed again on return.
+    func setNowPlayingSuppressed(_ suppressed: Bool) {
+        // Apply to every view of this shared controller: the floating player can
+        // hold a sibling view (see FLTR-20586), and any of them may currently own
+        // the Now Playing info. Flag them all so none republishes while suppressed.
+        var controllerViews: [VideoPlayerView] = [self]
+        if let controllerIdValue = controllerId {
+            for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            where view.viewId != viewId {
+                controllerViews.append(view)
+            }
+        }
+
+        for view in controllerViews {
+            view.isNowPlayingSuppressed = suppressed
+        }
+
+        if suppressed {
+            // Identity-guarded clear: only wipe the info if it belongs to one of
+            // this controller's views, so a player that has since taken over
+            // (audio fork, ambient mixer) keeps its own.
+            let currentInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo
+            let controllerViewIds = Set(controllerViews.map { $0.viewId })
+            if let ownerId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(ownerId) {
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                print("🙈 View \(viewId) suppressed Now Playing info")
+            }
+        } else if let mediaInfo = currentMediaInfo {
+            // Flags are already cleared above, so setupNowPlayingInfo republishes
+            // from this (the current primary/rendering) view.
+            print("👀 View \(viewId) restoring Now Playing info")
+            setupNowPlayingInfo(mediaInfo: mediaInfo)
+            updateNowPlayingPlaybackTime()
+        }
     }
 }

@@ -49,6 +49,15 @@ class VideoPlayerNotificationHandler(
     // Guards release() so both handleDispose and PlatformView.dispose can call it.
     private var isReleased: Boolean = false
 
+    // True while the media notification is intentionally hidden (the floating player
+    // is hidden behind the sleep mixer). Blocks startForegroundPlayback so the
+    // audio-mode path can't re-show it while suppressed.
+    private var isNowPlayingSuppressed: Boolean = false
+
+    // Whether the foreground notification was showing when suppression began, so
+    // restore only re-shows it if it was actually there before.
+    private var foregroundActiveBeforeSuppress: Boolean = false
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Set true while the foreground service is being torn down. During teardown,
@@ -405,6 +414,9 @@ class VideoPlayerNotificationHandler(
      * contract is "audio-only playback in the background" with a single visible player.
      */
     fun startForegroundPlayback() {
+        // Withhold the notification while suppressed (floating player hidden behind
+        // the sleep mixer); setNowPlayingSuppressed(false) re-shows it on restore.
+        if (isNowPlayingSuppressed) return
         if (foregroundRequested) return
         val session = mediaSession ?: return
 
@@ -453,6 +465,28 @@ class VideoPlayerNotificationHandler(
     }
 
     private val clearSuppressSystemStop = Runnable { suppressSystemStop = false }
+
+    /**
+     * Hides or restores the media notification without stopping playback. Used when
+     * the floating player is hidden behind another surface (the sleep mixer): the
+     * notification should not linger on a track the user can no longer see, but
+     * playback keeps running so it can be revealed again on return.
+     */
+    fun setNowPlayingSuppressed(suppressed: Boolean) {
+        if (isNowPlayingSuppressed == suppressed) return
+
+        if (suppressed) {
+            foregroundActiveBeforeSuppress = foregroundRequested
+            stopForegroundPlayback()
+            isNowPlayingSuppressed = true
+        } else {
+            isNowPlayingSuppressed = false
+            if (foregroundActiveBeforeSuppress) {
+                startForegroundPlayback()
+            }
+            foregroundActiveBeforeSuppress = false
+        }
+    }
 
     /**
      * Releases MediaSession and tears down the foreground service if we own it.
