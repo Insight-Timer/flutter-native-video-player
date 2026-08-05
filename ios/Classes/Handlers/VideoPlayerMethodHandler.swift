@@ -738,6 +738,7 @@ extension VideoPlayerView {
     func handleDispose(result: @escaping FlutterResult) {
         print("🗑️ [VideoPlayerMethodHandler] handleDispose called for controllerId: \(String(describing: controllerId))")
         isDisposed = true
+        hostContainer.onDidMoveToWindow = nil
         invalidateEventChannel()
 
         // Clean up rotation container if still on root view.

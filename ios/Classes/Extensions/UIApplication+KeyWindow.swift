@@ -15,3 +15,17 @@ extension UIApplication {
         return windows.first { $0.isKeyWindow }
     }
 }
+
+extension UIView {
+
+    /// Nearest view controller up the responder chain, or the key window's root as a
+    /// fallback while this view is not yet in a VC-owned hierarchy.
+    var parentViewController: UIViewController? {
+        var responder: UIResponder? = next
+        while let current = responder {
+            if let controller = current as? UIViewController { return controller }
+            responder = current.next
+        }
+        return UIApplication.shared.activeKeyWindow?.rootViewController
+    }
+}

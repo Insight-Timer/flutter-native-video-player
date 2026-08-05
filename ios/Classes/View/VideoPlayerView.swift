@@ -5,6 +5,20 @@ import AVFoundation
 import MediaPlayer
 import QuartzCore
 
+// MARK: - Host Container
+
+/// Host for the shared controller's view. Reports entering the window so the
+/// AVPlayerViewController can be re-attached to the real parent VC — at init the
+/// responder chain has no VC yet, so containment can only be established here.
+@objc public class PlayerHostContainerView: UIView {
+    var onDidMoveToWindow: (() -> Void)?
+
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { onDidMoveToWindow?() }
+    }
+}
+
 // MARK: - Main Video Player View
 
 @objc public class VideoPlayerView: NSObject, FlutterPlatformView, FlutterStreamHandler {
@@ -25,7 +39,7 @@ import QuartzCore
 
     /// Stable container returned from view(). The one shared controller's view is
     /// reparented into whichever on-screen host is current (inline ↔ floating).
-    let hostContainer = UIView()
+    let hostContainer = PlayerHostContainerView()
 
     /// Native-controls visibility for the inline slot, restored after the floating
     /// slot hides them.
@@ -455,10 +469,36 @@ import QuartzCore
         if !isDartFullscreenView && !hasHandoffContext {
             mountControllerView(playerViewController, collapsed: false, setSlotConfig: false)
         }
+
+        // Containment can't be set at init (no VC in the responder chain yet), so
+        // establish it once the host actually enters the window.
+        hostContainer.onDidMoveToWindow = { [weak self] in
+            guard let self = self, !self.isDisposed else { return }
+            if let mounted = self.playerViewController.view.superview, mounted === self.hostContainer {
+                self.attachControllerContainment(self.playerViewController)
+            }
+        }
     }
 
     public func view() -> UIView {
         return hostContainer
+    }
+
+    /// Adds `controller` as a child view controller of the VC owning `hostContainer`.
+    /// AVKit decides auto-PiP eligibility from the containment chain, not just from
+    /// the view hierarchy: reparenting `controller.view` into a plain host UIView
+    /// (20.29.0's floating-player change) leaves the VC uncontained, so AVKit treats
+    /// it as not presenting inline and skips PiP on the first background. Before
+    /// 20.29.0 `view()` returned `controller.view` directly and AVKit owned it.
+    private func attachControllerContainment(_ controller: AVPlayerViewController) {
+        guard let parent = hostContainer.parentViewController else { return }
+        guard controller.parent !== parent else { return }
+        if controller.parent != nil {
+            controller.willMove(toParent: nil)
+            controller.removeFromParent()
+        }
+        parent.addChild(controller)
+        controller.didMove(toParent: parent)
     }
 
     /// Reparents `controller`'s view into this view's host container; with
@@ -478,6 +518,8 @@ import QuartzCore
             hostContainer.addSubview(playerView)
             CATransaction.commit()
         }
+
+        attachControllerContainment(controller)
 
         // Slot config only on the handoff path, not at init — arming every
         // controller at init would re-arm two controllers in the list↔detail case.
