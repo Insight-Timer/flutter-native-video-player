@@ -739,6 +739,10 @@ extension VideoPlayerView {
         print("🗑️ [VideoPlayerMethodHandler] handleDispose called for controllerId: \(String(describing: controllerId))")
         isDisposed = true
         hostContainer.onDidMoveToWindow = nil
+        // deinit never runs while something still retains this view, leaving its
+        // lifecycle observers live and racing the real player (FLTR-20671).
+        NotificationCenter.default.removeObserver(self, name: UIApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: UIApplication.didEnterBackgroundNotification, object: nil)
         invalidateEventChannel()
 
         // Clean up rotation container if still on root view.

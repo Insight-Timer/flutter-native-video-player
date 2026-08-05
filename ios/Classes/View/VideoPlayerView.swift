@@ -1332,6 +1332,15 @@ import QuartzCore
     /// post-runtime-toggle window where the initial flag set is ignored.
     @objc func handleAppWillResignActive() {
         guard #available(iOS 14.2, *) else { return }
+
+        // A disposed view can outlive its dispose call (something still retains it, so
+        // deinit never runs) and keeps this observer registered. Arming from a dead view
+        // mutates the single global auto-PiP slot before the live view runs, leaving
+        // AVKit to sample a contended flag (FLTR-20671).
+        guard !isDisposed,
+              player?.currentItem != nil,
+              playerViewController.viewIfLoaded?.window != nil else { return }
+
         // Don't override an explicit consumer disable.
         guard playerViewController.allowsPictureInPicturePlayback else { return }
         guard canStartPictureInPictureAutomatically else { return }
@@ -1360,6 +1369,12 @@ import QuartzCore
                 playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             }
         } else {
+            // Same single-primary invariant as the ctx path: only the view owning the
+            // live player may claim the global slot, or a sibling/stale view re-points
+            // primary and takes setAutomaticPiPEnabled's disable-previous branch.
+            let ownerId = SharedPlayerManager.shared.owningViewId(for: controllerIdValue)
+            guard ownerId == nil || ownerId == viewId else { return }
+
             playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
             SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
         }
@@ -1368,6 +1383,8 @@ import QuartzCore
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
+        // Retained-but-disposed views must not touch the audio session or resume playback.
+        guard !isDisposed, player?.currentItem != nil else { return }
         print("📱 App entering background (screen lock) - maintaining audio session for view \(viewId)")
 
         // Store current playback rate before iOS might pause it
