@@ -272,6 +272,11 @@ extension VideoPlayerView {
                 return .commandFailed
             }
 
+            // Suppressed behind another surface (e.g. the sleep mixer): ignore transport commands so
+            // a lock-screen / Control Center tap can't resume or scrub a hidden video. Mirrors the
+            // audio plugin disabling its controls while suppressed.
+            if self.isNowPlayingSuppressed { return .commandFailed }
+
             // Ensure audio session is active before resuming playback
             // This is critical after interruptions (e.g., phone calls)
             self.prepareAudioSession()
@@ -292,6 +297,8 @@ extension VideoPlayerView {
                 print("⚠️ View \(self.viewId) received pause command but is not owner")
                 return .commandFailed
             }
+
+            if self.isNowPlayingSuppressed { return .commandFailed }
 
             self.player?.pause()
             self.sendEvent("pause")
@@ -318,6 +325,8 @@ extension VideoPlayerView {
                 return .commandFailed
             }
 
+            if self.isNowPlayingSuppressed { return .commandFailed }
+
             self.sendEvent("previousTrack")
             return .success
         }
@@ -329,6 +338,8 @@ extension VideoPlayerView {
                 print("⚠️ View \(self.viewId) received next track command but is not owner")
                 return .commandFailed
             }
+
+            if self.isNowPlayingSuppressed { return .commandFailed }
 
             self.sendEvent("nextTrack")
             return .success
@@ -346,6 +357,8 @@ extension VideoPlayerView {
                 print("⚠️ View \(self.viewId) received skip forward command but is not owner")
                 return .commandFailed
             }
+
+            if self.isNowPlayingSuppressed { return .commandFailed }
 
             let currentTime = player.currentTime()
             let newTime = CMTimeAdd(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
@@ -367,6 +380,8 @@ extension VideoPlayerView {
                 return .commandFailed
             }
 
+            if self.isNowPlayingSuppressed { return .commandFailed }
+
             let currentTime = player.currentTime()
             let newTime = CMTimeSubtract(currentTime, CMTime(seconds: skipEvent.interval, preferredTimescale: 600))
             player.seek(to: max(newTime, .zero))
@@ -386,6 +401,8 @@ extension VideoPlayerView {
                 print("⚠️ View \(self.viewId) received change position command but is not owner")
                 return .commandFailed
             }
+
+            if self.isNowPlayingSuppressed { return .commandFailed }
 
             let durationSeconds = CMTimeGetSeconds(player.currentItem?.duration ?? .zero)
             let boundedPosition = max(0, seekEvent.positionTime)
