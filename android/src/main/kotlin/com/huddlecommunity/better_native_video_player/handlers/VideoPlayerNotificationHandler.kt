@@ -449,12 +449,7 @@ class VideoPlayerNotificationHandler(
         if (!foregroundRequested) return
         foregroundRequested = false
 
-        // Guard against MediaSessionLegacyStub.onStop() firing during service
-        // teardown. Cleared on a delayed main-thread post after the onStop
-        // callback has had time to be processed.
-        suppressSystemStop = true
-        mainHandler.removeCallbacks(clearSuppressSystemStop)
-        mainHandler.postDelayed(clearSuppressSystemStop, suppressSystemStopDurationMs)
+        armSystemStopSuppression()
 
         mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
 
@@ -462,6 +457,18 @@ class VideoPlayerNotificationHandler(
             val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
             context.stopService(serviceIntent)
         } catch (_: Exception) { }
+    }
+
+    /**
+     * Opens the window in which [wrappedPlayer]'s `stop()` is swallowed, guarding against
+     * MediaSessionLegacyStub.onStop() firing during service teardown. Callers that re-bind
+     * the video surface must arm this too: the teardown's onStop() drops the player to
+     * STATE_IDLE and wipes the surface they just attached.
+     */
+    fun armSystemStopSuppression() {
+        suppressSystemStop = true
+        mainHandler.removeCallbacks(clearSuppressSystemStop)
+        mainHandler.postDelayed(clearSuppressSystemStop, suppressSystemStopDurationMs)
     }
 
     private val clearSuppressSystemStop = Runnable { suppressSystemStop = false }

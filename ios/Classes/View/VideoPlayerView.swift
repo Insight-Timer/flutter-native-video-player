@@ -651,6 +651,10 @@ import QuartzCore
             handleSetSubtitleTrack(call: call, result: result)
         case "setVideoTrackDisabled":
             handleSetVideoTrackDisabled(call: call, result: result)
+        // No-op on iOS: the Now Playing entry is published for the whole session,
+        // not started on backgrounding the way Android's foreground service is.
+        case "setBackgroundPlaybackActive":
+            result(nil)
         case "setNowPlayingSuppressed":
             handleSetNowPlayingSuppressed(call: call, result: result)
         case "enterFullScreen":

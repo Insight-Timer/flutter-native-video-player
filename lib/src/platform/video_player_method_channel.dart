@@ -223,6 +223,19 @@ class VideoPlayerMethodChannel {
     return const VideoTrackDisableResult(VideoTrackDisableStatus.ok);
   }
 
+  /// Starts or stops the Android foreground media notification independently of
+  /// video track selection. No-op on iOS, where the Now Playing entry is
+  /// published for the lifetime of the session.
+  Future<void> setBackgroundPlaybackActive(bool active) async {
+    await _methodChannel.invokeMethod<dynamic>(
+      'setBackgroundPlaybackActive',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'active': active,
+      },
+    );
+  }
+
   /// Hides or restores the lock-screen / notification "Now Playing" entry for
   /// the current media without stopping playback.
   ///

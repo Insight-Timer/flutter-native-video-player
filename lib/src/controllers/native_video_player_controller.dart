@@ -1899,8 +1899,8 @@ class NativeVideoPlayerController {
   ///
   /// When [disabled] is true, the native player stops downloading video
   /// segments from demuxed HLS streams while audio continues uninterrupted.
-  /// On Android this also promotes a foreground MediaSessionService so audio
-  /// keeps playing with a lock-screen notification when the app is backgrounded.
+  /// This is purely a bandwidth optimisation — call
+  /// [setBackgroundPlaybackActive] to drive the Android media notification.
   ///
   /// Contract:
   /// - The caller owns lifecycle: toggle from a `WidgetsBindingObserver` /
@@ -1918,6 +1918,21 @@ class NativeVideoPlayerController {
       return const VideoTrackDisableResult(VideoTrackDisableStatus.skipped);
     }
     return channel.setVideoTrackDisabled(disabled);
+  }
+
+  /// Starts or stops the Android foreground media notification, so the host can
+  /// show it while the app is backgrounded without disabling the video track.
+  ///
+  /// Independent of [setVideoTrackDisabled]: disabling the video track releases
+  /// the video renderer, which stalls playback on the way back to the
+  /// foreground. No-op on iOS. Returns immediately when the controller hasn't
+  /// been initialized yet.
+  Future<void> setBackgroundPlaybackActive(bool active) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return;
+    }
+    await channel.setBackgroundPlaybackActive(active);
   }
 
   /// Hides or restores the lock-screen / notification "Now Playing" entry for
