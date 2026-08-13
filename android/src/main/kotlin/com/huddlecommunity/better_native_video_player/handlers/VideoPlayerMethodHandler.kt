@@ -922,8 +922,6 @@ class VideoPlayerMethodHandler(
             val args = call.arguments as? Map<*, *>
             val active = args?.get("active") as? Boolean ?: false
 
-            Log.d(TAG, "Setting background playback active: $active")
-
             if (active) {
                 notificationHandler.startForegroundPlayback()
             } else {
