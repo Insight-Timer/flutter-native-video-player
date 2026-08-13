@@ -223,6 +223,17 @@ class VideoPlayerMethodChannel {
     return const VideoTrackDisableResult(VideoTrackDisableStatus.ok);
   }
 
+  /// Starts or stops the foreground media notification for background playback.
+  Future<void> setBackgroundPlaybackActive(bool active) {
+    return _methodChannel.invokeMethod<void>(
+      'setBackgroundPlaybackActive',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'active': active,
+      },
+    );
+  }
+
   /// Hides or restores the lock-screen / notification "Now Playing" entry for
   /// the current media without stopping playback.
   ///
