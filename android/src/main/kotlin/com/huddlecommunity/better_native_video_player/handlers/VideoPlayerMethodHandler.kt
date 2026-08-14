@@ -926,6 +926,13 @@ class VideoPlayerMethodHandler(
                 notificationHandler.startForegroundPlayback()
             } else {
                 notificationHandler.stopForegroundPlayback()
+                // A notification clear stops ExoPlayer for real; re-attaching a surface to
+                // an idle player renders black. Media source and position survive stop().
+                if (player.playbackState == Player.STATE_IDLE && player.currentMediaItem != null) {
+                    val resumePosition = player.currentPosition
+                    player.prepare()
+                    player.seekTo(resumePosition)
+                }
                 // The surface is destroyed while backgrounded on the SurfaceView path, but
                 // the codec survives, so returning is a re-attach rather than a rebuild.
                 onSurfaceRebindRequest?.invoke()
