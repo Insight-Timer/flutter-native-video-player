@@ -75,6 +75,7 @@ class VideoPlayerMethodHandler(
             "getAvailableSubtitleTracks" -> handleGetAvailableSubtitleTracks(result)
             "setSubtitleTrack" -> handleSetSubtitleTrack(call, result)
             "setVideoTrackDisabled" -> handleSetVideoTrackDisabled(call, result)
+            "setBackgroundPlaybackActive" -> handleSetBackgroundPlaybackActive(call, result)
             "setNowPlayingSuppressed" -> handleSetNowPlayingSuppressed(call, result)
             "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
@@ -855,7 +856,10 @@ class VideoPlayerMethodHandler(
      *
      * When re-enabled, ExoPlayer resumes video segment downloads from the current position.
      *
-     * Uses the same trackSelectionParameters API as subtitle disabling.
+     * Uses the same trackSelectionParameters API as subtitle disabling. Purely a bandwidth
+     * optimisation: the media notification is driven separately by
+     * [handleSetBackgroundPlaybackActive], so background audio no longer requires tearing
+     * the video renderer down.
      */
     private fun handleSetVideoTrackDisabled(call: MethodCall, result: MethodChannel.Result) {
         try {
@@ -884,13 +888,11 @@ class VideoPlayerMethodHandler(
 
             player.trackSelectionParameters = newParameters
 
-            // Start/stop the foreground service based on audio-only mode.
-            // When video track is disabled → audio-only → show notification.
-            // When video track is re-enabled → video mode → remove notification.
-            if (disabled) {
-                notificationHandler.startForegroundPlayback()
-            } else {
-                notificationHandler.stopForegroundPlayback()
+            if (!disabled) {
+                // A foreground-service teardown racing this re-enable fires onStop() on the
+                // session, dropping the player to STATE_IDLE and wiping the surface rebound
+                // below.
+                notificationHandler.armSystemStopSuppression()
                 // Disabling and re-enabling the video track releases and recreates the
                 // MediaCodecVideoRenderer. On some devices (OnePlus 15 with OxygenOS +
                 // SD 8 Elite C2 codec) the new renderer does not pick up the original
@@ -905,6 +907,34 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
             result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
+        }
+    }
+
+    /**
+     * Starts or stops the foreground media notification for background playback.
+     *
+     * Independent of [handleSetVideoTrackDisabled] by design: getting a notification by
+     * tearing the video renderer down costs a decoder rebuild — and a spinner — on the way
+     * back, and yields no notification at all whenever that toggle is skipped (muxed audio).
+     */
+    private fun handleSetBackgroundPlaybackActive(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val active = args?.get("active") as? Boolean ?: false
+
+            if (active) {
+                notificationHandler.startForegroundPlayback()
+            } else {
+                notificationHandler.stopForegroundPlayback()
+                // The surface is destroyed while backgrounded on the SurfaceView path, but
+                // the codec survives, so returning is a re-attach rather than a rebuild.
+                onSurfaceRebindRequest?.invoke()
+            }
+
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting background playback active: ${e.message}", e)
+            result.error("ERROR", "Failed to set background playback active: ${e.message}", null)
         }
     }
 
