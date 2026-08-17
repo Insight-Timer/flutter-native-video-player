@@ -81,20 +81,16 @@ class VideoPlayerNotificationHandler(
      * player regardless of custom session commands, so interception must happen here.
      */
     private val wrappedPlayer = object : ForwardingPlayer(player) {
-        // Android's MediaSessionLegacyStub fires onStop() on the session while the
-        // foreground service is torn down (e.g. stopForegroundPlayback() →
-        // context.stopService() when exiting audio mode). That callback routes to
-        // ForwardingPlayer.stop() → ExoPlayer.stop() and drops the player to
-        // STATE_IDLE, wiping the decoded video surface (OnePlus 15 repro). We
-        // swallow stop() only while suppressSystemStop is set — legitimate
-        // external transport stops (Bluetooth headset, Android Auto, Assistant,
-        // notification swipe) still pass through.
+        // Every external stop lands here: service teardown, a notification dismissal
+        // ("Clear all"), Bluetooth/Auto/Assistant. ExoPlayer.stop() releases the decoder
+        // and buffered video, so the surface returns black and the position is lost —
+        // degrade to a pause, which is how the audio player survives a dismissal.
         override fun stop() {
             if (suppressSystemStop) {
                 Log.w("VideoPlayerNH", "Ignoring MediaSession stop() during foreground teardown")
                 return
             }
-            super.stop()
+            pause()
         }
 
         override fun getAvailableCommands(): Player.Commands {
