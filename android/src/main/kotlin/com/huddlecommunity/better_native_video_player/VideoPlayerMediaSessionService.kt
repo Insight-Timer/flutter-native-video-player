@@ -5,6 +5,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -38,6 +40,11 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
         private const val LEGACY_CHANNEL_ID = "video_player"
 
         private var activeSession: MediaSession? = null
+
+        // Outlives the service so a re-promotion's placeholder can show the artwork
+        // Media3 already resolved, instead of flashing an empty panel.
+        private var cachedArtwork: Bitmap? = null
+        private var cachedArtworkUri: String? = null
 
         fun getActiveSession(): MediaSession? = activeSession
 
@@ -110,7 +117,21 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
     }
 
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        cacheArtworkIfNeeded(session)
         super.onUpdateNotification(session, startInForegroundRequired)
+    }
+
+    /** Warms [cachedArtwork] off the main thread so the next promotion's placeholder has it. */
+    private fun cacheArtworkIfNeeded(session: MediaSession) {
+        val uri = session.player.currentMediaItem?.mediaMetadata?.artworkUri?.toString() ?: return
+        if (uri == cachedArtworkUri && cachedArtwork != null) return
+        cachedArtworkUri = uri
+        Thread {
+            val bitmap = runCatching {
+                java.net.URL(uri).openStream().use { BitmapFactory.decodeStream(it) }
+            }.getOrNull()
+            if (bitmap != null && cachedArtworkUri == uri) cachedArtwork = bitmap
+        }.start()
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
@@ -141,9 +162,17 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
         val notificationManagerCompat = NotificationManagerCompat.from(this)
         ensureNotificationChannel(notificationManagerCompat)
 
+        // Media3 replaces this under the same notification id once it has resolved the
+        // artwork, so carry the metadata we already have — a blank placeholder reads as
+        // the panel refreshing itself a moment after it appears.
+        val metadata = activeSession?.player?.currentMediaItem?.mediaMetadata
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(resolveNotificationIcon())
             .setContentIntent(pendingIntent)
+            .setContentTitle(metadata?.title)
+            .setContentText(metadata?.artist)
+            .setLargeIcon(cachedArtwork)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setDefaults(0)
