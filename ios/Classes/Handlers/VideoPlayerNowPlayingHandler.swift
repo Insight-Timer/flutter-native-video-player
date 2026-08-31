@@ -238,23 +238,18 @@ extension VideoPlayerView {
         let showSystemPreviousTrackControl = (currentMediaInfo?["showSystemPreviousTrackControl"] as? Bool) ?? false
         let shouldShowTrackNavigation = showSystemNextTrackControl || showSystemPreviousTrackControl
 
-        // Check if we've already registered handlers for this view
-        // If so, skip the registration to avoid clearing and re-adding targets
-        // This prevents iOS from clearing Now Playing info
-        if hasRegisteredRemoteCommands {
-            // We've registered before - check if we're still the owner
-            if RemoteCommandManager.shared.isOwner(viewId) {
-                print("🎛️ View \(viewId) already has remote commands registered and is still owner - skipping re-registration")
-                return
-            } else {
-                // We registered before but lost ownership - take it back without clearing
-                print("🎛️ View \(viewId) re-taking ownership without clearing targets")
-                RemoteCommandManager.shared.setOwner(viewId)
-                return
-            }
+        // Already registered and still the owner: the installed targets are this view's, so
+        // there is nothing to redo.
+        if hasRegisteredRemoteCommands, RemoteCommandManager.shared.isOwner(viewId) {
+            print("🎛️ View \(viewId) already has remote commands registered and is still owner - skipping re-registration")
+            return
         }
 
-        print("🎛️ View \(viewId) registering remote commands for the first time")
+        // First registration, or a sibling view took ownership and removed this view's targets
+        // along the way. Re-taking ownership alone would leave the owner and the installed
+        // handlers on different views, and every command would then fail its `isOwner` guard —
+        // so fall through and re-register, which restores that pairing.
+        print("🎛️ View \(viewId) registering remote commands (first time: \(!hasRegisteredRemoteCommands))")
 
         // Atomically take ownership and clear all existing targets
         // This prevents race conditions when multiple views try to register concurrently
