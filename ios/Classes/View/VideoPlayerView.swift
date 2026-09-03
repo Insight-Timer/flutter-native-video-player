@@ -237,9 +237,13 @@ import QuartzCore
             playerViewController.showsPlaybackControls = showControls
             playerViewController.delegate = self
             applyVideoGravity(useAspectFill)
-            // Disable automatic Now Playing updates - we'll handle it manually
-            playerViewController.updatesNowPlayingInfoCenter = false
         }
+
+        // Every view, including a Dart-fullscreen or handoff one: this only stops AVKit
+        // publishing its own Now Playing entry, which the plugin sets manually. Left on,
+        // AVKit puts the app name, a progress bar and transport controls in Control Center
+        // for players that are meant to publish nothing at all.
+        playerViewController.updatesNowPlayingInfoCenter = false
 
         // Extract configuration from Flutter args
         if let args = args as? [String: Any] {
@@ -702,9 +706,53 @@ import QuartzCore
             handleDispose(result: result)
         case "updateTrackNavFlags":
             handleUpdateTrackNavFlags(call: call, result: result)
+        case "setMediaInfo":
+            handleSetMediaInfo(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    /// Adds or drops this player's Now Playing entry after load, so one player can
+    /// move between a surface that should own the lock screen and Control Center and
+    /// one that should publish nothing — a muted preview playing behind a tile.
+    ///
+    /// Clearing goes through the identity-guarded path, which only wipes info this
+    /// controller's views actually wrote and leaves command targets registered (they
+    /// no-op once ownership is cleared). Removing targets here would take every other
+    /// player's controls with them: `MPRemoteCommandCenter` is process-wide.
+    private func handleSetMediaInfo(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let mediaInfo = (call.arguments as? [String: Any])?["mediaInfo"] as? [String: Any]
+        // Every view for this controller, not just this one: each keeps its own copy,
+        // and the playback callbacks republish from it — a sibling would put back the
+        // entry we just took away the next time playback starts.
+        var viewsForController: [VideoPlayerView] = [self]
+        if let controllerIdValue = controllerId {
+            viewsForController = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            if !viewsForController.contains(where: { $0.viewId == viewId }) {
+                viewsForController.append(self)
+            }
+        }
+
+        guard let mediaInfo = mediaInfo else {
+            for view in viewsForController {
+                view.currentMediaInfo = nil
+            }
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.clearMediaInfo(for: controllerIdValue)
+            }
+            clearNowPlayingOnControllerDispose()
+            result(nil)
+            return
+        }
+        for view in viewsForController {
+            view.currentMediaInfo = mediaInfo
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setMediaInfo(for: controllerIdValue, mediaInfo: mediaInfo)
+        }
+        setupNowPlayingInfo(mediaInfo: mediaInfo)
+        result(nil)
     }
 
     /// Refreshes the lock-screen / Control Center prev-next button availability

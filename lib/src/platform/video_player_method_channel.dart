@@ -617,6 +617,24 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Adds or drops the system media session for the currently-loaded media:
+  /// the lock-screen / Control Center entry on iOS, the media notification on
+  /// Android. A null [mediaInfo] drops it.
+  ///
+  /// Lets one player move between a surface that should own the system controls
+  /// and one that should publish nothing, without reloading — `mediaInfo` given
+  /// at `load` time can otherwise never be added or taken away.
+  Future<void> setMediaInfo(Map<String, dynamic>? mediaInfo) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setMediaInfo', <String, Object?>{
+        'viewId': primaryPlatformViewId,
+        'mediaInfo': mediaInfo,
+      });
+    } catch (e) {
+      debugPrint('Error calling setMediaInfo: $e');
+    }
+  }
+
   /// Disposes the native player resources
   Future<void> dispose() async {
     try {

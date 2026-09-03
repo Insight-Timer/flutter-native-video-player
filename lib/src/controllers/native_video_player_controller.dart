@@ -121,8 +121,10 @@ class NativeVideoPlayerController {
   /// Whether to lock orientation to landscape in fullscreen mode
   final bool lockToLandscape;
 
-  /// Optional media information (title, subtitle, artwork) for Now Playing display
-  final NativeVideoPlayerMediaInfo? mediaInfo;
+  /// Optional media information (title, subtitle, artwork) for Now Playing display.
+  /// Mutable: [setMediaInfo] adds or drops it on a player that is already loaded,
+  /// and views created afterwards pick the current value up from [creationParams].
+  NativeVideoPlayerMediaInfo? mediaInfo;
 
   /// Whether Picture-in-Picture mode is allowed
   final bool allowsPictureInPicture;
@@ -833,6 +835,16 @@ class NativeVideoPlayerController {
     'useAspectFill': useAspectFill,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
+
+  /// Adds or drops the system media session — the lock-screen entry and its
+  /// transport controls — for the loaded media. Null publishes nothing.
+  ///
+  /// Applies to the running player, so a shared player can move between a
+  /// surface that should own the system controls and one that should not.
+  Future<void> setMediaInfo(NativeVideoPlayerMediaInfo? info) async {
+    mediaInfo = info;
+    await _methodChannel?.setMediaInfo(info?.toMap());
+  }
 
   /// Sets the overlay builder for fullscreen mode
   ///
@@ -1685,6 +1697,28 @@ class NativeVideoPlayerController {
       );
       _updateMethodChannel(newPrimaryViewId);
     }
+  }
+
+  /// Points method-channel calls at [platformViewId].
+  ///
+  /// Calls carry the primary view's id, and that primary is whichever view
+  /// registered first — a fullscreen-context view is never adopted while one
+  /// exists. When several views share a controller and only one is on screen,
+  /// the on-screen one should claim it, or surface reconnects and media-session
+  /// updates land on a view nobody can see.
+  ///
+  /// Ignores an id this controller doesn't know, so a view being disposed can't
+  /// take the channel with it.
+  void setPrimaryPlatformView(int platformViewId) {
+    if (_primaryPlatformViewId == platformViewId) return;
+    if (!_platformViewIds.contains(platformViewId)) return;
+    _updateMethodChannel(platformViewId);
+  }
+
+  /// Rebinds the native surface to the primary view. Android reconnects the
+  /// ExoPlayer surface; iOS no-ops.
+  Future<void> ensureSurfaceConnected() async {
+    await _methodChannel?.ensureSurfaceConnected();
   }
 
   /// Loads a video URL or local file into the already initialized player

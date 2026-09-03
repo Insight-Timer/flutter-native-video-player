@@ -87,6 +87,7 @@ class VideoPlayerMethodHandler(
             "disconnectAirPlay" -> handleDisconnectAirPlay(result)
             "dispose" -> handleDispose(result)
             "updateTrackNavFlags" -> handleUpdateTrackNavFlags(call, result)
+            "setMediaInfo" -> handleSetMediaInfo(call, result)
             // No-op on Android: PiP for the floating player is handled by the Flutter package.
             "setAutomaticPipView" -> result.success(true)
             else -> result.notImplemented()
@@ -116,6 +117,27 @@ class VideoPlayerMethodHandler(
             showSystemNextTrackControl = showNext,
             showSystemPreviousTrackControl = showPrev,
         )
+        result.success(null)
+    }
+
+    /**
+     * Adds or drops the media session after load, so one player can move between a
+     * surface that should publish to the notification and system controls and one
+     * that should publish nothing.
+     *
+     * A null `mediaInfo` also clears the view's copy, or the observer would rebuild
+     * the session from it the next time playback starts.
+     */
+    private fun handleSetMediaInfo(call: MethodCall, result: MethodChannel.Result) {
+        @Suppress("UNCHECKED_CAST")
+        val mediaInfo = (call.arguments as? Map<*, *>)?.get("mediaInfo") as? Map<String, Any>
+        updateMediaInfo?.invoke(mediaInfo)
+        if (mediaInfo == null) {
+            notificationHandler.releaseMediaSession()
+        } else {
+            notificationHandler.enableMediaSession()
+            notificationHandler.setupMediaSession(mediaInfo)
+        }
         result.success(null)
     }
 

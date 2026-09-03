@@ -28,6 +28,7 @@ class NativeVideoPlayer extends StatefulWidget {
     this.overlayBuilder,
     this.overlayFadeDuration = const Duration(milliseconds: 300),
     this.isFullscreenContext = false,
+    this.onViewCreated,
     super.key,
   });
 
@@ -50,6 +51,12 @@ class NativeVideoPlayer extends StatefulWidget {
   /// Passed to the platform view as [isDartFullscreen] so iOS can use a dedicated
   /// AVPlayerViewController and avoid moving the shared view away from the inline slot.
   final bool isFullscreenContext;
+
+  /// Called with this view's platform view id once it exists. Lets a host that
+  /// shares a controller between several views tell them apart — to claim the
+  /// method channel with [NativeVideoPlayerController.setPrimaryPlatformView],
+  /// which otherwise stays with whichever view registered first.
+  final void Function(int platformViewId)? onViewCreated;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -211,6 +218,7 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
       context,
       isFullscreenContext: widget.isFullscreenContext,
     );
+    widget.onViewCreated?.call(id);
   }
 
   Map<String, dynamic> _getCreationParams() {
