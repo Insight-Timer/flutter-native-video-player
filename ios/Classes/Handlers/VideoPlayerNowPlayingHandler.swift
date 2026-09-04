@@ -103,7 +103,7 @@ extension VideoPlayerView {
 
         // CRITICAL: Ensure audio session is active
         // iOS won't show Now Playing info if the audio session is not active
-        activateAudioSessionIfInterrupting()
+        activateAudioSessionIfHeld()
 
         var nowPlayingInfo: [String: Any] = [:]
 

@@ -623,10 +623,10 @@ import QuartzCore
     }
 
     /// Re-activates the shared session for the hooks that keep audio alive across
-    /// backgrounding and interruptions. A no-op for a silent player: activating an
-    /// exclusive session pauses another app's music with nothing audible of our own.
-    func activateAudioSessionIfInterrupting() {
-        guard interruptsOtherAudio else { return }
+    /// backgrounding and interruptions, for the players allowed to hold it. Activating an
+    /// exclusive session pauses another app's music even with nothing audible of our own.
+    func activateAudioSessionIfHeld() {
+        guard shouldHoldAudioSession else { return }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
             print("   → Audio session activated")
@@ -1374,10 +1374,15 @@ import QuartzCore
         return SharedPlayerManager.shared.getMediaInfo(for: controllerIdValue) != nil
     }
 
+    /// The one question every audio-session hook asks: may this player hold the shared session?
+    /// It has to be audible — a silent preview claims nothing (FLTR-20916) — and it has to
+    /// publish, or the app stays the Now Playing app with an empty entry (FLTR-20912).
+    var shouldHoldAudioSession: Bool { interruptsOtherAudio && hasMediaInfo }
+
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
-        guard hasMediaInfo else {
+        guard shouldHoldAudioSession else {
             releaseAudioSessionForBackground()
             return
         }
@@ -1389,7 +1394,7 @@ import QuartzCore
 
         // CRITICAL: Ensure audio session stays active when screen locks
         // This prevents iOS from pausing the video
-        activateAudioSessionIfInterrupting()
+        activateAudioSessionIfHeld()
 
         // CRITICAL: iOS will pause AVPlayer when screen locks
         // We need to resume playback to continue audio in background
@@ -1408,8 +1413,10 @@ import QuartzCore
         }
     }
 
-    /// Lets go of the audio session for an in-app only player that is paused when the app
-    /// backgrounds. Fails harmlessly while any other audio in the app is still playing.
+    /// Lets go of the audio session for a player that may not hold it — in-app only, or silent —
+    /// once it is paused with the app in the background. A silent player never activated the
+    /// session in the first place, so for it this is a no-op. Fails harmlessly while any other
+    /// audio in the app is still playing.
     private func releaseAudioSessionForBackground() {
         // The Dart pause may land just before or after backgrounding, and the player's audio I/O
         // takes a moment to wind down after it, so decide once both have settled.
@@ -1434,13 +1441,13 @@ import QuartzCore
     /// Called when app returns to foreground
     /// Restores Now Playing info which may have been cleared by the system
     @objc func handleAppWillEnterForeground() {
-        // An in-app only player activates the session again on its next play.
-        guard hasMediaInfo else { return }
+        // A player that may not hold the session activates it again on its next play, if at all.
+        guard shouldHoldAudioSession else { return }
 
         print("📱 App entering foreground - restoring Now Playing info for view \(viewId)")
 
         // CRITICAL: Reactivate audio session first
-        activateAudioSessionIfInterrupting()
+        activateAudioSessionIfHeld()
 
         // Check if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -1503,7 +1510,7 @@ import QuartzCore
             }
 
             // Reactivate audio session
-            activateAudioSessionIfInterrupting()
+            activateAudioSessionIfHeld()
 
             // Restore Now Playing info and resume playback if needed
             if RemoteCommandManager.shared.isOwner(viewId) {
