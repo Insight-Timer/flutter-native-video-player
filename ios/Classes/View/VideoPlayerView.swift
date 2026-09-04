@@ -1365,9 +1365,23 @@ import QuartzCore
         }
     }
 
+    /// Media info is what puts a player into the system's media UI. Without it the player is
+    /// in-app only: it must not hold the audio session across backgrounding, or the app stays
+    /// registered as the Now Playing app and Control Center shows an empty, dead entry.
+    var hasMediaInfo: Bool {
+        if currentMediaInfo != nil { return true }
+        guard let controllerIdValue = controllerId else { return false }
+        return SharedPlayerManager.shared.getMediaInfo(for: controllerIdValue) != nil
+    }
+
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
+        guard hasMediaInfo else {
+            releaseAudioSessionForBackground()
+            return
+        }
+
         print("📱 App entering background (screen lock) - maintaining audio session for view \(viewId)")
 
         // Store current playback rate before iOS might pause it
@@ -1394,9 +1408,35 @@ import QuartzCore
         }
     }
 
+    /// Lets go of the audio session for an in-app only player that is paused when the app
+    /// backgrounds. Fails harmlessly while any other audio in the app is still playing.
+    private func releaseAudioSessionForBackground() {
+        // The Dart pause may land just before or after backgrounding, and the player's audio I/O
+        // takes a moment to wind down after it, so decide once both have settled.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self, !self.isDisposed else { return }
+            guard UIApplication.shared.applicationState == .background else { return }
+            // A player in the system's media UI keeps the session, whether it is playing or paused.
+            guard RemoteCommandManager.shared.getCurrentOwner() == nil else { return }
+            guard let player = self.player, player.timeControlStatus == .paused, !self.isPipCurrentlyActive else {
+                print("📱 View \(self.viewId) has no media info but is still playing - leaving the audio session alone")
+                return
+            }
+            do {
+                try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+                print("📱 View \(self.viewId) has no media info - released the audio session for background")
+            } catch {
+                print("   ⚠️ Failed to release audio session: \(error.localizedDescription)")
+            }
+        }
+    }
+
     /// Called when app returns to foreground
     /// Restores Now Playing info which may have been cleared by the system
     @objc func handleAppWillEnterForeground() {
+        // An in-app only player activates the session again on its next play.
+        guard hasMediaInfo else { return }
+
         print("📱 App entering foreground - restoring Now Playing info for view \(viewId)")
 
         // CRITICAL: Reactivate audio session first
