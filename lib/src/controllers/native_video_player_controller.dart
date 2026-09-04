@@ -55,6 +55,7 @@ class NativeVideoPlayerController {
     this.enableLooping = false,
     this.showNativeControls = true,
     this.useAspectFill = false,
+    this.interruptsOtherAudio = true,
     List<DeviceOrientation>? preferredOrientations,
   }) {
     // Set preferred orientations if provided
@@ -153,6 +154,17 @@ class NativeVideoPlayerController {
   /// a platform view re-created later (e.g. after reparenting) picks up the
   /// current mode via [creationParams] instead of reverting to the initial one.
   bool useAspectFill;
+
+  /// Whether playback takes the audio channel from other apps (default: true).
+  ///
+  /// Muting is not enough to leave another app's music alone: volume 0 silences
+  /// this player's output, but the audio session on iOS and audio focus on
+  /// Android are claimed regardless, which pauses whatever the user was
+  /// playing. A silent preview should pass false and flip it with
+  /// [setInterruptsOtherAudio] when it becomes audible. Mutable for the same
+  /// reason as [useAspectFill]: a platform view re-created later reads the
+  /// current value from [creationParams].
+  bool interruptsOtherAudio;
 
   /// BuildContext getter for showing Dart fullscreen dialog
   /// Returns a mounted context from any registered platform view
@@ -831,6 +843,7 @@ class NativeVideoPlayerController {
     'enableHDR': enableHDR,
     'enableLooping': enableLooping,
     'useAspectFill': useAspectFill,
+    'interruptsOtherAudio': interruptsOtherAudio,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
 
@@ -2391,6 +2404,17 @@ class NativeVideoPlayerController {
     // reparented between inline and full-screen) comes up in the current mode.
     useAspectFill = enabled;
     await _methodChannel?.setUseAspectFill(enabled);
+  }
+
+  /// Sets whether playback takes the audio channel from other apps.
+  ///
+  /// Call with false before a silent preview starts and true when it becomes
+  /// audible — see [interruptsOtherAudio] for why muting alone isn't enough.
+  Future<void> setInterruptsOtherAudio(bool interrupts) async {
+    // Persisted so a platform view created after this call comes up in the
+    // current mode, as [setUseAspectFill] does.
+    interruptsOtherAudio = interrupts;
+    await _methodChannel?.setInterruptsOtherAudio(interrupts);
   }
 
   /// Returns native video dimensions if available.

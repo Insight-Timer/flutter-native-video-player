@@ -122,6 +122,10 @@ import QuartzCore
     var lastEmittedVideoWidth: Int = 0
     var lastEmittedVideoHeight: Int = 0
 
+    /// Whether playback may take the audio channel from other apps. False for a
+    /// silent preview: muting alone still claims the session and pauses their music.
+    var interruptsOtherAudio: Bool = true
+
     // Track if app is in background to keep audio playing on screen lock
     var isInBackground: Bool = false
     var lastKnownRate: Float = 0.0
@@ -229,6 +233,7 @@ import QuartzCore
         let showControls = (args as? [String: Any])?["showNativeControls"] as? Bool ?? true
         showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
+        interruptsOtherAudio = (args as? [String: Any])?["interruptsOtherAudio"] as? Bool ?? true
 
         // Don't reconfigure the shared controller when setAutomaticPipView owns it:
         // the floating host, or a recreated inline while a handoff is active. Doing
@@ -602,11 +607,31 @@ import QuartzCore
     /// This MUST be called before starting playback to ensure audio continues when screen locks
     func prepareAudioSession() {
         do {
+            guard interruptsOtherAudio else {
+                // Mixing, and deliberately not activated: the category is process-wide, so an
+                // audible player takes exclusivity back on its own next play.
+                try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+                print("✅ AVAudioSession set to mix with other audio (silent playback)")
+                return
+            }
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])
             try AVAudioSession.sharedInstance().setActive(true, options: [])
             print("✅ AVAudioSession configured for movie playback and activated")
         } catch {
             print("❌ Audio session error: \(error.localizedDescription)")
+        }
+    }
+
+    /// Re-activates the shared session for the hooks that keep audio alive across
+    /// backgrounding and interruptions. A no-op for a silent player: activating an
+    /// exclusive session pauses another app's music with nothing audible of our own.
+    func activateAudioSessionIfInterrupting() {
+        guard interruptsOtherAudio else { return }
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            print("   → Audio session activated")
+        } catch {
+            print("   ⚠️ Failed to activate audio session: \(error.localizedDescription)")
         }
     }
 
@@ -679,6 +704,8 @@ import QuartzCore
             handleSetShowNativeControls(call: call, result: result)
         case "setUseAspectFill":
             handleSetUseAspectFill(call: call, result: result)
+        case "setInterruptsOtherAudio":
+            handleSetInterruptsOtherAudio(call: call, result: result)
         case "getVideoDimensions":
             handleGetVideoDimensions(result: result)
         case "useNativeLayout":
@@ -781,6 +808,21 @@ import QuartzCore
         }
         useAspectFill = enabled
         applyVideoGravity(enabled)
+        result(nil)
+    }
+
+    /// Follows a player between silent and audible — a card trailer the user unmutes.
+    /// Taking the channel applies at once so the next frame is heard; giving it up only
+    /// bites on the next start, since iOS won't hand audio back to an app it interrupted.
+    private func handleSetInterruptsOtherAudio(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any]
+        let interrupts = args?["interrupts"] as? Bool ?? true
+        if interruptsOtherAudio == interrupts {
+            result(nil)
+            return
+        }
+        interruptsOtherAudio = interrupts
+        prepareAudioSession()
         result(nil)
     }
 
@@ -1333,12 +1375,7 @@ import QuartzCore
 
         // CRITICAL: Ensure audio session stays active when screen locks
         // This prevents iOS from pausing the video
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            print("   → Audio session kept active during background/lock")
-        } catch {
-            print("   ⚠️ Failed to keep audio session active: \(error.localizedDescription)")
-        }
+        activateAudioSessionIfInterrupting()
 
         // CRITICAL: iOS will pause AVPlayer when screen locks
         // We need to resume playback to continue audio in background
@@ -1363,12 +1400,7 @@ import QuartzCore
         print("📱 App entering foreground - restoring Now Playing info for view \(viewId)")
 
         // CRITICAL: Reactivate audio session first
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            print("   → Audio session reactivated")
-        } catch {
-            print("   ⚠️ Failed to reactivate audio session: \(error.localizedDescription)")
-        }
+        activateAudioSessionIfInterrupting()
 
         // Check if this view owns the remote commands
         guard RemoteCommandManager.shared.isOwner(viewId) else {
@@ -1431,12 +1463,7 @@ import QuartzCore
             }
 
             // Reactivate audio session
-            do {
-                try AVAudioSession.sharedInstance().setActive(true)
-                print("   → Audio session reactivated")
-            } catch {
-                print("   ⚠️ Failed to reactivate audio session: \(error.localizedDescription)")
-            }
+            activateAudioSessionIfInterrupting()
 
             // Restore Now Playing info and resume playback if needed
             if RemoteCommandManager.shared.isOwner(viewId) {

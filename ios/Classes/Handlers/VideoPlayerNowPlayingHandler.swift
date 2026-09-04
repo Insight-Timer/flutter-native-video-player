@@ -103,12 +103,7 @@ extension VideoPlayerView {
 
         // CRITICAL: Ensure audio session is active
         // iOS won't show Now Playing info if the audio session is not active
-        do {
-            try AVAudioSession.sharedInstance().setActive(true)
-            print("   → Audio session activated successfully")
-        } catch {
-            print("   ⚠️ Failed to activate audio session: \(error.localizedDescription)")
-        }
+        activateAudioSessionIfInterrupting()
 
         var nowPlayingInfo: [String: Any] = [:]
 

@@ -77,6 +77,7 @@ class VideoPlayerMethodHandler(
             "setVideoTrackDisabled" -> handleSetVideoTrackDisabled(call, result)
             "setBackgroundPlaybackActive" -> handleSetBackgroundPlaybackActive(call, result)
             "setNowPlayingSuppressed" -> handleSetNowPlayingSuppressed(call, result)
+            "setInterruptsOtherAudio" -> handleSetInterruptsOtherAudio(call, result)
             "getVideoDimensions" -> handleGetVideoDimensions(result)
             "enterFullScreen" -> handleEnterFullScreen(result)
             "exitFullScreen" -> handleExitFullScreen(result)
@@ -935,6 +936,23 @@ class VideoPlayerMethodHandler(
         } catch (e: Exception) {
             Log.e(TAG, "Error setting background playback active: ${e.message}", e)
             result.error("ERROR", "Failed to set background playback active: ${e.message}", null)
+        }
+    }
+
+    /**
+     * Follows a player between silent and audible — a card trailer the user unmutes.
+     * Turning focus off while playing abandons it; turning it on requests it for the
+     * audio that follows.
+     */
+    private fun handleSetInterruptsOtherAudio(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val interrupts = args?.get("interrupts") as? Boolean ?: true
+            SharedPlayerManager.applyAudioFocus(player, interrupts)
+            result.success(null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting interrupts other audio: ${e.message}", e)
+            result.error("ERROR", "Failed to set interrupts other audio: ${e.message}", null)
         }
     }
 

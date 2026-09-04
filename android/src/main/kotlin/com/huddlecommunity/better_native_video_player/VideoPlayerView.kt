@@ -90,6 +90,10 @@ class VideoPlayerView(
     private var enableHDR: Boolean = false
     private var useAspectFill: Boolean = false
 
+    // Whether playback may take audio focus from other apps. False for a silent
+    // preview: muting alone still requests focus and pauses their music.
+    private var interruptsOtherAudio: Boolean = true
+
 
     init {
         Log.d(TAG, "Creating VideoPlayerView with id: $viewId")
@@ -104,6 +108,7 @@ class VideoPlayerView(
         // Extract native controls setting from args
         showNativeControlsOriginal = args?.get("showNativeControls") as? Boolean ?: true
         useAspectFill = args?.get("useAspectFill") as? Boolean ?: false
+        interruptsOtherAudio = args?.get("interruptsOtherAudio") as? Boolean ?: true
 
         // Extract HDR setting from args
         enableHDR = args?.get("enableHDR") as? Boolean ?: false
@@ -147,6 +152,10 @@ class VideoPlayerView(
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
+
+        // After the player is resolved, so a shared one created for an audible surface
+        // picks this up too; focus is only requested on play, never at construction.
+        SharedPlayerManager.applyAudioFocus(player, interruptsOtherAudio)
 
         // Set repeat mode for looping
         player.repeatMode = if (enableLooping) {
