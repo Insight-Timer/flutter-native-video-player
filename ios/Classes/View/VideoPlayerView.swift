@@ -126,6 +126,10 @@ import QuartzCore
     /// silent preview: muting alone still claims the session and pauses their music.
     var interruptsOtherAudio: Bool = true
 
+    /// Whether playback survives the app being backgrounded. False for a preview that is only ever
+    /// meant to play on screen, which iOS would otherwise carry on playing behind the app.
+    var continuesInBackground: Bool = true
+
     // Track if app is in background to keep audio playing on screen lock
     var isInBackground: Bool = false
     var lastKnownRate: Float = 0.0
@@ -234,6 +238,8 @@ import QuartzCore
         showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
         interruptsOtherAudio = (args as? [String: Any])?["interruptsOtherAudio"] as? Bool ?? true
+        continuesInBackground = (args as? [String: Any])?["continuesInBackground"] as? Bool ?? true
+        applyBackgroundPlaybackPolicy()
 
         // Don't reconfigure the shared controller when setAutomaticPipView owns it:
         // the floating host, or a recreated inline while a handoff is active. Doing
@@ -1374,6 +1380,15 @@ import QuartzCore
         return SharedPlayerManager.shared.getMediaInfo(for: controllerIdValue) != nil
     }
 
+    /// Hands iOS the decision, so a preview stops when the app goes away whatever the Dart side
+    /// manages to send first. Applied per view: a shared player is opted into continuing on
+    /// creation, before any view has said what it is for.
+    func applyBackgroundPlaybackPolicy() {
+        guard #available(iOS 15.0, *), let player = player else { return }
+        player.audiovisualBackgroundPlaybackPolicy = continuesInBackground ? .continuesIfPossible : .pauses
+        print("📱 View \(viewId) background playback policy: \(continuesInBackground ? "continuesIfPossible" : "pauses")")
+    }
+
     /// The one question every audio-session hook asks: may this player hold the shared session?
     /// It has to be audible — a silent preview claims nothing (FLTR-20916) — and it has to
     /// publish, or the app stays the Now Playing app with an empty entry (FLTR-20912).
@@ -1382,7 +1397,7 @@ import QuartzCore
     /// Called when app enters background (including screen lock)
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
-        guard shouldHoldAudioSession else {
+        guard shouldHoldAudioSession, continuesInBackground else {
             releaseAudioSessionForBackground()
             return
         }

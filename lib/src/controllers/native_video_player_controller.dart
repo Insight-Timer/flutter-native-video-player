@@ -56,6 +56,7 @@ class NativeVideoPlayerController {
     this.showNativeControls = true,
     this.useAspectFill = false,
     this.interruptsOtherAudio = true,
+    this.continuesInBackground = true,
     List<DeviceOrientation>? preferredOrientations,
   }) {
     // Set preferred orientations if provided
@@ -165,6 +166,11 @@ class NativeVideoPlayerController {
   /// reason as [useAspectFill]: a platform view re-created later reads the
   /// current value from [creationParams].
   bool interruptsOtherAudio;
+
+  /// Whether playback survives the app being backgrounded. False for a preview meant to play only
+  /// while on screen: iOS otherwise carries an audible player on behind the app, and a pause sent
+  /// from Dart as the app goes away is racing its own suspension.
+  final bool continuesInBackground;
 
   /// BuildContext getter for showing Dart fullscreen dialog
   /// Returns a mounted context from any registered platform view
@@ -844,6 +850,7 @@ class NativeVideoPlayerController {
     'enableLooping': enableLooping,
     'useAspectFill': useAspectFill,
     'interruptsOtherAudio': interruptsOtherAudio,
+    'continuesInBackground': continuesInBackground,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
 
