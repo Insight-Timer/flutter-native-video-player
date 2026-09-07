@@ -159,10 +159,13 @@ class VideoPlayerView(
         // Create PlayerView and attach player
         val showNativeControls = args?.get("showNativeControls") as? Boolean ?: true
         // The floating player (isDartFullscreen) needs a TextureView-backed
-        // PlayerView so a Flutter ClipRRect can round its corners on all devices;
-        // the full-screen view keeps the default SurfaceView.
+        // PlayerView so a Flutter ClipRRect can round its corners on all devices.
+        // An inline preview (useTextureView) needs one so Flutter can composite it as a
+        // texture layer: a SurfaceView forces hybrid composition, which stalls scrolling.
+        // The full-screen view keeps the default SurfaceView.
         val isDartFullscreen = args?.get("isDartFullscreen") as? Boolean ?: false
-        val basePlayerView = if (isDartFullscreen) {
+        val useTextureView = args?.get("useTextureView") as? Boolean ?: false
+        val basePlayerView = if (isDartFullscreen || useTextureView) {
             LayoutInflater.from(context).inflate(R.layout.native_video_player_texture_view, null) as PlayerView
         } else {
             PlayerView(context)
