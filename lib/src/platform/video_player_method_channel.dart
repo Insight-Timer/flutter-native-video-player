@@ -588,6 +588,21 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// iOS-only. Rebinds the shared player to this view's controller, for a host
+  /// that renders one player in more than one view and knows which of them
+  /// should have the picture. Android connects its surface on its own.
+  Future<void> reclaimVideoSurface() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'reclaimVideoSurface',
+        <String, Object>{'viewId': primaryPlatformViewId},
+      );
+    } catch (e) {
+      debugPrint('Error calling reclaimVideoSurface: $e');
+    }
+  }
+
   /// Refreshes the system media controls (lock-screen / notification next/prev
   /// availability) for the currently-loaded media, without restarting playback.
   ///

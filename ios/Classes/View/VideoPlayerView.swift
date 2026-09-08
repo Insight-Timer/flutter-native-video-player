@@ -141,6 +141,14 @@ import QuartzCore
     // never registered, so `deinit` safely skips removal.
     weak var observedPlayerItem: AVPlayerItem?
 
+    /// Reports when this view's controller has a picture, so a host covering it
+    /// with a poster can lift it on the frame the video appears on.
+    private var readyForDisplayObservation: NSKeyValueObservation?
+
+    /// Whether this view has ever set a video gravity. False for one that shares
+    /// another view's controller, which skips the creation-param gravity.
+    private var hasAppliedVideoGravity: Bool = false
+
     // Player and audio-route observers register at most once (the player is
     // stable for this view's lifetime).
     var didRegisterPlayerObservers: Bool = false
@@ -247,6 +255,10 @@ import QuartzCore
 
         // Extract configuration from Flutter args
         if let args = args as? [String: Any] {
+            if args["observesReadyForDisplay"] as? Bool == true {
+                observeReadyForDisplay()
+            }
+
             // PiP configuration from args
             let argsAllowsPiP = args["allowsPictureInPicture"] as? Bool ?? true
             let argsCanStartAutomatically = args["canStartPictureInPictureAutomatically"] as? Bool ?? true
@@ -692,6 +704,8 @@ import QuartzCore
         case "ensureSurfaceConnected":
             // No-op on iOS; each platform view uses its own AVPlayerViewController when shared.
             result(nil)
+        case "reclaimVideoSurface":
+            handleReclaimVideoSurface(result: result)
         case "isAirPlayAvailable":
             handleIsAirPlayAvailable(result: result)
         case "showAirPlayPicker":
@@ -823,7 +837,9 @@ import QuartzCore
     private func handleSetUseAspectFill(call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments as? [String: Any]
         let enabled = args?["enabled"] as? Bool ?? false
-        if useAspectFill == enabled {
+        // A view that skipped the creation-param gravity has none yet, so its first
+        // set has to go through even when the flag already matches.
+        if useAspectFill == enabled && hasAppliedVideoGravity {
             result(nil)
             return
         }
@@ -832,8 +848,61 @@ import QuartzCore
         result(nil)
     }
 
+    private func observeReadyForDisplay() {
+        readyForDisplayObservation = playerViewController.observe(
+            \.isReadyForDisplay,
+            options: [.new]
+        ) { [weak self] _, _ in
+            self?.sendReadyForDisplay()
+        }
+    }
+
+    private func sendReadyForDisplay() {
+        sendEvent(
+            "readyForDisplayChanged",
+            data: ["isReadyForDisplay": playerViewController.isReadyForDisplay, "viewId": viewId]
+        )
+    }
+
+    /// Gives this view's controller the picture back, for a host that renders one
+    /// player in several views and knows which of them should be showing it.
+    ///
+    /// AVKit renders in whichever controller the player was assigned to last, and
+    /// offers no attach API, so reassigning is the only way back in.
+    private func handleReclaimVideoSurface(result: @escaping FlutterResult) {
+        guard let player = player else {
+            result(nil)
+            return
+        }
+        let reconnect = { [weak self] in
+            guard let self = self, !self.isDisposed else {
+                result(nil)
+                return
+            }
+            if self.playerViewController.player !== player {
+                self.playerViewController.player = player
+            } else if !self.playerViewController.isReadyForDisplay {
+                // Bound but blank: another view took the picture. AVKit ignores an
+                // assignment that doesn't change, so it has to go through nil.
+                self.playerViewController.player = nil
+                self.playerViewController.player = player
+            }
+            self.applyVideoGravity(self.useAspectFill)
+            if let controllerId = self.controllerId {
+                SharedPlayerManager.shared.setPlayerOwningView(self.viewId, for: controllerId)
+            }
+            result(nil)
+        }
+        if Thread.isMainThread {
+            reconnect()
+            return
+        }
+        DispatchQueue.main.async(execute: reconnect)
+    }
+
     private func applyVideoGravity(_ enabled: Bool) {
         if Thread.isMainThread {
+            hasAppliedVideoGravity = true
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             UIView.performWithoutAnimation {
@@ -1056,6 +1125,11 @@ import QuartzCore
         isEventChannelActive = true
         self.eventSink = events
 
+        // A view that already has a picture reported it before Dart was listening.
+        if readyForDisplayObservation != nil {
+            sendReadyForDisplay()
+        }
+
         // Send initial state event when listener is attached
         if isSharedPlayer {
             // For shared players, only send current playback state and position
@@ -1173,6 +1247,8 @@ import QuartzCore
         print("VideoPlayerView deinit for channel: \(channelName), viewId: \(viewId)")
         isDisposed = true
         invalidateEventChannel()
+        readyForDisplayObservation?.invalidate()
+        readyForDisplayObservation = nil
 
         // Clean up rotation container if still on root view.
         if isUsingNativeLayout {

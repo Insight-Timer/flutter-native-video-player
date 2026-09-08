@@ -29,6 +29,7 @@ class NativeVideoPlayer extends StatefulWidget {
     this.overlayFadeDuration = const Duration(milliseconds: 300),
     this.isFullscreenContext = false,
     this.onViewCreated,
+    this.onReadyForDisplay,
     super.key,
   });
 
@@ -57,6 +58,10 @@ class NativeVideoPlayer extends StatefulWidget {
   /// method channel with [NativeVideoPlayerController.setPrimaryPlatformView],
   /// which otherwise stays with whichever view registered first.
   final void Function(int platformViewId)? onViewCreated;
+
+  /// iOS-only. Called when this view gains or loses a picture. A host covering
+  /// the player with a poster can lift it the moment there is a frame.
+  final void Function(bool isReadyForDisplay)? onReadyForDisplay;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -122,6 +127,16 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
   }
 
   void _handleControlEvent(PlayerControlEvent event) {
+    if (event.state == PlayerControlState.readyForDisplayChanged) {
+      final int? viewId = (event.data?['viewId'] as num?)?.toInt();
+      if (viewId != null && viewId == _platformViewId) {
+        widget.onReadyForDisplay?.call(
+          event.data?['isReadyForDisplay'] as bool? ?? false,
+        );
+      }
+      return;
+    }
+
     // Hide custom overlay when entering PiP (Android only)
     if (defaultTargetPlatform == TargetPlatform.android) {
       if (event.state == PlayerControlState.pipStarted && _overlayVisible) {
@@ -227,6 +242,9 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     );
     if (widget.isFullscreenContext) {
       params['isDartFullscreen'] = true;
+    }
+    if (widget.onReadyForDisplay != null) {
+      params['observesReadyForDisplay'] = true;
     }
     return params;
   }

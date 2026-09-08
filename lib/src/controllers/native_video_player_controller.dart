@@ -1715,6 +1715,12 @@ class NativeVideoPlayerController {
     _updateMethodChannel(platformViewId);
   }
 
+  /// iOS-only. Hands the picture back to the primary view, which a view created
+  /// later onto the same player takes away.
+  Future<void> reclaimVideoSurface() async {
+    await _methodChannel?.reclaimVideoSurface();
+  }
+
   /// Rebinds the native surface to the primary view. Android reconnects the
   /// ExoPlayer surface; iOS no-ops.
   Future<void> ensureSurfaceConnected() async {
