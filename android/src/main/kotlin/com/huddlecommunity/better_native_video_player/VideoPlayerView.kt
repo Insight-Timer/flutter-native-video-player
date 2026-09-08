@@ -148,6 +148,13 @@ class VideoPlayerView(
                 .build()
         }
 
+        // A shared player takes the cap of whichever view shows it: an inline preview caps
+        // itself, and the full-screen view that follows clears it again.
+        val maxVideoHeight = (args?.get("maxVideoHeight") as? Number)?.toInt()
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+            if (maxVideoHeight != null) setMaxVideoSize(Int.MAX_VALUE, maxVideoHeight) else clearVideoSizeConstraints()
+        }.build()
+
         // Set repeat mode for looping
         player.repeatMode = if (enableLooping) {
             Player.REPEAT_MODE_ONE
