@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.util.Log
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -15,10 +16,13 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
+import com.huddlecommunity.native_video_player.R
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerMethodHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler
@@ -43,6 +47,7 @@ class VideoPlayerView(
 
     companion object {
         private const val TAG = "VideoPlayerView"
+        private const val SEEK_INCREMENT_MS = 15_000L
     }
 
     private val playerView: PlayerView
@@ -83,6 +88,7 @@ class VideoPlayerView(
 
     // HDR setting
     private var enableHDR: Boolean = false
+    private var useAspectFill: Boolean = false
 
 
     init {
@@ -97,6 +103,7 @@ class VideoPlayerView(
 
         // Extract native controls setting from args
         showNativeControlsOriginal = args?.get("showNativeControls") as? Boolean ?: true
+        useAspectFill = args?.get("useAspectFill") as? Boolean ?: false
 
         // Extract HDR setting from args
         enableHDR = args?.get("enableHDR") as? Boolean ?: false
@@ -129,9 +136,24 @@ class VideoPlayerView(
             Log.d(TAG, "No controller ID provided, creating new player")
             isSharedPlayer = false
             ExoPlayer.Builder(context)
-                .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    true
+                )
+                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
+
+        // A shared player takes the cap of whichever view shows it: an inline preview caps
+        // itself, and the full-screen view that follows clears it again.
+        val maxVideoHeight = (args?.get("maxVideoHeight") as? Number)?.toInt()
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().apply {
+            if (maxVideoHeight != null) setMaxVideoSize(Int.MAX_VALUE, maxVideoHeight) else clearVideoSizeConstraints()
+        }.build()
 
         // Set repeat mode for looping
         player.repeatMode = if (enableLooping) {
@@ -143,9 +165,22 @@ class VideoPlayerView(
 
         // Create PlayerView and attach player
         val showNativeControls = args?.get("showNativeControls") as? Boolean ?: true
-        playerView = PlayerView(context).apply {
+        // The floating player (isDartFullscreen) needs a TextureView-backed
+        // PlayerView so a Flutter ClipRRect can round its corners on all devices.
+        // An inline preview (useTextureView) needs one so Flutter can composite it as a
+        // texture layer: a SurfaceView forces hybrid composition, which stalls scrolling.
+        // The full-screen view keeps the default SurfaceView.
+        val isDartFullscreen = args?.get("isDartFullscreen") as? Boolean ?: false
+        val useTextureView = args?.get("useTextureView") as? Boolean ?: false
+        val basePlayerView = if (isDartFullscreen || useTextureView) {
+            LayoutInflater.from(context).inflate(R.layout.native_video_player_texture_view, null) as PlayerView
+        } else {
+            PlayerView(context)
+        }
+        playerView = basePlayerView.apply {
             this.player = this@VideoPlayerView.player
             useController = showNativeControls
+            resizeMode = resolveResizeMode(useAspectFill)
             controllerShowTimeoutMs = 5000
             controllerHideOnTouch = true
 
@@ -262,6 +297,19 @@ class VideoPlayerView(
             handleFullscreenToggleNative(enterFullscreen)
         }
 
+        // Re-bind the Surface after the video track is re-enabled (audio-mode → video).
+        // Without this, some devices (OnePlus 15 / OxygenOS) leave the new
+        // MediaCodecVideoRenderer connected to an offscreen ImageReader and the
+        // video appears frozen.
+        //
+        // We use the surgical setVideoSurfaceView() API instead of swapping
+        // `playerView.player = null; = currentPlayer` because the latter was observed
+        // on OnePlus 15 to race with the renderer-enable path and leave the player
+        // silently in STATE_IDLE (no error, no decoder init).
+        methodHandler.onSurfaceRebindRequest = {
+            forceReattachSurfaceToPlayer()
+        }
+
         // PiP is now handled by the floating package on the Dart side
         // Callbacks removed as they're no longer needed
 
@@ -284,6 +332,11 @@ class VideoPlayerView(
                 // Emit current state after reconnecting to ensure UI stays in sync
                 emitCurrentState()
             }
+            // Let siblings re-route events here when their own listener is absent
+            // (floating player state sync from the system notification).
+            eventHandler.controllerId = controllerId
+            eventHandler.viewId = viewId
+            SharedPlayerManager.registerEventHandler(controllerId, viewId, eventHandler)
         }
 
         // Setup event channel
@@ -296,6 +349,15 @@ class VideoPlayerView(
         // This applies to both new and shared players
         eventHandler.setInitialStateCallback {
             Log.d(TAG, "Sending initial state - isPlaying: ${player.isPlaying}, playbackState: ${player.playbackState}, duration: ${player.duration}")
+
+            resolveCurrentVideoDimensions()?.let { (initialVideoWidth, initialVideoHeight) ->
+                Log.d(TAG, "Sending initial videoDimensions event: ${initialVideoWidth}x${initialVideoHeight}")
+                eventHandler.sendEvent(
+                    "videoDimensions",
+                    mapOf("videoWidth" to initialVideoWidth, "videoHeight" to initialVideoHeight),
+                    synchronous = true
+                )
+            }
 
             // For shared players or players with media already loaded, send loaded event first
             if (player.playbackState != ExoPlayer.STATE_IDLE && player.duration >= 0) {
@@ -347,6 +409,12 @@ class VideoPlayerView(
             "setShowNativeControls" -> {
                 val show = call.argument<Boolean>("show") ?: true
                 playerView.useController = show
+                result.success(null)
+            }
+            "setUseAspectFill" -> {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                useAspectFill = enabled
+                playerView.resizeMode = resolveResizeMode(enabled)
                 result.success(null)
             }
             "ensureSurfaceConnected" -> {
@@ -644,6 +712,27 @@ class VideoPlayerView(
     // PiP is now handled by the floating package on the Dart side
     // All PiP-related methods have been removed
 
+    private fun resolveCurrentVideoDimensions(): Pair<Int, Int>? {
+        val currentVideoSize = player.videoSize
+        if (currentVideoSize.width > 0 && currentVideoSize.height > 0) {
+            return currentVideoSize.width to currentVideoSize.height
+        }
+
+        val currentTracks = player.currentTracks
+        for (group in currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (index in 0 until group.length) {
+                if (!group.isTrackSelected(index)) continue
+                val format = group.getTrackFormat(index)
+                if (format.width > 0 && format.height > 0) {
+                    return format.width to format.height
+                }
+            }
+        }
+
+        return null
+    }
+
     /**
      * Emits all current player states to ensure UI is in sync
      * This is useful after events like exiting PiP where the UI needs to refresh
@@ -654,17 +743,30 @@ class VideoPlayerView(
         // Emit current time and duration
         val currentPosition = player.currentPosition
         val duration = player.duration
+        val currentVideoDimensions = resolveCurrentVideoDimensions()
+        val videoWidth = currentVideoDimensions?.first ?: 0
+        val videoHeight = currentVideoDimensions?.second ?: 0
+
+        if (videoWidth > 0 && videoHeight > 0) {
+            eventHandler.sendEvent(
+                "videoDimensions",
+                mapOf("videoWidth" to videoWidth, "videoHeight" to videoHeight)
+            )
+        }
 
         if (duration > 0) {
             // Get buffered position
             val bufferedPosition = player.bufferedPosition
 
-            eventHandler.sendEvent("timeUpdate", mapOf(
+            val payload = mutableMapOf<String, Any>(
                 "position" to currentPosition.toInt(),
                 "duration" to duration.toInt(),
                 "bufferedPosition" to bufferedPosition.toInt(),
                 "isBuffering" to (player.playbackState == ExoPlayer.STATE_BUFFERING)
-            ))
+            )
+            addVideoDimensionsToPayload(payload, videoWidth, videoHeight)
+
+            eventHandler.sendEvent("timeUpdate", payload)
             Log.d(TAG, "Emitted timeUpdate with duration: ${duration}ms")
         }
 
@@ -675,6 +777,21 @@ class VideoPlayerView(
         } else if (player.playbackState != ExoPlayer.STATE_IDLE) {
             Log.d(TAG, "Emitting pause state")
             eventHandler.sendEvent("pause")
+        }
+    }
+
+    private fun resolveResizeMode(useAspectFill: Boolean): Int {
+        return if (useAspectFill) {
+            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        } else {
+            AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
+
+    private fun addVideoDimensionsToPayload(payload: MutableMap<String, Any>, width: Int, height: Int) {
+        if (width > 0 && height > 0) {
+            payload["videoWidth"] = width
+            payload["videoHeight"] = height
         }
     }
 
@@ -698,6 +815,35 @@ class VideoPlayerView(
                 Log.d(TAG, "Surface reconnected successfully for view $viewId")
             } else {
                 Log.w(TAG, "Cannot reconnect surface - player is null")
+            }
+        }
+    }
+
+    /**
+     * Surgical surface reattach — used on the audio-mode → video-mode transition only.
+     *
+     * Unlike [reconnectSurface], this does NOT swap `playerView.player`. On OnePlus 15
+     * that swap was observed to race with the video-renderer re-enable path and put the
+     * player into STATE_IDLE silently (no error, no decoder init). Here we keep the
+     * player attached to the PlayerView and just rebind the underlying surface view to
+     * the player directly, which is enough to force the new MediaCodecVideoRenderer to
+     * pick up the correct Surface instead of an offscreen ImageReader.
+     */
+    private fun forceReattachSurfaceToPlayer() {
+        if (isDisposed) {
+            Log.d(TAG, "Ignoring surface reattach - view is disposed")
+            return
+        }
+        playerView.post {
+            val surfaceView = playerView.videoSurfaceView
+            if (surfaceView == null) {
+                Log.w(TAG, "forceReattachSurfaceToPlayer: playerView.videoSurfaceView is null")
+                return@post
+            }
+            when (surfaceView) {
+                is android.view.SurfaceView -> player.setVideoSurfaceView(surfaceView)
+                is android.view.TextureView -> player.setVideoTextureView(surfaceView)
+                else -> Log.w(TAG, "forceReattachSurfaceToPlayer: unexpected view type")
             }
         }
     }
@@ -756,6 +902,7 @@ class VideoPlayerView(
             Log.d(TAG, "Detached player from PlayerView to preserve surface for other views")
 
             // Unregister this view and notify remaining views to reconnect their surfaces
+            SharedPlayerManager.unregisterEventHandler(controllerId, viewId)
             SharedPlayerManager.unregisterView(controllerId, viewId)
         } else {
             // Only release if not shared (for non-shared players, fully clean up media session)
@@ -764,4 +911,3 @@ class VideoPlayerView(
         }
     }
 }
-

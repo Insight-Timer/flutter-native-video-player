@@ -32,6 +32,16 @@ class SharedPlayerManager: NSObject {
     /// This ensures we enable PiP on the correct view when multiple views exist (list + detail)
     private var primaryViewIdForController: [Int: Int64] = [:]
 
+    /// Last fullscreenContext from setAutomaticPipView (false = inline, true =
+    /// floating on screen). Re-applied when the matching view registers later.
+    private var lastAutoPipContext: [Int: Bool] = [:]
+
+    /// The viewId whose VC owns/renders the live AVPlayer (the view that played).
+    /// setAutomaticPipView arms/reparents THIS view's VC — in a playlist the inline
+    /// dedicated VC plays, not the floating "original" VC, so arming the original
+    /// would leave the on-screen slot with no active player and never PiP.
+    private var playerOwningViewId: [Int: Int64] = [:]
+
     /// Store references to ALL active VideoPlayerView instances
     /// Multiple platform views can exist for the same controller (list + detail screen)
     /// We need weak references to avoid retain cycles
@@ -56,6 +66,16 @@ class SharedPlayerManager: NSObject {
     /// Controller-level event sinks (persistent, independent of platform views)
     /// These persist to send PiP and AirPlay events even when all views are disposed
     private var controllerEventSinks: [Int: FlutterEventSink] = [:]
+
+    /// Track looping state per controller so all views (inline + fullscreen) agree.
+    /// Without this, setLooping(true) on one view would not affect the other view
+    /// that actually receives the end-of-media notification.
+    private var loopingByController: [Int: Bool] = [:]
+
+    /// Track whether the end-of-media `completed` event has already been emitted
+    /// for the current playback session. Used to dedupe when multiple views
+    /// (e.g. inline + Dart fullscreen) observe the same AVPlayerItem.
+    private var completionClaimed: [Int: Bool] = [:]
 
     struct PipSettings {
         let allowsPictureInPicture: Bool
@@ -126,6 +146,17 @@ class SharedPlayerManager: NSObject {
         print("   ✅ Stored PiP settings for controller \(controllerId) - allows: \(allowsPictureInPicture), autoStart: \(canStartPictureInPictureAutomatically)")
     }
 
+    /// Mirrors a runtime `allowsPictureInPicture` change into stored settings
+    /// so view reconstruction reads the updated value. No-op if no settings stored.
+    func setAllowsPictureInPicture(for controllerId: Int, allows: Bool) {
+        guard let existing = pipSettings[controllerId] else { return }
+        pipSettings[controllerId] = PipSettings(
+            allowsPictureInPicture: allows,
+            canStartPictureInPictureAutomatically: existing.canStartPictureInPictureAutomatically,
+            showNativeControls: existing.showNativeControls
+        )
+    }
+
     /// Gets PiP settings for a controller
     /// Returns nil if no settings have been stored for this controller
     func getPipSettings(for controllerId: Int) -> PipSettings? {
@@ -167,6 +198,41 @@ class SharedPlayerManager: NSObject {
     /// Returns nil if no media info has been stored for this controller
     func getMediaInfo(for controllerId: Int) -> [String: Any]? {
         return mediaInfoCache[controllerId]
+    }
+
+    // MARK: - Looping State
+
+    /// Sets the looping flag for a controller so all views share the same value.
+    func setLoopingEnabled(for controllerId: Int, enabled: Bool) {
+        loopingByController[controllerId] = enabled
+    }
+
+    /// Returns the looping flag for a controller (defaults to false).
+    func isLoopingEnabled(for controllerId: Int) -> Bool {
+        return loopingByController[controllerId] ?? false
+    }
+
+    /// Returns the stored looping flag, or nil if nothing has been stored yet.
+    /// Lets callers distinguish "explicitly set to false" from "never seeded".
+    func storedLoopingValue(for controllerId: Int) -> Bool? {
+        return loopingByController[controllerId]
+    }
+
+    // MARK: - End-of-Media Completion Claim
+
+    /// Atomically claims the right to emit `completed` for this controller's
+    /// current playback session. Returns true the first time it is called
+    /// per session; subsequent calls return false until the flag is reset.
+    func claimCompletionEmission(for controllerId: Int) -> Bool {
+        if completionClaimed[controllerId] == true { return false }
+        completionClaimed[controllerId] = true
+        return true
+    }
+
+    /// Clears the completion claim so the next end-of-media can emit again.
+    /// Called when a new item is loaded, the user resumes playback, or seeks.
+    func resetCompletionClaim(for controllerId: Int) {
+        completionClaimed.removeValue(forKey: controllerId)
     }
 
     // MARK: - Controller Event Channel Methods
@@ -284,6 +350,8 @@ class SharedPlayerManager: NSObject {
 
         // Clear primary view tracking
         primaryViewIdForController.removeValue(forKey: controllerId)
+        lastAutoPipContext.removeValue(forKey: controllerId)
+        playerOwningViewId.removeValue(forKey: controllerId)
 
         // Remove PiP settings
         pipSettings.removeValue(forKey: controllerId)
@@ -303,6 +371,10 @@ class SharedPlayerManager: NSObject {
         // Clear manual PiP flag
         controllersWithManualPiP.remove(controllerId)
 
+        // Clear looping and completion-claim state
+        loopingByController.removeValue(forKey: controllerId)
+        completionClaimed.removeValue(forKey: controllerId)
+
         print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
 
@@ -318,12 +390,16 @@ class SharedPlayerManager: NSObject {
         players.removeAll()
         videoPlayerViews.removeAll()
         primaryViewIdForController.removeAll()
+        lastAutoPipContext.removeAll()
+        playerOwningViewId.removeAll()
         pipSettings.removeAll()
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
         mediaInfoCache.removeAll()
         controllerWithAutomaticPiP = nil
         controllersWithManualPiP.removeAll()
+        loopingByController.removeAll()
+        completionClaimed.removeAll()
     }
 
     // MARK: - AirPlay Route Detection
@@ -505,6 +581,165 @@ class SharedPlayerManager: NSObject {
     func getPrimaryViewId(for controllerId: Int) -> Int64? {
         return primaryViewIdForController[controllerId]
     }
+
+    /// The viewId whose VC owns/renders the live player (recorded on play), or nil
+    /// if no handoff owner was set. During a collapse the on-screen (primary) view
+    /// is a shell whose own VC renders nothing — the owner VC (reparented into it)
+    /// is the one AVKit must see armed.
+    func owningViewId(for controllerId: Int) -> Int64? {
+        return playerOwningViewId[controllerId]
+    }
+
+    /// True when a live AVPlayer exists for this controller.
+    func hasPlayer(for controllerId: Int) -> Bool {
+        return players[controllerId] != nil
+    }
+
+    /// A live (non-disposed) view for the controller, preferring the primary
+    /// view. Reads from `videoPlayerViews`, which drops disposed views, so
+    /// leaked/zombie views (still in the plugin's registeredViews but torn down
+    /// here) are never returned. Used to service controller-scoped calls like
+    /// setAutomaticPipView when the caller's viewId is stale.
+    func liveView(for controllerId: Int) -> VideoPlayerView? {
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        let primaryId = primaryViewIdForController[controllerId]
+        var fallback: VideoPlayerView?
+        for (_, wrapper) in videoPlayerViews {
+            guard let view = wrapper.view, view.controllerId == controllerId else { continue }
+            if view.viewId == primaryId { return view }
+            if fallback == nil { fallback = view }
+        }
+        return fallback
+    }
+
+    /// Reparents the one shared controller's view into the on-screen target host
+    /// (floating when collapsed, inline when expanded) and arms it — the c46460b
+    /// behaviour that produced a real OS PiP window. Also disarms every OTHER
+    /// controller so adjacent playlist tracks don't stay armed (Issue B).
+    @available(iOS 14.2, *)
+    func setAutomaticPipView(for controllerId: Int, fullscreenContext: Bool) {
+        videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
+        lastAutoPipContext[controllerId] = fullscreenContext
+
+        guard let originalVC = playerViewControllers[controllerId] else { return }
+
+        // The VC that owns/renders the live player = the playing view's VC. Single
+        // video: that IS the original VC (target reuses it → identical behaviour).
+        // Playlist: the inline dedicated VC plays, so arm THAT, not the floating
+        // original VC (which owns no active player → floating stays black, no PiP).
+        var pipVC = originalVC
+        if let ownerId = playerOwningViewId[controllerId],
+           let ownerView = videoPlayerViews["\(ownerId)"]?.view {
+            pipVC = ownerView.playerViewController
+        }
+
+        // Target = the on-screen view: floating when collapsed, inline when expanded.
+        // A disposed platform view is never unregistered natively (registeredViews
+        // retains it, so its weak wrapper here stays non-nil), so after an audio↔video
+        // toggle the torn-down floating preview lingers alongside its freshly-created
+        // replacement — two isDartFullscreenView matches. Picking the first could
+        // reparent the live VC into the stale, off-screen view → blank floating video.
+        // Pick the most recently created (highest viewId) match, which is always the
+        // live on-screen view.
+        var targetView: VideoPlayerView?
+        for (_, wrapper) in videoPlayerViews {
+            guard let view = wrapper.view, view.controllerId == controllerId,
+                  view.isDartFullscreenView == fullscreenContext else { continue }
+            if targetView == nil || view.viewId > targetView!.viewId {
+                targetView = view
+            }
+        }
+
+        guard let target = targetView else {
+            // Target view not registered yet — re-applied when it registers.
+            print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → no target view yet")
+            return
+        }
+
+        // Playlist bookkeeping: disarm every OTHER controller's views so only the
+        // on-screen controller stays armed when several tracks are alive.
+        for (_, wrapper) in videoPlayerViews {
+            if let view = wrapper.view, view.controllerId != controllerId {
+                view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+            }
+        }
+
+        // Ensure the VC being armed owns the live player. Gated so it's a no-op for
+        // single video (VC already owns it → unchanged). NEVER nil the player —
+        // that teardown is what killed single-video PiP; only attach-if-different.
+        if let sharedPlayer = players[controllerId], pipVC.player !== sharedPlayer {
+            pipVC.player = sharedPlayer
+        }
+
+        target.mountControllerView(pipVC, collapsed: fullscreenContext, setSlotConfig: true)
+
+        // When the on-screen host shows a FOREIGN rendering VC (collapse reparents the
+        // inline dedicated VC into the floating host), the host's OWN VC must leave the
+        // window. Two AVPlayerViewControllers bound to the same AVPlayer co-present in
+        // the window make AVKit refuse automatic PiP — the collapsed-background failure.
+        // Detaching reproduces the working expanded state (shell VC off-window).
+        if target.playerViewController !== pipVC {
+            target.playerViewController.viewIfLoaded?.removeFromSuperview()
+        }
+
+        // Arm the view that OWNS the on-screen pipVC, NOT the floating target. On
+        // collapse pipVC is the inline view's dedicated VC reparented into the floating
+        // host; arming the floating target's own (now-detached) shell VC leaves the
+        // visible VC disarmed, so the FIRST background after collapse never triggers PiP
+        // (only the next cycle would). Matching the fullscreen case — where the visible
+        // VC is armed while active — makes PiP fire first-try.
+        var armViewId = target.viewId
+        if let ownerId = playerOwningViewId[controllerId],
+           videoPlayerViews["\(ownerId)"]?.view?.playerViewController === pipVC {
+            armViewId = ownerId
+        }
+        let previousPrimaryViewId = primaryViewIdForController[controllerId]
+        setPrimaryView(armViewId, for: controllerId)
+        // Re-arm when the on-screen view switched (collapse ↔ expand). AVKit only honors
+        // the auto-PiP flag via an off→on refresh on the new primary view — without it
+        // the first background after collapse never triggers PiP. Same-view calls skip
+        // it (no churn).
+        let primaryViewChanged = previousPrimaryViewId != armViewId
+
+        // Arm the controller when it isn't already the active auto-PiP one — e.g. a
+        // playlist track just auto-advanced, so the new controller gets "Set primary
+        // view" but never the canStartAuto false→true / active-controller arm. Mark
+        // it active first so setAutomaticPiPEnabled's own guard doesn't skip it, then
+        // run the full arm.
+        let wasAlreadyActive = (controllerWithAutomaticPiP == controllerId)
+        controllerWithAutomaticPiP = controllerId
+        if !wasAlreadyActive || primaryViewChanged {
+            setAutomaticPiPEnabled(for: controllerId, enabled: true)
+        }
+    }
+
+    /// Records the viewId whose VC owns/renders the live player (the view that
+    /// played). Used by setAutomaticPipView to arm the correct VC.
+    func setPlayerOwningView(_ viewId: Int64, for controllerId: Int) {
+        playerOwningViewId[controllerId] = viewId
+    }
+
+    /// Last collapse/expand context, or nil if setAutomaticPipView was never called.
+    /// When non-nil it owns auto-PiP arming; legacy paths must not arm independently.
+    func automaticPipContext(for controllerId: Int) -> Bool? {
+        return lastAutoPipContext[controllerId]
+    }
+
+    /// True if the handoff has chosen the OTHER view as on-screen target, so
+    /// play/registration arming doesn't steal auto-PiP back from it.
+    func isAutomaticPipTargetElsewhere(thisViewIsFullscreen: Bool, for controllerId: Int) -> Bool {
+        guard let fullscreenContext = lastAutoPipContext[controllerId] else { return false }
+        return fullscreenContext != thisViewIsFullscreen
+    }
+
+    /// Re-applies the last context when a view registers, but only if that view is
+    /// the intended target (so a stale context can't detach a fresh visible view).
+    @available(iOS 14.2, *)
+    func reapplyAutomaticPipContext(for controllerId: Int, registeringIsFullscreen: Bool) {
+        guard let fullscreenContext = lastAutoPipContext[controllerId],
+              fullscreenContext == registeringIsFullscreen else { return }
+        setAutomaticPipView(for: controllerId, fullscreenContext: fullscreenContext)
+    }
     
     /// Enable automatic PiP for a specific controller and disable for all others
     /// This ensures only one player can enter automatic PiP at a time
@@ -522,6 +757,22 @@ class SharedPlayerManager: NSObject {
         }
         
         if enabled {
+            // Never arm a controller with no live views (e.g. a disposed playlist
+            // track still lingering in a caller's bookkeeping).
+            guard videoPlayerViews.contains(where: { $0.value.view?.controllerId == controllerId }) else {
+                print("⚠️ Skipping auto-PiP arm — no live views for controller \(controllerId)")
+                return
+            }
+
+            // When a floating handoff has chosen an on-screen controller, only that
+            // one may arm — stop a background/adjacent playlist controller (or a
+            // stale disposed one) from re-arming itself and contending.
+            if let active = controllerWithAutomaticPiP, active != controllerId,
+               lastAutoPipContext[active] != nil {
+                print("⚠️ Skipping auto-PiP arm for \(controllerId) — controller \(active) is the on-screen target")
+                return
+            }
+
             // Check if manual PiP is active for this controller
             if isManualPiPActive(controllerId) {
                 print("⚠️ Cannot enable automatic PiP for controller \(controllerId) - manual PiP is active")

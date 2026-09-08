@@ -214,18 +214,17 @@ extension VideoPlayerView {
         }
 
         // --- Set up observers for buffer status and player state ---
+        // Note: addObservers also registers the AVPlayerItemDidPlayToEndTime
+        // notification so shared/Dart-fullscreen views receive end-of-media too.
         addObservers(to: playerItem)
 
         // --- Set up periodic time observer for Now Playing elapsed time updates ---
         setupPeriodicTimeObserver()
 
-        // --- Listen for end of playback ---
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(videoDidEnd),
-            name: .AVPlayerItemDidPlayToEndTime,
-            object: playerItem
-        )
+        // New playback session – clear any stale completion claim from a prior item.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+        }
 
         // --- Observe status (wait for ready) ---
         var statusObserver: NSKeyValueObservation?
@@ -339,19 +338,22 @@ extension VideoPlayerView {
             print("   → currentMediaInfo was nil and SharedPlayerManager has no cached info for controller \(controllerId ?? -1)")
         }
 
-        // Mark this view as the primary (active) view for this controller
-        // This ensures automatic PiP will be enabled on THIS view, not other views
+        // Record that THIS view's controller owns/renders the live player — the
+        // collapse/expand handoff arms this view's VC (not a fixed original VC that
+        // may render nothing in a playlist, where the inline dedicated VC plays).
         if let controllerIdValue = controllerId {
-            SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
+            SharedPlayerManager.shared.setPlayerOwningView(viewId, for: controllerIdValue)
         }
 
-        // Enable automatic PiP for this controller and disable for all others
-        // Only if automatic PiP was requested in creation params
-        if #available(iOS 14.2, *) {
-            if let controllerIdValue = controllerId {
-                // Only enable if the user requested it in creation params
-                let shouldEnableAutoPiP = canStartPictureInPictureAutomatically
-                if shouldEnableAutoPiP {
+        // Mark this view as the primary (active) view for this controller, unless
+        // a collapse/expand handoff has designated the other view as on-screen.
+        if let controllerIdValue = controllerId,
+           !SharedPlayerManager.shared.isAutomaticPipTargetElsewhere(thisViewIsFullscreen: isDartFullscreenView, for: controllerIdValue) {
+            SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
+
+            // Enable automatic PiP for this controller (if requested in creation params).
+            if #available(iOS 14.2, *) {
+                if canStartPictureInPictureAutomatically {
                     SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
                 } else {
                     print("🎬 Automatic PiP not enabled (canStartPictureInPictureAutomatically = false)")
@@ -363,6 +365,12 @@ extension VideoPlayerView {
     func handlePlay(result: @escaping FlutterResult) {
         // Prepare audio session, Now Playing info, and PiP before playback
         prepareForPlayback()
+
+        // User-initiated play starts a new window where `completed` should be
+        // able to fire again when the item reaches end-of-media.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+        }
 
         print("Playing with speed: \(desiredPlaybackSpeed)")
         player?.play()
@@ -395,6 +403,11 @@ extension VideoPlayerView {
     func handleSeekTo(call: FlutterMethodCall, result: @escaping FlutterResult) {
         if let args = call.arguments as? [String: Any],
            let milliseconds = args["milliseconds"] as? Int {
+            // A user-initiated seek (typically away from end-of-media) re-opens
+            // the window for a future `completed` emission.
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
+            }
             let seconds = Double(milliseconds) / 1000.0
             player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 1000)) { _ in
                 self.sendEvent("seek", data: ["position": milliseconds])
@@ -442,8 +455,15 @@ extension VideoPlayerView {
            let looping = args["looping"] as? Bool {
             print("Setting looping to: \(looping)")
 
-            // Update the enableLooping property
+            // Update the per-view flag for backward compatibility.
             enableLooping = looping
+
+            // Mirror into shared storage so whichever view actually handles the
+            // end-of-media notification sees the live value, even if setLooping
+            // was called on a different view for the same controller.
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setLoopingEnabled(for: controllerIdValue, enabled: looping)
+            }
 
             result(nil)
         } else {
@@ -491,13 +511,17 @@ extension VideoPlayerView {
             
             let newItem = AVPlayerItem(url: url)
             player?.replaceCurrentItem(with: newItem)
+            // Move item-scoped observers onto the new item; otherwise status /
+            // buffering / presentationSize events stop firing after a quality
+            // switch and `deinit` would try to unregister from the old item.
+            addObservers(to: newItem)
             player?.seek(to: currentTime)
-            
+
             // Only resume playback if it was playing before
             if wasPlaying {
                 player?.play()
             }
-            
+
             sendEvent("qualityChange", data: [
                 "url": urlString,
                 "label": qualityInfo["label"] as? String ?? "",
@@ -578,12 +602,14 @@ extension VideoPlayerView {
         
         let newItem = AVPlayerItem(url: url)
         player?.replaceCurrentItem(with: newItem)
+        // Move item-scoped observers onto the new item (see handleSetQuality).
+        addObservers(to: newItem)
         player?.seek(to: currentTime)
-        
+
         if wasPlaying {
             player?.play()
         }
-        
+
         sendEvent("qualityChange", data: [
             "url": quality.url,
             "label": quality.label,
@@ -600,7 +626,9 @@ extension VideoPlayerView {
             return
         }
 
-        // Set controls visibility for embedded player
+        // Set controls visibility for embedded player, and keep the inline-slot
+        // cache in sync so an expand handoff doesn't revert this runtime toggle.
+        showNativeControls = show
         playerViewController.showsPlaybackControls = show
 
         // Also set for fullscreen player if it exists
@@ -633,7 +661,7 @@ extension VideoPlayerView {
         }
 
         // Find the root view controller
-        guard let rootViewController = UIApplication.shared.keyWindow?.rootViewController else {
+        guard let rootViewController = UIApplication.shared.activeKeyWindow?.rootViewController else {
             result(FlutterError(code: "NO_VIEW_CONTROLLER", message: "Could not find root view controller", details: nil))
             return
         }
@@ -709,6 +737,19 @@ extension VideoPlayerView {
 
     func handleDispose(result: @escaping FlutterResult) {
         print("🗑️ [VideoPlayerMethodHandler] handleDispose called for controllerId: \(String(describing: controllerId))")
+        isDisposed = true
+        invalidateEventChannel()
+
+        // Clean up rotation container if still on root view.
+        if isUsingNativeLayout {
+            let playerView = playerViewController.view!
+            let container = playerView.superview
+            playerView.removeFromSuperview()
+            container?.removeFromSuperview()
+            isUsingNativeLayout = false
+            flutterParentView = nil
+            print("🧹 [VideoPlayerMethodHandler] Cleaned up rotation container")
+        }
 
         // Pause the player first
         player?.pause()
@@ -718,8 +759,8 @@ extension VideoPlayerView {
         drmHandler?.cleanup()
         drmHandler = nil
 
-        // Clean up remote command ownership (transfer to another view if possible)
-        cleanupRemoteCommandOwnership()
+        // Clear Now Playing outright — never transfer to a sibling dying with the controller
+        clearNowPlayingOnControllerDispose()
 
         // Remove from shared manager if this is a shared player
         if let controllerId = controllerId {
@@ -734,12 +775,11 @@ extension VideoPlayerView {
         player = nil
         print("🧹 [VideoPlayerMethodHandler] Local player reference cleared")
 
-        sendEvent("stopped")
         result(nil)
     }
 
     func handleEnterFullScreen(result: @escaping FlutterResult) {
-        if let viewController = UIApplication.shared.keyWindow?.rootViewController {
+        if let viewController = UIApplication.shared.activeKeyWindow?.rootViewController {
             // Create a NEW player view controller for fullscreen
             // This prevents the embedded view from being removed from Flutter's view hierarchy
             let fullscreenPlayerViewController = AVPlayerViewController()
@@ -954,7 +994,9 @@ extension VideoPlayerView {
         
         return nil
     }
-    
+
+    // MARK: - Floating-player PiP handoff (exactly one bound AVPlayerViewController)
+
 
     func handleExitPictureInPicture(result: @escaping FlutterResult) {
         if #available(iOS 14.0, *) {
@@ -1034,6 +1076,20 @@ extension VideoPlayerView {
         }
     }
 
+    /// Points auto-PiP at the inline or Dart-fullscreen view for this controller,
+    /// so PiP follows the floating player as it collapses/expands.
+    func handleSetAutomaticPipView(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        if #available(iOS 14.2, *) {
+            let fullscreenContext = (call.arguments as? [String: Any])?["fullscreenContext"] as? Bool ?? false
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.setAutomaticPipView(for: controllerIdValue, fullscreenContext: fullscreenContext)
+            }
+            result(true)
+        } else {
+            result(FlutterError(code: "NOT_SUPPORTED", message: "Automatic inline PiP requires iOS 14.2+", details: nil))
+        }
+    }
+
     func handleDisableAutomaticInlinePip(result: @escaping FlutterResult) {
         if #available(iOS 14.2, *) {
             print("🎬 Disabling automatic inline PiP")
@@ -1053,6 +1109,94 @@ extension VideoPlayerView {
         } else {
             result(FlutterError(code: "NOT_SUPPORTED", message: "Automatic inline PiP requires iOS 14.2+", details: nil))
         }
+    }
+
+    /// Toggles `AVPlayerViewController.requiresLinearPlayback` at runtime.
+    /// When true, AVKit hides the scrubber and 15s skip controls (inline +
+    /// PIP). Hosts use this to gate non-premium users out of seeking.
+    func handleSetRequiresLinearPlayback(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let required = args["required"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'required' bool parameter",
+                details: nil
+            ))
+            return
+        }
+        playerViewController.requiresLinearPlayback = required
+        result(nil)
+    }
+
+    /// Toggles AVKit's master PIP switch at runtime. Mirrors the setting to
+    /// `SharedPlayerManager` so view reconstructions don't revert to the
+    /// construction-time default.
+    func handleSetAllowsPictureInPicture(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let allows = args["allows"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'allows' bool parameter",
+                details: nil
+            ))
+            return
+        }
+
+        playerViewController.allowsPictureInPicturePlayback = allows
+
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setAllowsPictureInPicture(for: controllerIdValue, allows: allows)
+        }
+
+        // Only toggle the shared controller's own flag — never setAutomaticPiPEnabled,
+        // which re-points primary at the inline view and fights setAutomaticPipView.
+        if #available(iOS 14.2, *) {
+            if !allows {
+                playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+            } else {
+                if canStartPictureInPictureAutomatically {
+                    playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                }
+
+                // Re-apply ~1s later: AVKit can ignore the immediate set during a
+                // video media-group restore (audio→video toggle).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    guard let self = self else { return }
+                    let stillAllows: Bool
+                    if let controllerIdValue = self.controllerId {
+                        stillAllows = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue)?.allowsPictureInPicture ?? true
+                    } else {
+                        stillAllows = self.playerViewController.allowsPictureInPicturePlayback
+                    }
+                    guard stillAllows, self.canStartPictureInPictureAutomatically else { return }
+                    self.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
+                }
+            }
+        }
+
+        result(true)
+    }
+
+    /// Disallowing external playback drops an active AirPlay session to
+    /// audio-only: video returns to the device, audio stays on the receiver.
+    func handleSetAllowsExternalPlayback(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let allows = args["allows"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'allows' bool parameter",
+                details: nil
+            ))
+            return
+        }
+
+        guard let player = player else {
+            result(nil)
+            return
+        }
+
+        player.allowsExternalPlayback = allows
+        result(nil)
     }
 
     /// Sets up periodic time observer to update Now Playing elapsed time
@@ -1128,12 +1272,14 @@ extension VideoPlayerView {
                 let totalDuration = Int(durationSeconds * 1000) // milliseconds
                 let bufferedPosition = Int(bufferedSeconds * 1000) // milliseconds
 
-                self.sendEvent("timeUpdate", data: [
+                var payload: [String: Any] = [
                     "position": position,
                     "duration": totalDuration,
                     "bufferedPosition": bufferedPosition,
                     "isBuffering": isBuffering
-                ])
+                ]
+                self.appendVideoDimensions(to: &payload)
+                self.sendEvent("timeUpdate", data: payload)
             }
         }
     }
@@ -1280,6 +1426,102 @@ extension VideoPlayerView {
             "isSelected": true
         ])
 
+        result(nil)
+    }
+
+    // MARK: - Video Track Disabling (Background Audio-Only)
+
+    /// Disables or enables the video track for HLS background audio-only streaming.
+    ///
+    /// Uses a two-strategy approach:
+    /// - Strategy 1 (AVMediaSelectionGroup): Deselects the visual media selection group.
+    ///   With demuxed HLS, AVPlayer stops downloading video segments.
+    /// - Strategy 2 (preferredPeakBitRate): Fallback that restricts bitrate to exclude video variants.
+    ///
+    /// When re-enabling, restores default video rendition and clears bitrate restriction.
+    func handleSetVideoTrackDisabled(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let disabled = args["disabled"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'disabled' parameter",
+                details: nil
+            ))
+            return
+        }
+
+        guard let player = player, let playerItem = player.currentItem else {
+            result(nil)
+            return
+        }
+
+        if disabled {
+            // Check if HLS has demuxed (separate) audio tracks.
+            // AVMediaSelectionGroup for .audible is non-nil only when
+            // #EXT-X-MEDIA:TYPE=AUDIO is present with separate audio renditions.
+            // If nil/empty, audio is muxed inside video segments, so skip.
+            let hasDemuxedAudio: Bool
+            if let asset = playerItem.asset as? AVURLAsset,
+               let audioGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .audible
+               ),
+               !audioGroup.options.isEmpty {
+                hasDemuxedAudio = true
+            } else {
+                hasDemuxedAudio = false
+            }
+
+            if !hasDemuxedAudio {
+                result([
+                    "skipped": true,
+                    "reason": "no_demuxed_audio"
+                ])
+                return
+            }
+
+            // Strategy 1: Deselect the visual media selection group (demuxed HLS)
+            if let asset = playerItem.asset as? AVURLAsset,
+               let videoGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .visual
+               ) {
+                playerItem.select(nil, in: videoGroup)
+            }
+
+            // Strategy 2: Restrict bitrate to audio-only threshold (fallback)
+            playerItem.preferredPeakBitRate = 1.0
+        } else {
+            // Re-enable: restore video rendition selection
+            if let asset = playerItem.asset as? AVURLAsset,
+               let videoGroup = asset.mediaSelectionGroup(
+                   forMediaCharacteristic: .visual
+               ) {
+                if let defaultOption = videoGroup.defaultOption {
+                    playerItem.select(defaultOption, in: videoGroup)
+                } else if let firstOption = videoGroup.options.first {
+                    playerItem.select(firstOption, in: videoGroup)
+                }
+            }
+
+            // Clear bitrate restriction (0 = no limit)
+            playerItem.preferredPeakBitRate = 0
+        }
+
+        result(nil)
+    }
+
+    /// Hides or restores this view's lock-screen / Control Center Now Playing
+    /// info without stopping playback (see `setNowPlayingSuppressed`).
+    func handleSetNowPlayingSuppressed(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any],
+              let suppressed = args["suppressed"] as? Bool else {
+            result(FlutterError(
+                code: "INVALID_ARGS",
+                message: "Missing 'suppressed' parameter",
+                details: nil
+            ))
+            return
+        }
+        setNowPlayingSuppressed(suppressed)
         result(nil)
     }
 }

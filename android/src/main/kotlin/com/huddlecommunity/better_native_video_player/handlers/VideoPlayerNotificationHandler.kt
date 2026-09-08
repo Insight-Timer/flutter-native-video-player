@@ -1,34 +1,27 @@
 package com.huddlecommunity.better_native_video_player.handlers
 
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.support.v4.media.session.MediaSessionCompat
-import androidx.core.app.NotificationCompat
-import androidx.media.app.NotificationCompat as MediaNotificationCompat
+import androidx.media3.common.ForwardingPlayer
+import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
-import androidx.media3.session.SessionToken
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.net.URL
+import androidx.media3.session.MediaSession.ConnectionResult
+import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
 
 /**
- * Handles MediaSession and notification controls for lock screen and notification area
- * Equivalent to iOS VideoPlayerNowPlayingHandler
+ * Owns the per-controller [MediaSession] and coordinates foreground-service
+ * lifecycle for audio-only / background playback. The system notification
+ * itself is produced by Media3's DefaultMediaNotificationProvider inside the
+ * service; this class only creates the session and toggles the service on/off.
  */
 class VideoPlayerNotificationHandler(
     private val context: Context,
@@ -36,151 +29,282 @@ class VideoPlayerNotificationHandler(
     private var eventHandler: VideoPlayerEventHandler
 ) {
     companion object {
-        private const val TAG = "VideoPlayerNotification"
-        private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "video_player_channel"
         private var sessionCounter = 0
     }
 
     private var mediaSession: MediaSession? = null
-    private val handler = Handler(Looper.getMainLooper())
-    private var positionUpdateRunnable: Runnable? = null
-    private val notificationManager: NotificationManager =
-        context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-    private var currentArtwork: Bitmap? = null
-    private var currentArtworkUrl: String? = null // Track which artwork we're currently loading
 
-    // Store current metadata separately to avoid reading stale data from player
+    // Current metadata (wrappedPlayer reads these live, no session restart needed)
     private var currentTitle: String = "Video"
     private var currentSubtitle: String = ""
+    private var showSkipControls: Boolean = true
+    private var showSystemPreviousTrackControl: Boolean = false
+    private var showSystemNextTrackControl: Boolean = false
 
-    init {
-        createNotificationChannel()
+    // Tracks whether we've asked the service to host a foreground notification
+    // for this handler. Acts as a state-transition guard against rapid
+    // setVideoTrackDisabled toggles requesting duplicate startForegroundService calls.
+    private var foregroundRequested: Boolean = false
+
+    // Guards release() so both handleDispose and PlatformView.dispose can call it.
+    private var isReleased: Boolean = false
+
+    // True while the media notification is intentionally hidden (the floating player
+    // is hidden behind the sleep mixer). Blocks startForegroundPlayback so the
+    // audio-mode path can't re-show it while suppressed.
+    private var isNowPlayingSuppressed: Boolean = false
+
+    // Whether the foreground notification was showing when suppression began, so
+    // restore only re-shows it if it was actually there before.
+    private var foregroundActiveBeforeSuppress: Boolean = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Set true while the foreground service is being torn down. During teardown,
+    // Android's MediaSessionLegacyStub fires onStop() on the session, which routes
+    // to wrappedPlayer.stop() → ExoPlayer.stop() and drops the player to STATE_IDLE
+    // (wiping the decoded video surface — observed on OnePlus 15 during
+    // video→audio→video toggle). We swallow stop() only while this flag is set,
+    // so legitimate external stops (Bluetooth headset, Android Auto, Assistant,
+    // notification swipe) still work normally.
+    @Volatile
+    private var suppressSystemStop: Boolean = false
+
+    // How long to keep the suppression flag true after stopService(). The onStop
+    // callback is posted asynchronously during service teardown; 500ms is a
+    // generous upper bound — in practice it fires within a few ms.
+    private val suppressSystemStopDurationMs: Long = 500L
+
+    /**
+     * Wraps the ExoPlayer so that seekBack/seekForward can be intercepted when track-navigation
+     * buttons are active. The system notification always calls seekBack()/seekForward() on the
+     * player regardless of custom session commands, so interception must happen here.
+     */
+    private val wrappedPlayer = object : ForwardingPlayer(player) {
+        // Android's MediaSessionLegacyStub fires onStop() on the session while the
+        // foreground service is torn down (e.g. stopForegroundPlayback() →
+        // context.stopService() when exiting audio mode). That callback routes to
+        // ForwardingPlayer.stop() → ExoPlayer.stop() and drops the player to
+        // STATE_IDLE, wiping the decoded video surface (OnePlus 15 repro). We
+        // swallow stop() only while suppressSystemStop is set — legitimate
+        // external transport stops (Bluetooth headset, Android Auto, Assistant,
+        // notification swipe) still pass through.
+        override fun stop() {
+            if (suppressSystemStop) {
+                Log.w("VideoPlayerNH", "Ignoring MediaSession stop() during foreground teardown")
+                return
+            }
+            super.stop()
+        }
+
+        override fun getAvailableCommands(): Player.Commands {
+            val builder = super.getAvailableCommands().buildUpon()
+            if (showSystemPreviousTrackControl) {
+                builder.add(Player.COMMAND_SEEK_TO_PREVIOUS)
+                builder.add(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+            } else {
+                builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                builder.remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+            }
+            if (showSystemNextTrackControl) {
+                builder.add(Player.COMMAND_SEEK_TO_NEXT)
+                builder.add(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+            } else {
+                builder.remove(Player.COMMAND_SEEK_TO_NEXT)
+                builder.remove(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+            }
+            return builder.build()
+        }
+
+        override fun seekBack() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                // Surface the within-track skip so hosts can react (e.g. tracking).
+                eventHandler.sendEvent("seekBack")
+                super.seekBack()
+            }
+        }
+
+        override fun seekForward() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                eventHandler.sendEvent("seekForward")
+                super.seekForward()
+            }
+        }
+
+        // The system notification uses COMMAND_SEEK_TO_PREVIOUS / COMMAND_SEEK_TO_NEXT
+        // (not COMMAND_SEEK_BACK / COMMAND_SEEK_FORWARD) for the ⏮ / ⏭ buttons.
+        // On a single-item ExoPlayer playlist these would seek to position 0 / end of track,
+        // so we must intercept them here as well.
+        override fun seekToPrevious() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                super.seekToPrevious()
+            }
+        }
+
+        override fun seekToPreviousMediaItem() {
+            if (showSystemPreviousTrackControl) {
+                eventHandler.sendEvent("previousTrack")
+            } else {
+                super.seekToPreviousMediaItem()
+            }
+        }
+
+        override fun seekToNext() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                super.seekToNext()
+            }
+        }
+
+        override fun seekToNextMediaItem() {
+            if (showSystemNextTrackControl) {
+                eventHandler.sendEvent("nextTrack")
+            } else {
+                super.seekToNextMediaItem()
+            }
+        }
+    }
+
+    private val mediaSessionCallback = object : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+        ): ConnectionResult {
+            val base = super.onConnect(session, controller)
+            if (!showSkipControls) {
+                // Strip within-track seek (FF/rewind/scrubber). Cross-track skip
+                // (COMMAND_SEEK_TO_NEXT/PREVIOUS and their _MEDIA_ITEM variants)
+                // is gated independently by wrappedPlayer.getAvailableCommands()
+                // via showSystemNextTrackControl / showSystemPreviousTrackControl,
+                // so that non-premium playlist users keep working PIP / Bluetooth /
+                // Wear / Auto skip buttons.
+                val playerCommands = base.availablePlayerCommands.buildUpon()
+                    .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                    .remove(Player.COMMAND_SEEK_BACK)
+                    .remove(Player.COMMAND_SEEK_FORWARD)
+                    .remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
+                    .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM)
+                    .build()
+                return ConnectionResult.accept(base.availableSessionCommands, playerCommands)
+            }
+            return base
+        }
     }
 
     private val playerListener = object : Player.Listener {
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
             if (playWhenReady) {
-                showNotification()
                 eventHandler.sendEvent("play")
             } else {
-                updateNotification()
                 eventHandler.sendEvent("pause")
             }
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             when (playbackState) {
-                Player.STATE_ENDED, Player.STATE_IDLE -> hideNotification()
-                Player.STATE_READY -> if (player.playWhenReady) showNotification()
-            }
-        }
-    }
-
-    /**
-     * Creates notification channel for Android O+
-     */
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Video Player",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Media playback controls"
-                setShowBadge(false)
-            }
-            notificationManager.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created")
-        }
-    }
-
-    /**
-     * Updates the event handler (needed when shared NotificationHandler is reused by new VideoPlayerView)
-     */
-    fun updateEventHandler(newEventHandler: VideoPlayerEventHandler) {
-        eventHandler = newEventHandler
-        Log.d(TAG, "Event handler updated for shared notification handler")
-    }
-
-    /**
-     * Updates the player's current MediaItem metadata (title, artist, album)
-     * This is essential for MediaSession to display correct info in notification
-     */
-    private fun updatePlayerMediaItemMetadata(mediaInfo: Map<String, Any>?) {
-        if (mediaInfo == null) return
-
-        val currentItem = player.currentMediaItem ?: return
-
-        // Build new metadata from mediaInfo
-        val metadataBuilder = MediaMetadata.Builder()
-        (mediaInfo["title"] as? String)?.let { metadataBuilder.setTitle(it) }
-        (mediaInfo["subtitle"] as? String)?.let { metadataBuilder.setArtist(it) }
-        (mediaInfo["album"] as? String)?.let { metadataBuilder.setAlbumTitle(it) }
-
-        // Create updated MediaItem with new metadata
-        val updatedItem = currentItem.buildUpon()
-            .setMediaMetadata(metadataBuilder.build())
-            .build()
-
-        // Replace the MediaItem without interrupting playback
-        val wasPlaying = player.isPlaying
-        val position = player.currentPosition
-        player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
-        player.seekTo(position)
-        if (wasPlaying) player.play()
-
-        Log.d(TAG, "Updated player MediaItem metadata - title: ${mediaInfo["title"]}, subtitle: ${mediaInfo["subtitle"]}")
-    }
-
-    /**
-     * Sets up MediaSession with metadata (title, subtitle, artwork)
-     * Similar to iOS MPNowPlayingInfoCenter - shows on lock screen when playing
-     * MediaSession automatically provides lock screen controls and system media notification
-     */
-    fun setupMediaSession(mediaInfo: Map<String, Any>?) {
-        // Extract metadata from the provided info
-        val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
-        val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
-
-        // Check if media info has actually changed to avoid unnecessary updates
-        val mediaInfoChanged = (newTitle != currentTitle || newSubtitle != currentSubtitle)
-
-        // Store the new metadata
-        currentTitle = newTitle
-        currentSubtitle = newSubtitle
-        Log.d(TAG, "📱 Media info - title: $currentTitle, subtitle: $currentSubtitle, changed: $mediaInfoChanged")
-
-        // If MediaSession already exists, only update if media info changed
-        if (mediaSession != null) {
-            // Only update MediaItem if the info actually changed to avoid playback interruptions
-            if (mediaInfoChanged) {
-                Log.d(TAG, "📱 MediaSession exists - media info changed, updating metadata")
-                currentArtwork = null // Clear old artwork
-                currentArtworkUrl = null // Clear artwork URL to ignore pending loads
-
-                // Update the player's MediaItem with the new metadata
-                updatePlayerMediaItemMetadata(mediaInfo)
-
-                // Load new artwork asynchronously
-                mediaInfo?.let { info ->
-                    updateMediaMetadata(info)
+                Player.STATE_ENDED, Player.STATE_IDLE -> {
+                    // Stop the foreground service when playback ends; Media3 handles
+                    // regular notification updates in all other states.
+                    stopForegroundPlayback()
                 }
-
-                // Update notification with new info
-                handler.post {
-                    if (player.playWhenReady) {
-                        updateNotification()
-                        Log.d(TAG, "✅ Notification updated with new media info")
-                    }
-                }
-            } else {
-                Log.d(TAG, "📱 MediaSession exists - media info unchanged, skipping update to avoid interruption")
+                else -> { /* no-op */ }
             }
-            return
         }
+    }
 
-        // Create pending intent to launch app when notification is clicked
+    /**
+     * Caches track navigation flags from a [mediaInfo] map. Called from
+     * [handleLoad] before [setMediaSource] so [getAvailableCommands] returns the
+     * correct result when ExoPlayer fires `onAvailableCommandsChanged` during
+     * media source preparation, and the system notification shows ⏮/⏭ without
+     * requiring a session recreation.
+     */
+    fun cacheTrackNavFlags(mediaInfo: Map<String, Any>?) {
+        val newShowPrev = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
+        val newShowNext = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
+        setTrackNavFlags(showNext = newShowNext, showPrev = newShowPrev)
+    }
+
+    /**
+     * Single place where the cached `showSystem*TrackControl` booleans are
+     * assigned. The wrapped player's [getAvailableCommands] reads them live, so
+     * any future tweak to the assignment (logging, validation) lands in one
+     * spot rather than in every call site that needs to update them.
+     */
+    private fun setTrackNavFlags(showNext: Boolean, showPrev: Boolean) {
+        showSystemNextTrackControl = showNext
+        showSystemPreviousTrackControl = showPrev
+    }
+
+    /**
+     * Refreshes the system media controls' prev/next button availability without
+     * restarting playback or reloading media. Used by playlist hosts after a
+     * reorder/shuffle moves the playing item — the flags baked in at `load`
+     * time have gone stale.
+     *
+     * Updates the booleans the wrapped player reports via `getAvailableCommands`,
+     * then republishes the session so connected system controllers (notification,
+     * Bluetooth, Android Auto) pick up the new command set via `onConnect`.
+     * Inlines the release + recreate from the seek-permission-change branch of
+     * [setupMediaSession] but deliberately skips [updatePlayerMediaItemMetadata]
+     * so the existing `MediaItem`'s title/artist/album/artwork survives untouched
+     * — the player's current `MediaItem` still holds the metadata from `load`.
+     * No-op when there's no active session yet; the next [setupMediaSession]
+     * will pick up the latest flags as usual.
+     */
+    fun refreshSystemTrackControlsAvailability(
+        showSystemNextTrackControl: Boolean,
+        showSystemPreviousTrackControl: Boolean
+    ) {
+        val flagsChanged =
+            this.showSystemNextTrackControl != showSystemNextTrackControl ||
+                this.showSystemPreviousTrackControl != showSystemPreviousTrackControl
+        setTrackNavFlags(showNext = showSystemNextTrackControl, showPrev = showSystemPreviousTrackControl)
+
+        if (!flagsChanged) return
+
+        val existing = mediaSession ?: return
+
+        // Tear down the existing session so connected controllers re-`onConnect`
+        // against a fresh one that reports the new command set. We can't fire
+        // onAvailableCommandsChanged externally; the wrappedPlayer reads the
+        // updated booleans live, so the new session's getAvailableCommands()
+        // returns the correct ⏮/⏭ availability immediately.
+        val wasActive = VideoPlayerMediaSessionService.getActiveSession() === existing
+        VideoPlayerMediaSessionService.clearActiveSessionIfMatches(existing)
+        existing.release()
+        mediaSession = null
+
+        // Recreate the session — the wrappedPlayer reads the updated booleans
+        // live, so `getAvailableCommands()` on the new session reports the
+        // correct ⏮/⏭ availability immediately. Skip
+        // `updatePlayerMediaItemMetadata` so the existing MediaItem's
+        // title/artist/album/artwork stays intact.
+        createMediaSession()
+
+        // If our session was the foreground service's active one, re-publish
+        // it so the running notification keeps pointing at the new instance.
+        if (wasActive) {
+            mediaSession?.let { VideoPlayerMediaSessionService.setActiveSession(it) }
+        }
+    }
+
+    /**
+     * Builds a fresh [MediaSession] wired to [wrappedPlayer] and assigns it to
+     * [mediaSession]. Shared between [setupMediaSession]'s session-rebuild
+     * branch and [refreshSystemTrackControlsAvailability]. Re-registers
+     * [playerListener] on the player too — `removeListener` is idempotent, so
+     * calling it before `addListener` keeps a previously-registered
+     * subscription from doubling up.
+     */
+    private fun createMediaSession() {
         val packageManager = context.packageManager
         val intent = packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -189,233 +313,207 @@ class VideoPlayerNotificationHandler(
             context,
             0,
             intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
 
-        // Create MediaSession with unique session ID and activity (opens app when notification is tapped)
         val sessionId = "huddle_video_player_${++sessionCounter}"
-        mediaSession = MediaSession.Builder(context, player)
+        mediaSession = MediaSession.Builder(context, wrappedPlayer)
             .setId(sessionId)
             .setSessionActivity(pendingIntent)
+            .setCallback(mediaSessionCallback)
             .build()
 
-        // Add listener to track play/pause events
+        player.removeListener(playerListener)
         player.addListener(playerListener)
-
-        Log.d(TAG, "MediaSession created - lock screen and notification controls active")
-
-        // Set metadata on the player's MediaItem first (for MediaSession to use)
-        mediaInfo?.let { info ->
-            updatePlayerMediaItemMetadata(info)
-            Log.d(TAG, "Initial MediaItem metadata set for new MediaSession")
-        }
-
-        // Load artwork asynchronously if provided
-        mediaInfo?.let { info ->
-            updateMediaMetadata(info)
-        }
-
-        // Start periodic position updates
-        startPositionUpdates()
     }
 
     /**
-     * Shows or updates the media notification
+     * Updates the event handler (needed when shared NotificationHandler is reused by new VideoPlayerView)
      */
-    private fun showNotification() {
+    fun updateEventHandler(newEventHandler: VideoPlayerEventHandler) {
+        eventHandler = newEventHandler
+    }
+
+    /**
+     * Updates the player's current MediaItem metadata (title, artist, album, artwork URI).
+     * Media3's DefaultMediaNotificationProvider reads these values to build the notification.
+     */
+    private fun updatePlayerMediaItemMetadata(mediaInfo: Map<String, Any>?) {
+        if (mediaInfo == null) return
+
+        val currentItem = player.currentMediaItem ?: return
+
+        val metadataBuilder = MediaMetadata.Builder()
+        (mediaInfo["title"] as? String)?.let { metadataBuilder.setTitle(it) }
+        (mediaInfo["subtitle"] as? String)?.let { metadataBuilder.setArtist(it) }
+        (mediaInfo["album"] as? String)?.let { metadataBuilder.setAlbumTitle(it) }
+        (mediaInfo["artworkUrl"] as? String)?.let { artworkUrl ->
+            runCatching { Uri.parse(artworkUrl) }
+                .onSuccess { metadataBuilder.setArtworkUri(it) }
+        }
+
+        val updatedItem = currentItem.buildUpon()
+            .setMediaMetadata(metadataBuilder.build())
+            .build()
+
+        val wasPlaying = player.isPlaying
+        val position = player.currentPosition
+        player.replaceMediaItem(player.currentMediaItemIndex, updatedItem)
+        player.seekTo(position)
+        if (wasPlaying) player.play()
+    }
+
+    /**
+     * Sets up MediaSession with metadata (title, subtitle, artwork).
+     * Similar to iOS MPNowPlayingInfoCenter — provides lock screen controls and system
+     * media notification. The foreground service is NOT started here; call
+     * [startForegroundPlayback] when switching to audio-only or background mode.
+     */
+    fun setupMediaSession(mediaInfo: Map<String, Any>?) {
+        val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
+        val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
+        val newShowSkipControls = (mediaInfo?.get("showSkipControls") as? Boolean) ?: true
+        val newShowSystemPreviousTrackControl = (mediaInfo?.get("showSystemPreviousTrackControl") as? Boolean) ?: false
+        val newShowSystemNextTrackControl = (mediaInfo?.get("showSystemNextTrackControl") as? Boolean) ?: false
+
+        val mediaInfoChanged = (newTitle != currentTitle || newSubtitle != currentSubtitle)
+        val seekPermissionChanged = newShowSkipControls != showSkipControls
+
+        currentTitle = newTitle
+        currentSubtitle = newSubtitle
+        showSkipControls = newShowSkipControls
+        setTrackNavFlags(showNext = newShowSystemNextTrackControl, showPrev = newShowSystemPreviousTrackControl)
+
+        // Recreate MediaSession when seek permissions change so connected system controllers
+        // receive the new command set via onConnect.
+        if (seekPermissionChanged && mediaSession != null) {
+            mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
+            mediaSession?.release()
+            mediaSession = null
+            player.removeListener(playerListener)
+        }
+
+        if (mediaSession != null) {
+            if (mediaInfoChanged) {
+                updatePlayerMediaItemMetadata(mediaInfo)
+            }
+            return
+        }
+
+        createMediaSession()
+
+        mediaInfo?.let { updatePlayerMediaItemMetadata(it) }
+    }
+
+    /**
+     * Starts the foreground service with media notification for audio-only / background
+     * playback. Idempotent: repeated calls while already active are no-ops.
+     *
+     * Only one handler at a time can drive the foreground notification. If another
+     * handler is active, calling this replaces it — by design, because the feature's
+     * contract is "audio-only playback in the background" with a single visible player.
+     */
+    fun startForegroundPlayback() {
+        // Withhold the notification while suppressed (floating player hidden behind
+        // the sleep mixer); setNowPlayingSuppressed(false) re-shows it on restore.
+        if (isNowPlayingSuppressed) return
+        if (foregroundRequested) return
+        val session = mediaSession ?: return
+
+        // Publish our session to the service BEFORE starting it so onStartCommand
+        // always finds a valid session to register — even if another handler's
+        // release() ran concurrently and cleared theirs.
+        VideoPlayerMediaSessionService.setActiveSession(session)
+
+        val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         try {
-            val notification = buildNotification()
-            notificationManager.notify(NOTIFICATION_ID, notification)
-            Log.d(TAG, "Notification shown/updated")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(serviceIntent)
+            } else {
+                context.startService(serviceIntent)
+            }
+            foregroundRequested = true
         } catch (e: Exception) {
-            Log.e(TAG, "Error showing notification: ${e.message}", e)
+            // On Android 12+ background-initiated foreground starts can be blocked
+            // (ForegroundServiceStartNotAllowedException). Revert the active-session
+            // pointer so we don't leave a dangling reference.
+            mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
         }
     }
 
     /**
-     * Updates the existing notification
+     * Stops the foreground service and removes the notification.
+     * Idempotent: safe to call repeatedly.
      */
-    private fun updateNotification() {
-        showNotification()
+    fun stopForegroundPlayback() {
+        if (!foregroundRequested) return
+        foregroundRequested = false
+
+        armSystemStopSuppression()
+
+        mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
+
+        try {
+            val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
+            context.stopService(serviceIntent)
+        } catch (_: Exception) { }
     }
 
     /**
-     * Hides the notification
+     * Guards against MediaSessionLegacyStub.onStop() firing during service teardown.
+     * Cleared on a delayed main-thread post, once the onStop callback has had time to
+     * be processed. Also callable by paths that re-enable the video track while a
+     * teardown may still be in flight.
      */
-    private fun hideNotification() {
-        notificationManager.cancel(NOTIFICATION_ID)
-        Log.d(TAG, "Notification hidden")
+    fun armSystemStopSuppression() {
+        suppressSystemStop = true
+        mainHandler.removeCallbacks(clearSuppressSystemStop)
+        mainHandler.postDelayed(clearSuppressSystemStop, suppressSystemStopDurationMs)
     }
 
+    private val clearSuppressSystemStop = Runnable { suppressSystemStop = false }
+
     /**
-     * Builds the media notification
+     * Hides or restores the media notification without stopping playback. Used when
+     * the floating player is hidden behind another surface (the sleep mixer): the
+     * notification should not linger on a track the user can no longer see, but
+     * playback keeps running so it can be revealed again on return.
      */
-    private fun buildNotification(): Notification {
-        val session = mediaSession ?: throw IllegalStateException("MediaSession not initialized")
+    fun setNowPlayingSuppressed(suppressed: Boolean) {
+        if (isNowPlayingSuppressed == suppressed) return
 
-        // Read metadata from the player's current MediaItem (source of truth for MediaSession)
-        // This ensures the notification always shows what the MediaSession is actually playing
-        val mediaMetadata = player.currentMediaItem?.mediaMetadata
-        val title = mediaMetadata?.title?.toString() ?: currentTitle
-        val artist = mediaMetadata?.artist?.toString() ?: currentSubtitle
-
-        // Create pending intent for the notification
-        val packageManager = context.packageManager
-        val intent = packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-        } ?: Intent()
-        val contentIntent = PendingIntent.getActivity(
-            context,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        Log.d(TAG, "Building notification - title: $title, subtitle: $artist (from player: ${mediaMetadata != null})")
-
-        // Get notification icon from the app's resources
-        val appInfo = context.applicationInfo
-        val iconResId = appInfo.icon
-
-        // Convert Media3 SessionToken to MediaSessionCompat.Token for notification
-        // Media3 1.4.0+ requires us to extract the token differently
-        val token = try {
-            // Use reflection to access the session compat token
-            val method = session.javaClass.getMethod("getSessionCompatToken")
-            method.invoke(session) as? MediaSessionCompat.Token
-        } catch (e: Exception) {
-            // If reflection fails (Media3 1.4.0+), create a token from the session's underlying binder
-            Log.w(TAG, "getSessionCompatToken not available, using alternative method")
-            null
-        }
-
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(artist)
-            .setSmallIcon(iconResId)
-            .setLargeIcon(currentArtwork)
-            .setContentIntent(contentIntent)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setOnlyAlertOnce(true)
-            .setShowWhen(false)
-
-        // Only set media session token if we successfully obtained it
-        if (token != null) {
-            builder.setStyle(
-                MediaNotificationCompat.MediaStyle()
-                    .setMediaSession(token)
-            )
+        if (suppressed) {
+            foregroundActiveBeforeSuppress = foregroundRequested
+            stopForegroundPlayback()
+            isNowPlayingSuppressed = true
         } else {
-            // Fallback: create notification without media session integration
-            // Controls will still work through MediaSession, just not integrated in notification
-            Log.w(TAG, "Creating notification without MediaSession token integration")
-        }
-
-        return builder.build()
-    }
-
-    /**
-     * Updates media metadata (title, artist, artwork)
-     * This is called after the MediaItem is already set, so we just load artwork
-     * The base metadata was already set when creating the MediaItem
-     */
-    fun updateMediaMetadata(mediaInfo: Map<String, Any>) {
-        // Load artwork asynchronously if present and update the notification
-        val artworkUrl = mediaInfo["artworkUrl"] as? String
-        if (artworkUrl != null) {
-            currentArtworkUrl = artworkUrl // Track the current artwork URL
-            loadArtwork(artworkUrl) { bitmap ->
-                // Only use this artwork if it's still the current one (prevent race conditions)
-                if (artworkUrl != currentArtworkUrl) {
-                    Log.d(TAG, "Ignoring outdated artwork for $artworkUrl")
-                    return@loadArtwork
-                }
-
-                bitmap?.let {
-                    currentArtwork = it
-
-                    // Update notification directly with the new artwork
-                    // DO NOT call replaceMediaItem here as it can interrupt playback
-                    // The notification will use currentArtwork automatically
-                    if (player.playWhenReady) {
-                        handler.post {
-                            updateNotification()
-                            Log.d(TAG, "Artwork loaded and notification updated for $artworkUrl")
-                        }
-                    } else {
-                        Log.d(TAG, "Artwork loaded but player not ready, will show on next play")
-                    }
-                }
+            isNowPlayingSuppressed = false
+            if (foregroundActiveBeforeSuppress) {
+                startForegroundPlayback()
             }
-        }
-
-        Log.d(TAG, "Media metadata setup complete")
-    }
-
-    /**
-     * Loads artwork from URL
-     */
-    private fun loadArtwork(url: String, callback: (Bitmap?) -> Unit) {
-        CoroutineScope(Dispatchers.IO).launch {
-            try {
-                val connection = URL(url).openConnection()
-                val bitmap = BitmapFactory.decodeStream(connection.getInputStream())
-                withContext(Dispatchers.Main) {
-                    callback(bitmap)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error loading artwork: ${e.message}", e)
-                withContext(Dispatchers.Main) {
-                    callback(null)
-                }
-            }
+            foregroundActiveBeforeSuppress = false
         }
     }
 
     /**
-     * Converts Bitmap to ByteArray
-     */
-    private fun bitmapToByteArray(bitmap: Bitmap): ByteArray {
-        val stream = java.io.ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
-        return stream.toByteArray()
-    }
-
-    /**
-     * Starts periodic position updates (every second)
-     */
-    private fun startPositionUpdates() {
-        positionUpdateRunnable = object : Runnable {
-            override fun run() {
-                // Position is automatically updated by ExoPlayer/MediaSession
-                handler.postDelayed(this, 1000)
-            }
-        }
-        handler.post(positionUpdateRunnable!!)
-    }
-
-    /**
-     * Stops periodic position updates
-     */
-    private fun stopPositionUpdates() {
-        positionUpdateRunnable?.let { handler.removeCallbacks(it) }
-        positionUpdateRunnable = null
-    }
-
-    /**
-     * Releases MediaSession and hides notification
+     * Releases MediaSession and tears down the foreground service if we own it.
+     * Safe to call multiple times.
      */
     fun release() {
-        stopPositionUpdates()
-        player.removeListener(playerListener)
-        hideNotification()
+        if (isReleased) return
+        isReleased = true
 
+        player.removeListener(playerListener)
+
+        stopForegroundPlayback()
+        mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
         mediaSession?.release()
         mediaSession = null
-        currentArtwork = null
-        currentArtworkUrl = null
+
+        mainHandler.removeCallbacks(clearSuppressSystemStop)
+        suppressSystemStop = false
+
         currentTitle = "Video"
         currentSubtitle = ""
-        Log.d(TAG, "MediaSession released")
     }
 }

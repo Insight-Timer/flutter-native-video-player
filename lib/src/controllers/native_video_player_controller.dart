@@ -13,6 +13,7 @@ import '../models/native_video_player_media_info.dart';
 import '../models/native_video_player_quality.dart';
 import '../models/native_video_player_state.dart';
 import '../models/native_video_player_subtitle_track.dart';
+import '../models/native_video_player_track_disable_result.dart';
 import '../platform/platform_utils.dart';
 import '../platform/video_player_method_channel.dart';
 import '../services/airplay_state_manager.dart';
@@ -48,10 +49,12 @@ class NativeVideoPlayerController {
     this.mediaInfo,
     this.allowsPictureInPicture = true,
     this.canStartPictureInPictureAutomatically = true,
+    this.allowsVideoFrameAnalysis = true,
     this.lockToLandscape = true,
     this.enableHDR = true,
     this.enableLooping = false,
     this.showNativeControls = true,
+    this.useAspectFill = false,
     List<DeviceOrientation>? preferredOrientations,
   }) {
     // Set preferred orientations if provided
@@ -63,9 +66,6 @@ class NativeVideoPlayerController {
     if (!kIsWeb && Platform.isAndroid) {
       WidgetsBinding.instance.addObserver(_AppLifecycleObserver(this));
     }
-
-    // Set up controller-level event channel for persistent events (PiP, AirPlay)
-    _setupControllerEventChannel();
   }
 
   /// Initialize the controller and wait for the platform view to be created
@@ -130,6 +130,12 @@ class NativeVideoPlayerController {
   /// Whether PiP can start automatically when app goes to background (iOS 14.2+)
   final bool canStartPictureInPictureAutomatically;
 
+  /// Whether iOS video frame analysis features such as Live Text are allowed.
+  ///
+  /// On iOS 16+, `AVPlayerViewController` can show a system analysis button over
+  /// video content when this is enabled.
+  final bool allowsVideoFrameAnalysis;
+
   /// Whether to enable HDR playback (default: false)
   /// When set to false, HDR is disabled to prevent washed-out/too-white video appearance
   final bool enableHDR;
@@ -141,6 +147,12 @@ class NativeVideoPlayerController {
   /// Whether to show native player controls (default: true)
   /// When set to false, native controls are hidden. Custom overlays automatically hide native controls regardless of this setting.
   final bool showNativeControls;
+
+  /// Whether to render video in aspect-fill mode (zoom/crop to fill).
+  /// When false, uses aspect-fit. Mutable so [setUseAspectFill] updates it and
+  /// a platform view re-created later (e.g. after reparenting) picks up the
+  /// current mode via [creationParams] instead of reverting to the initial one.
+  bool useAspectFill;
 
   /// BuildContext getter for showing Dart fullscreen dialog
   /// Returns a mounted context from any registered platform view
@@ -201,6 +213,10 @@ class NativeVideoPlayerController {
 
   /// Set of platform view IDs that are using this controller
   final Set<int> _platformViewIds = <int>{};
+
+  /// Secondary "fullscreen-context" view IDs (e.g. the floating mini-preview).
+  /// They render shared frames only and must never become the command target.
+  final Set<int> _fullscreenContextViewIds = <int>{};
 
   /// Primary platform view ID (most recent one registered)
   int? _primaryPlatformViewId;
@@ -807,12 +823,14 @@ class NativeVideoPlayerController {
     'allowsPictureInPicture': allowsPictureInPicture,
     'canStartPictureInPictureAutomatically':
         canStartPictureInPictureAutomatically,
+    'allowsVideoFrameAnalysis': allowsVideoFrameAnalysis,
     'showNativeControls': _hasCustomOverlay
         ? false
         : showNativeControls, // Hide native controls if we have custom overlay, otherwise use parameter
     'isFullScreen': _state.isFullScreen,
     'enableHDR': enableHDR,
     'enableLooping': enableLooping,
+    'useAspectFill': useAspectFill,
     if (mediaInfo != null) 'mediaInfo': mediaInfo!.toMap(),
   };
 
@@ -847,19 +865,25 @@ class NativeVideoPlayerController {
   /// - platformViewId: The unique ID assigned by Flutter to the platform view
   Future<void> onPlatformViewCreated(
     int platformViewId,
-    BuildContext context,
-  ) async {
+    BuildContext context, {
+    bool isFullscreenContext = false,
+  }) async {
     // Check if we're reconnecting BEFORE adding the new view ID
     final bool wasDisconnected = _platformViewIds.isEmpty;
 
     _platformViewIds.add(platformViewId);
+    if (isFullscreenContext) {
+      _fullscreenContextViewIds.add(platformViewId);
+    }
 
     // Store context for Dart fullscreen
     _platformViewContexts[platformViewId] = context;
 
-    // Always update to use the most recent platform view
-    // This ensures commands go to the active view
-    _updateMethodChannel(platformViewId);
+    // Only the inline view owns the method channel; a fullscreen-context view
+    // is adopted only if there's no primary yet.
+    if (!isFullscreenContext || _primaryPlatformViewId == null) {
+      _updateMethodChannel(platformViewId);
+    }
 
     // If we're reconnecting after all platform views were disposed, refresh availability flags
     if (wasDisconnected) {
@@ -884,6 +908,8 @@ class NativeVideoPlayerController {
     }
 
     _emitCurrentState();
+
+    unawaited(_setupControllerEventChannelWithRetry());
 
     // ALWAYS notify all event handler listeners about the current state
     // This ensures listeners added via add*Listener methods receive the current state
@@ -1024,19 +1050,55 @@ class NativeVideoPlayerController {
   /// This channel receives PiP and AirPlay events independently of platform views.
   /// It persists even when all platform views are disposed, allowing events to
   /// flow after calling releaseResources(). Only disposed when controller.dispose() is called.
-  void _setupControllerEventChannel() {
-    _controllerEventChannel = EventChannel(
+  Future<void> _setupControllerEventChannelWithRetry() async {
+    if (kIsWeb || !Platform.isIOS || _isDisposed) {
+      return;
+    }
+
+    if (_controllerEventSubscription != null) {
+      return;
+    }
+
+    _controllerEventChannel ??= EventChannel(
       'native_video_player_controller_$id',
     );
-    _controllerEventSubscription = _controllerEventChannel!
-        .receiveBroadcastStream()
-        .listen(
-          _handleControllerEvent,
-          onError: (dynamic error) {
-            debugPrint('Controller event channel error: $error');
-          },
-          cancelOnError: false,
-        );
+
+    const List<int> delays = <int>[0, 50, 100, 200, 400];
+
+    for (final delay in delays) {
+      if (_isDisposed || _controllerEventSubscription != null) {
+        return;
+      }
+
+      if (delay > 0) {
+        await Future<void>.delayed(Duration(milliseconds: delay));
+      }
+
+      try {
+        _controllerEventSubscription = _controllerEventChannel!
+            .receiveBroadcastStream()
+            .listen(
+              _handleControllerEvent,
+              onError: (dynamic error) {
+                if (kDebugMode &&
+                    !_isIgnorableControllerChannelSetupError(error)) {
+                  debugPrint('Controller event channel error: $error');
+                }
+              },
+              cancelOnError: false,
+            );
+        return;
+      } catch (e) {
+        if (_isIgnorableControllerChannelSetupError(e)) {
+          continue;
+        }
+
+        if (kDebugMode) {
+          debugPrint('Controller event channel setup error: $e');
+        }
+        return;
+      }
+    }
   }
 
   /// Handles events from the controller-level event channel
@@ -1558,15 +1620,43 @@ class NativeVideoPlayerController {
     }
     try {
       await subscription.cancel();
-    } on MissingPluginException {
-      // Native side has already disposed the EventChannel StreamHandler
-      // This is harmless and safe to ignore
     } catch (e) {
+      if (_isIgnorableStreamCancellationError(e)) {
+        return;
+      }
+
       // Log other exceptions in debug mode for debugging purposes
       if (kDebugMode) {
         debugPrint('Error cancelling subscription: $e');
       }
     }
+  }
+
+  bool _isIgnorableStreamCancellationError(Object error) {
+    if (error is MissingPluginException) {
+      return true;
+    }
+
+    if (error is! PlatformException) {
+      return false;
+    }
+
+    return error.code == 'error' &&
+        (error.message?.contains('No active stream to cancel') ?? false);
+  }
+
+  bool _isIgnorableControllerChannelSetupError(Object error) {
+    if (error is MissingPluginException) {
+      return true;
+    }
+
+    if (error is! PlatformException) {
+      return false;
+    }
+
+    return error.code == 'channel-error' &&
+        (error.message?.contains('Unable to establish connection on channel') ??
+            false);
   }
 
   /// Called when a platform view is disposed
@@ -1579,16 +1669,20 @@ class NativeVideoPlayerController {
   void onPlatformViewDisposed(int platformViewId) {
     _platformViewIds.remove(platformViewId);
     _platformViewContexts.remove(platformViewId);
+    _fullscreenContextViewIds.remove(platformViewId);
 
     // Cancel the event channel subscription for this platform view
     unawaited(_safeCancelSubscription(_eventSubscriptions[platformViewId]));
     _eventSubscriptions.remove(platformViewId);
 
-    // If the disposed view was the primary view, switch to another active view
+    // If the primary view was disposed, promote another view, preferring an
+    // inline view over a fullscreen-context one.
     if (_primaryPlatformViewId == platformViewId &&
         _platformViewIds.isNotEmpty) {
-      // Use the most recent remaining view
-      final newPrimaryViewId = _platformViewIds.last;
+      final newPrimaryViewId = _platformViewIds.lastWhere(
+        (id) => !_fullscreenContextViewIds.contains(id),
+        orElse: () => _platformViewIds.last,
+      );
       _updateMethodChannel(newPrimaryViewId);
     }
   }
@@ -1801,6 +1895,89 @@ class NativeVideoPlayerController {
     await _methodChannel?.setSubtitleTrack(track);
   }
 
+  /// Disables or enables the video track for background audio-only playback.
+  ///
+  /// When [disabled] is true, the native player stops downloading video
+  /// segments from demuxed HLS streams while audio continues uninterrupted.
+  ///
+  /// Bandwidth only — this does not post a media notification. Call
+  /// [setBackgroundPlaybackActive] for that, and prefer it alone when an
+  /// uninterrupted picture on return matters more than the saved segments:
+  /// disabling the track releases the video renderer, so resuming rebuilds the
+  /// decoder and re-buffers.
+  ///
+  /// Contract:
+  /// - The caller owns lifecycle: toggle from a `WidgetsBindingObserver` /
+  ///   `AppLifecycleState` listener — this plugin does not watch app state.
+  /// - On iOS, the host app must include `audio` in `UIBackgroundModes` for
+  ///   playback to survive backgrounding.
+  /// - If the stream has no demuxed audio rendition (audio is muxed into video
+  ///   segments), disabling video would kill audio too, so the call is a
+  ///   no-op and returns [VideoTrackDisableStatus.skippedNoDemuxedAudio].
+  ///
+  /// Throws [PlatformException] on native errors so callers can react.
+  Future<VideoTrackDisableResult> setVideoTrackDisabled(bool disabled) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return const VideoTrackDisableResult(VideoTrackDisableStatus.skipped);
+    }
+    return channel.setVideoTrackDisabled(disabled);
+  }
+
+  /// Starts or stops background playback: on Android, a foreground
+  /// MediaSessionService so audio keeps playing with a lock-screen notification
+  /// while the app is backgrounded.
+  ///
+  /// Independent of [setVideoTrackDisabled] — the video renderer stays intact,
+  /// so returning to the app re-attaches the existing surface instead of
+  /// rebuilding the decoder. Same lifecycle contract: the caller drives this
+  /// from an `AppLifecycleState` listener; the plugin does not watch app state.
+  ///
+  /// No-op on iOS, where `UIBackgroundModes` governs background audio.
+  Future<void> setBackgroundPlaybackActive(bool active) async {
+    final channel = _methodChannel;
+    if (channel == null) return;
+    return channel.setBackgroundPlaybackActive(active);
+  }
+
+  /// Hides or restores the lock-screen / notification "Now Playing" entry for
+  /// the current media without stopping playback.
+  ///
+  /// Used when the floating player is hidden behind another surface (the sleep
+  /// mixer): the OS media controls should not linger on a track the user can no
+  /// longer see, but playback keeps running so it can be revealed again on
+  /// return. Returns immediately when the controller hasn't been initialized yet.
+  Future<void> setNowPlayingSuppressed(bool suppressed) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return;
+    }
+    await channel.setNowPlayingSuppressed(suppressed);
+  }
+
+  /// Refreshes the system media controls (lock-screen / notification next/prev
+  /// availability) for the currently-loaded media without restarting playback.
+  ///
+  /// Playlist hosts call this after reorder/shuffle moves the playing item so
+  /// the OS-rendered prev/next buttons match the item's new queue neighbours.
+  /// The track-navigation booleans set at `load` time go stale otherwise and
+  /// keep showing the pre-reorder state until the next `load`.
+  ///
+  /// Returns immediately when the controller hasn't been initialized yet.
+  Future<void> updateTrackNavFlags({
+    required bool showSystemNextTrackControl,
+    required bool showSystemPreviousTrackControl,
+  }) async {
+    final channel = _methodChannel;
+    if (channel == null) {
+      return;
+    }
+    await channel.updateTrackNavFlags(
+      showSystemNextTrackControl: showSystemNextTrackControl,
+      showSystemPreviousTrackControl: showSystemPreviousTrackControl,
+    );
+  }
+
   /// Returns whether Picture-in-Picture is available on this device
   /// Checks the actual device capabilities rather than just the platform
   /// PiP is available on iOS 14+ and Android 8+ (if the device supports it)
@@ -1982,6 +2159,17 @@ class NativeVideoPlayerController {
     }
   }
 
+  /// Points auto-PiP at the inline ([fullscreenContext] false) or the
+  /// Dart-fullscreen/floating ([fullscreenContext] true) view. iOS-only;
+  /// no-ops on Android/web where the floating package handles PiP.
+  Future<void> setAutomaticPipView({required bool fullscreenContext}) async {
+    if (_methodChannel == null || (!kIsWeb && Platform.isAndroid)) return;
+    await _methodChannel!.setAutomaticPipView(
+      fullscreenContext: fullscreenContext,
+      controllerId: id,
+    );
+  }
+
   /// Disables automatic inline Picture-in-Picture mode
   ///
   /// When disabled, PiP will NOT automatically start when the app goes to background.
@@ -2020,6 +2208,51 @@ class NativeVideoPlayerController {
     } catch (e) {
       debugPrint('Error disabling automatic inline PiP: $e');
       return false;
+    }
+  }
+
+  /// Toggles `AVPlayerViewController.requiresLinearPlayback` (iOS-only).
+  /// When `true`, AVKit hides the scrubber and 15s skip-back/forward
+  /// controls in both inline and PIP UIs. Used to gate non-premium users
+  /// out of seeking. No-op on Android/web.
+  Future<void> setRequiresLinearPlayback(bool required) async {
+    if (_methodChannel == null) return;
+    if (kIsWeb || !Platform.isIOS) return;
+    try {
+      await _methodChannel!.setRequiresLinearPlayback(required);
+    } catch (e) {
+      debugPrint('Error setting requiresLinearPlayback: $e');
+    }
+  }
+
+  /// Hard-toggles AVKit's master `allowsPictureInPicturePlayback` at runtime
+  /// (iOS). `false` blocks all PIP entry paths and survives view reconstruction.
+  /// No-op on Android/web. Returns `true` on successful iOS call.
+  Future<bool> setAllowsPictureInPicture(bool allows) async {
+    if (_methodChannel == null) {
+      return false;
+    }
+    if (kIsWeb || !Platform.isIOS) {
+      return false;
+    }
+    try {
+      return await _methodChannel!.setAllowsPictureInPicture(allows);
+    } catch (e) {
+      debugPrint('Error setting allowsPictureInPicture: $e');
+      return false;
+    }
+  }
+
+  /// Toggles AVPlayer's `allowsExternalPlayback`. `false` drops an active
+  /// AirPlay session to audio-only — video returns to the device while audio
+  /// keeps streaming to the receiver. No-op on Android/web.
+  Future<void> setAllowsExternalPlayback(bool allows) async {
+    if (_methodChannel == null) return;
+    if (kIsWeb || !Platform.isIOS) return;
+    try {
+      await _methodChannel!.setAllowsExternalPlayback(allows);
+    } catch (e) {
+      debugPrint('Error setting allowsExternalPlayback: $e');
     }
   }
 
@@ -2150,6 +2383,32 @@ class NativeVideoPlayerController {
   /// - show: true to show native controls, false to hide them
   Future<void> setShowNativeControls(bool show) async {
     await _methodChannel?.setShowNativeControls(show);
+  }
+
+  /// Sets native render mode to aspect-fill (true) or aspect-fit (false).
+  Future<void> setUseAspectFill(bool enabled) async {
+    // Persist so a platform view created after this call (e.g. the surface is
+    // reparented between inline and full-screen) comes up in the current mode.
+    useAspectFill = enabled;
+    await _methodChannel?.setUseAspectFill(enabled);
+  }
+
+  /// Returns native video dimensions if available.
+  Future<Map<String, int>?> getVideoDimensions() async {
+    return await _methodChannel?.getVideoDimensions();
+  }
+
+  /// Reparents the native player view to the root UIViewController with
+  /// edge-pinned Auto Layout constraints so iOS orientation animations
+  /// keep the video centered.  Call before an orientation transition.
+  Future<void> useNativeLayout() async {
+    await _methodChannel?.useNativeLayout();
+  }
+
+  /// Returns the native player view to Flutter's layout control.
+  /// Call after the orientation transition has settled.
+  Future<void> useFlutterLayout() async {
+    await _methodChannel?.useFlutterLayout();
   }
 
   /// Checks if AirPlay is available on the device
@@ -2301,6 +2560,7 @@ class NativeVideoPlayerController {
     // Clear platform view references
     _platformViewIds.clear();
     _platformViewContexts.clear();
+    _fullscreenContextViewIds.clear();
     _primaryPlatformViewId = null;
 
     // Clear method channel reference (but don't dispose native player)
