@@ -30,6 +30,8 @@ class NativeVideoPlayer extends StatefulWidget {
     this.isFullscreenContext = false,
     this.onViewCreated,
     this.onReadyForDisplay,
+    this.useTextureView = false,
+    this.maxVideoHeight,
     super.key,
   });
 
@@ -62,6 +64,15 @@ class NativeVideoPlayer extends StatefulWidget {
   /// iOS-only. Called when this view gains or loses a picture. A host covering
   /// the player with a poster can lift it the moment there is a frame.
   final void Function(bool isReadyForDisplay)? onReadyForDisplay;
+
+  /// Android only: back the view with a TextureView instead of a SurfaceView, so Flutter
+  /// composites it as a texture layer rather than falling back to hybrid composition.
+  /// Use it for inline previews inside scrolling content; leave false for full-screen playback.
+  final bool useTextureView;
+
+  /// Android only: caps adaptive track selection at this video height in pixels while this
+  /// view is the one showing the player. Null lifts any cap a previous view set.
+  final int? maxVideoHeight;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -245,6 +256,12 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     }
     if (widget.onReadyForDisplay != null) {
       params['observesReadyForDisplay'] = true;
+    }
+    if (widget.useTextureView) {
+      params['useTextureView'] = true;
+    }
+    if (widget.maxVideoHeight != null) {
+      params['maxVideoHeight'] = widget.maxVideoHeight;
     }
     return params;
   }
