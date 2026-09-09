@@ -200,6 +200,12 @@ class SharedPlayerManager: NSObject {
         return mediaInfoCache[controllerId]
     }
 
+    /// Forgets a controller's media info, so a view taking ownership later has
+    /// nothing to republish. Used when a player stops publishing to the system.
+    func clearMediaInfo(for controllerId: Int) {
+        mediaInfoCache.removeValue(forKey: controllerId)
+    }
+
     // MARK: - Looping State
 
     /// Sets the looping flag for a controller so all views share the same value.

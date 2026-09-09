@@ -305,10 +305,6 @@ extension VideoPlayerView {
     /// Prepares the player for playback by setting up audio session, Now Playing info, and PiP
     /// This should be called before starting playback to ensure proper background audio and lock screen controls
     private func prepareForPlayback() {
-        // CRITICAL: Activate audio session BEFORE calling player.play()
-        // This ensures audio continues when the screen locks
-        prepareAudioSession()
-
         // ALWAYS set media item on play to ensure this player has control
         // This is critical for both normal playback and PiP mode
         var mediaInfo = currentMediaInfo
@@ -323,6 +319,12 @@ extension VideoPlayerView {
         }
 
         if let mediaInfo = mediaInfo {
+            // Activated only for a player that publishes: doing it before knowing
+            // means a player with no media info still claims the audio session, and
+            // iOS then renders it as a blank Now Playing tile on the lock screen.
+            // Must still happen BEFORE play(), or audio stops when the screen locks.
+            prepareAudioSession()
+
             let title = mediaInfo["title"] ?? "Unknown"
             print("📱 Setting Now Playing info for: \(title)")
             setupNowPlayingInfo(mediaInfo: mediaInfo)
@@ -334,8 +336,9 @@ extension VideoPlayerView {
                 print("⚠️  Failed to set Now Playing info")
             }
         } else {
-            print("⚠️  No media info available when playing - media controls will not work correctly")
-            print("   → currentMediaInfo was nil and SharedPlayerManager has no cached info for controller \(controllerId ?? -1)")
+            // No media info is a deliberate state for a muted preview, not a fault:
+            // it publishes nothing and leaves the audio session to whoever owns it.
+            print("ℹ️  No media info - this player publishes no Now Playing entry")
         }
 
         // Record that THIS view's controller owns/renders the live player — the

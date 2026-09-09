@@ -34,6 +34,13 @@ class VideoPlayerNotificationHandler(
 
     private var mediaSession: MediaSession? = null
 
+    /**
+     * False once [releaseMediaSession] has dropped the session on purpose. Guards
+     * [setupMediaSession], which the observer calls on every play — a sibling view
+     * holding stale media info would otherwise rebuild what we just took away.
+     */
+    private var isMediaSessionEnabled = true
+
     // Current metadata (wrappedPlayer reads these live, no session restart needed)
     private var currentTitle: String = "Video"
     private var currentSubtitle: String = ""
@@ -370,6 +377,7 @@ class VideoPlayerNotificationHandler(
      * [startForegroundPlayback] when switching to audio-only or background mode.
      */
     fun setupMediaSession(mediaInfo: Map<String, Any>?) {
+        if (!isMediaSessionEnabled) return
         val newTitle = (mediaInfo?.get("title") as? String) ?: "Video"
         val newSubtitle = (mediaInfo?.get("subtitle") as? String) ?: ""
         val newShowSkipControls = (mediaInfo?.get("showSkipControls") as? Boolean) ?: true
@@ -386,12 +394,7 @@ class VideoPlayerNotificationHandler(
 
         // Recreate MediaSession when seek permissions change so connected system controllers
         // receive the new command set via onConnect.
-        if (seekPermissionChanged && mediaSession != null) {
-            mediaSession?.let { VideoPlayerMediaSessionService.clearActiveSessionIfMatches(it) }
-            mediaSession?.release()
-            mediaSession = null
-            player.removeListener(playerListener)
-        }
+        if (seekPermissionChanged) teardownMediaSession()
 
         if (mediaSession != null) {
             if (mediaInfoChanged) {
@@ -403,6 +406,33 @@ class VideoPlayerNotificationHandler(
         createMediaSession()
 
         mediaInfo?.let { updatePlayerMediaItemMetadata(it) }
+    }
+
+    /**
+     * Drops the media session, taking its notification and system controls with it,
+     * and keeps it dropped until [enableMediaSession].
+     *
+     * Used by players that should publish nothing at all — a muted preview playing
+     * behind a tile. Idempotent: safe to call with no session.
+     */
+    fun releaseMediaSession() {
+        isMediaSessionEnabled = false
+        stopForegroundPlayback()
+        teardownMediaSession()
+    }
+
+    /** Lets [setupMediaSession] publish again after [releaseMediaSession]. */
+    fun enableMediaSession() {
+        isMediaSessionEnabled = true
+    }
+
+    /** Releases the session itself, leaving [isMediaSessionEnabled] alone. */
+    private fun teardownMediaSession() {
+        val existing = mediaSession ?: return
+        VideoPlayerMediaSessionService.clearActiveSessionIfMatches(existing)
+        existing.release()
+        mediaSession = null
+        player.removeListener(playerListener)
     }
 
     /**
