@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- PlayerView backed by a TextureView (default is a SurfaceView). A TextureView
      lives in the normal view hierarchy, so a Flutter ClipRRect can round its
-     corners on every device. Used only for the floating player's preview view
-     (isDartFullscreen); the full-screen player keeps the default SurfaceView. -->
+     corners on every device and Flutter can composite it as a texture layer.
+     Used for the floating player's preview view (isDartFullscreen) and inline
+     previews (useTextureView); the full-screen player keeps the default SurfaceView. -->
 <androidx.media3.ui.PlayerView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"

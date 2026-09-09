@@ -28,6 +28,8 @@ class NativeVideoPlayer extends StatefulWidget {
     this.overlayBuilder,
     this.overlayFadeDuration = const Duration(milliseconds: 300),
     this.isFullscreenContext = false,
+    this.useTextureView = false,
+    this.maxVideoHeight,
     super.key,
   });
 
@@ -50,6 +52,15 @@ class NativeVideoPlayer extends StatefulWidget {
   /// Passed to the platform view as [isDartFullscreen] so iOS can use a dedicated
   /// AVPlayerViewController and avoid moving the shared view away from the inline slot.
   final bool isFullscreenContext;
+
+  /// Android only: back the view with a TextureView instead of a SurfaceView, so Flutter
+  /// composites it as a texture layer rather than falling back to hybrid composition.
+  /// Use it for inline previews inside scrolling content; leave false for full-screen playback.
+  final bool useTextureView;
+
+  /// Android only: caps adaptive track selection at this video height in pixels while this
+  /// view is the one showing the player. Null lifts any cap a previous view set.
+  final int? maxVideoHeight;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -219,6 +230,12 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     );
     if (widget.isFullscreenContext) {
       params['isDartFullscreen'] = true;
+    }
+    if (widget.useTextureView) {
+      params['useTextureView'] = true;
+    }
+    if (widget.maxVideoHeight != null) {
+      params['maxVideoHeight'] = widget.maxVideoHeight;
     }
     return params;
   }
