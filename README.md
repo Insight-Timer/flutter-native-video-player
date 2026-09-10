@@ -1166,7 +1166,7 @@ class _MultiPlayerScreenState extends State<MultiPlayerScreen> {
 | `id` | `int` | required | Unique identifier for the player instance |
 | `autoPlay` | `bool` | `false` | Start playing automatically after loading |
 | `enableLooping` | `bool` | `false` | Enable automatic video looping with smooth native playback |
-| `mediaInfo` | `NativeVideoPlayerMediaInfo?` | `null` | Media metadata for Now Playing |
+| `mediaInfo` | `NativeVideoPlayerMediaInfo?` | `null` | Media metadata for Now Playing. Without it the player stays out of the system media controls and releases the audio session when the app backgrounds (iOS) |
 | `allowsPictureInPicture` | `bool` | `true` | Enable Picture-in-Picture |
 | `canStartPictureInPictureAutomatically` | `bool` | `true` | Auto-start PiP on app background (iOS 14.2+) |
 | `showNativeControls` | `bool` | `true` | Show native player controls |
