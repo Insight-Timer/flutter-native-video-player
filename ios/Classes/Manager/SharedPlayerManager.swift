@@ -10,7 +10,32 @@ import Flutter
 class SharedPlayerManager: NSObject {
     static let shared = SharedPlayerManager()
 
+    /// Threading contract: every mutating entry point must run on the main
+    /// thread — method-channel handlers and platform-view init/deinit already
+    /// do. The dictionaries below are intentionally unsynchronized; this
+    /// assertion (debug builds only) catches violations instead of corrupting
+    /// state silently.
+    @inline(__always)
+    private func assertMainThread(_ function: StaticString = #function) {
+        #if DEBUG
+        dispatchPrecondition(condition: .onQueue(.main))
+        #endif
+    }
+
     private var players: [Int: AVPlayer] = [:]
+
+    /// Least-recently-used order of controller IDs with live players (index 0
+    /// = least recently used). Touched on player create/reuse, load, and play;
+    /// drives eviction when the player count exceeds maxTotalPlayers.
+    private var lruControllerOrder: [Int] = []
+
+    /// Maximum number of live AVPlayer instances kept in [players] (from the
+    /// Dart NativeVideoPlayerConfig.iosMaxTotalPlayers; <= 0 disables the
+    /// cap). iOS has a finite media decode pipeline — enough live
+    /// AVPlayerItems makes NEW ones fail to load — so creating a player
+    /// beyond this cap evicts the least-recently-used inactive player (see
+    /// enforceTotalPlayerCap).
+    var maxTotalPlayers: Int = 6
 
     /// Shared AVPlayerViewController instances (persist across view disposal)
     /// Keeps view controllers alive so PiP delegate callbacks can fire even when platform views are disposed
@@ -92,9 +117,9 @@ class SharedPlayerManager: NSObject {
     private func configurePlayerForBackgroundPlayback(_ player: AVPlayer) {
         if #available(iOS 15.0, *) {
             player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
-            print("✅ [SharedPlayerManager] Set audiovisualBackgroundPlaybackPolicy to continuesIfPossible")
+            npLog("✅ [SharedPlayerManager] Set audiovisualBackgroundPlaybackPolicy to continuesIfPossible")
         } else {
-            print("ℹ️ [SharedPlayerManager] audiovisualBackgroundPlaybackPolicy not available (iOS < 15.0)")
+            npLog("ℹ️ [SharedPlayerManager] audiovisualBackgroundPlaybackPolicy not available (iOS < 15.0)")
         }
     }
 
@@ -102,12 +127,15 @@ class SharedPlayerManager: NSObject {
     /// Returns a tuple (AVPlayer, Bool) where the Bool indicates if the player already existed (true) or was newly created (false)
     func getOrCreatePlayer(for controllerId: Int) -> (AVPlayer, Bool) {
         if let existingPlayer = players[controllerId] {
+            touchController(controllerId)
             return (existingPlayer, true)
         }
 
         let newPlayer = AVPlayer()
         configurePlayerForBackgroundPlayback(newPlayer)
         players[controllerId] = newPlayer
+        touchController(controllerId)
+        enforceTotalPlayerCap(protecting: controllerId)
         return (newPlayer, false)
     }
 
@@ -115,24 +143,117 @@ class SharedPlayerManager: NSObject {
     /// Returns a tuple (AVPlayer, AVPlayerViewController, Bool) where the Bool indicates if they already existed
     /// This ensures the view controller persists across platform view disposal so PiP delegate callbacks continue to work
     func getOrCreatePlayerAndViewController(for controllerId: Int) -> (AVPlayer, AVPlayerViewController, Bool) {
-        if let existingPlayer = players[controllerId],
-           let existingViewController = playerViewControllers[controllerId] {
-            print("♻️ [SharedPlayerManager] Reusing existing player AND view controller for controller ID: \(controllerId)")
-            return (existingPlayer, existingViewController, true)
-        }
+        assertMainThread()
+        // Reuse the existing player even when no view controller exists yet
+        // (the controller may have been created by a lightweight view, which
+        // skips the shared AVPlayerViewController entirely).
+        let (player, playerExisted) = getOrCreatePlayer(for: controllerId)
 
-        // Create new player
-        let newPlayer = AVPlayer()
-        configurePlayerForBackgroundPlayback(newPlayer)
-        players[controllerId] = newPlayer
+        if let existingViewController = playerViewControllers[controllerId] {
+            npLog("♻️ [SharedPlayerManager] Reusing existing player AND view controller for controller ID: \(controllerId)")
+            return (player, existingViewController, playerExisted)
+        }
 
         // Create new view controller
         let newViewController = AVPlayerViewController()
-        newViewController.player = newPlayer
+        newViewController.player = player
         playerViewControllers[controllerId] = newViewController
 
-        print("✅ [SharedPlayerManager] Created new player AND view controller for controller ID: \(controllerId)")
-        return (newPlayer, newViewController, false)
+        npLog("✅ [SharedPlayerManager] Created \(playerExisted ? "view controller for existing player" : "new player AND view controller") for controller ID: \(controllerId)")
+        return (player, newViewController, playerExisted)
+    }
+
+    // MARK: - Total-Player LRU Cap
+
+    /// Marks a controller as most-recently-used for the total-player cap.
+    /// Called on player create/reuse, load, and play.
+    func touchController(_ controllerId: Int) {
+        assertMainThread()
+        guard players[controllerId] != nil else { return }
+
+        if let index = lruControllerOrder.firstIndex(of: controllerId) {
+            lruControllerOrder.remove(at: index)
+        }
+
+        lruControllerOrder.append(controllerId)
+    }
+
+    /// Enforces [maxTotalPlayers] by evicting least-recently-used players
+    /// (HAB-783 backstop: iOS's decode pipeline is finite, and enough live
+    /// AVPlayerItems makes new ones fail to load).
+    ///
+    /// A player is never evicted while it is actively used: playing
+    /// (rate > 0), in Picture-in-Picture, on external playback (AirPlay), or
+    /// rendered by a texture-backed view (whose renderer cannot re-bind to a
+    /// revived player). If only exempt players remain the cap is allowed to
+    /// be exceeded — active playback is never killed.
+    private func enforceTotalPlayerCap(protecting protectedControllerId: Int) {
+        guard maxTotalPlayers > 0, players.count > maxTotalPlayers else { return }
+
+        npLog("📊 [SharedPlayerManager] Player count \(players.count) exceeds cap \(maxTotalPlayers) - looking for LRU eviction candidates")
+
+        // Snapshot: eviction mutates lruControllerOrder via removePlayer.
+        let lruSnapshot = lruControllerOrder
+        for candidateId in lruSnapshot {
+            if players.count <= maxTotalPlayers { break }
+
+            if candidateId == protectedControllerId { continue }
+
+            guard let candidatePlayer = players[candidateId] else { continue }
+
+            if candidatePlayer.rate > 0 {
+                npLog("   ⏭️ Keeping controller \(candidateId) - playing (rate: \(candidatePlayer.rate))")
+                continue
+            }
+
+            if isPipActiveForController(candidateId) || isManualPiPActive(candidateId) {
+                npLog("   ⏭️ Keeping controller \(candidateId) - PiP active")
+                continue
+            }
+
+            if candidatePlayer.isExternalPlaybackActive {
+                npLog("   ⏭️ Keeping controller \(candidateId) - external playback (AirPlay) active")
+                continue
+            }
+
+            if findAllViewsForController(candidateId).contains(where: { $0.usesTextureView }) {
+                npLog("   ⏭️ Keeping controller \(candidateId) - texture-backed view attached")
+                continue
+            }
+
+            evictPlayer(for: candidateId, player: candidatePlayer)
+        }
+
+        if players.count > maxTotalPlayers {
+            npLog("⚠️ [SharedPlayerManager] Still over cap (\(players.count)/\(maxTotalPlayers)) - all remaining players are active, exceeding is allowed")
+        }
+    }
+
+    /// Tears down an LRU-evicted player and tells the Dart controller via the
+    /// controller-scoped event channel, so it can transparently re-load its
+    /// last source at the reported position on the next play().
+    private func evictPlayer(for controllerId: Int, player candidatePlayer: AVPlayer) {
+        // Capture the resume position before teardown so Dart can restore it.
+        var positionMs = 0
+        if candidatePlayer.currentItem != nil {
+            let seconds = CMTimeGetSeconds(candidatePlayer.currentTime())
+            if seconds.isFinite && seconds > 0 {
+                positionMs = Int(seconds * 1000)
+            }
+        }
+
+        npLog("🗑️ [SharedPlayerManager] Evicting LRU player for controller \(controllerId) at \(positionMs)ms (players: \(players.count), cap: \(maxTotalPlayers))")
+
+        // Balance the observer registrations of views that stay mounted so
+        // the player deallocates cleanly and a later load can register fresh
+        // observers on a revived player (see handleLoad's recovery path).
+        for view in findAllViewsForController(controllerId) {
+            view.prepareForPlayerEviction()
+        }
+
+        removePlayer(for: controllerId)
+
+        sendControllerEvent("playerEvicted", data: ["positionMs": positionMs], for: controllerId)
     }
 
     /// Sets PiP settings for a controller
@@ -143,7 +264,7 @@ class SharedPlayerManager: NSObject {
             canStartPictureInPictureAutomatically: canStartPictureInPictureAutomatically,
             showNativeControls: showNativeControls
         )
-        print("   ✅ Stored PiP settings for controller \(controllerId) - allows: \(allowsPictureInPicture), autoStart: \(canStartPictureInPictureAutomatically)")
+        npLog("   ✅ Stored PiP settings for controller \(controllerId) - allows: \(allowsPictureInPicture), autoStart: \(canStartPictureInPictureAutomatically)")
     }
 
     /// Mirrors a runtime `allowsPictureInPicture` change into stored settings
@@ -168,7 +289,7 @@ class SharedPlayerManager: NSObject {
     func setQualities(for controllerId: Int, qualities: [[String: Any]], qualityLevels: [VideoPlayer.QualityLevel]) {
         qualitiesCache[controllerId] = qualities
         qualityLevelsCache[controllerId] = qualityLevels
-        print("   ✅ Stored \(qualities.count) qualities for controller \(controllerId)")
+        npLog("   ✅ Stored \(qualities.count) qualities for controller \(controllerId)")
     }
 
     /// Gets available qualities for a controller
@@ -188,9 +309,9 @@ class SharedPlayerManager: NSObject {
     func setMediaInfo(for controllerId: Int, mediaInfo: [String: Any]) {
         mediaInfoCache[controllerId] = mediaInfo
         if let title = mediaInfo["title"] as? String {
-            print("   ✅ Stored media info for controller \(controllerId): \(title)")
+            npLog("   ✅ Stored media info for controller \(controllerId): \(title)")
         } else {
-            print("   ✅ Stored media info for controller \(controllerId)")
+            npLog("   ✅ Stored media info for controller \(controllerId)")
         }
     }
 
@@ -240,8 +361,9 @@ class SharedPlayerManager: NSObject {
     /// Registers a controller-level event sink for persistent events
     /// This sink receives PiP and AirPlay events independently of platform views
     func registerControllerEventSink(_ eventSink: @escaping FlutterEventSink, for controllerId: Int) {
+        assertMainThread()
         controllerEventSinks[controllerId] = eventSink
-        print("✅ [SharedPlayerManager] Registered controller event sink for controller \(controllerId)")
+        npLog("✅ [SharedPlayerManager] Registered controller event sink for controller \(controllerId)")
 
         // Send initial controller state
         sendInitialControllerState(for: controllerId, to: eventSink)
@@ -249,8 +371,9 @@ class SharedPlayerManager: NSObject {
 
     /// Unregisters a controller-level event sink
     func unregisterControllerEventSink(for controllerId: Int) {
+        assertMainThread()
         controllerEventSinks.removeValue(forKey: controllerId)
-        print("🗑️ [SharedPlayerManager] Unregistered controller event sink for controller \(controllerId)")
+        npLog("🗑️ [SharedPlayerManager] Unregistered controller event sink for controller \(controllerId)")
     }
 
     /// Sends an event through the controller-level event channel
@@ -296,57 +419,59 @@ class SharedPlayerManager: NSObject {
 
     /// Stops and clears player from all views using this controller
     func stopAllViewsForController(_ controllerId: Int) {
-        print("🛑 [SharedPlayerManager] stopAllViewsForController called for controllerId: \(controllerId)")
+        npLog("🛑 [SharedPlayerManager] stopAllViewsForController called for controllerId: \(controllerId)")
 
         guard let player = players[controllerId] else {
-            print("⚠️ [SharedPlayerManager] No player found for controllerId: \(controllerId)")
+            npLog("⚠️ [SharedPlayerManager] No player found for controllerId: \(controllerId)")
             return
         }
 
-        print("⏸️ [SharedPlayerManager] Pausing player for controllerId: \(controllerId)")
+        npLog("⏸️ [SharedPlayerManager] Pausing player for controllerId: \(controllerId)")
         // Pause and clear the player
         player.pause()
-        print("🧹 [SharedPlayerManager] Clearing current item for controllerId: \(controllerId)")
+        npLog("🧹 [SharedPlayerManager] Clearing current item for controllerId: \(controllerId)")
         player.replaceCurrentItem(with: nil)
 
         // Clear player reference from all views using this controller
         var clearedViewCount = 0
         for (viewId, weakView) in videoPlayerViews {
             if let view = weakView.view, view.controllerId == controllerId {
-                print("🧹 [SharedPlayerManager] Clearing player from view \(viewId) for controllerId: \(controllerId)")
+                npLog("🧹 [SharedPlayerManager] Clearing player from view \(viewId) for controllerId: \(controllerId)")
                 view.player = nil
                 clearedViewCount += 1
             }
         }
 
-        print("✅ [SharedPlayerManager] Stopped all views (\(clearedViewCount) views) for controller ID: \(controllerId)")
+        npLog("✅ [SharedPlayerManager] Stopped all views (\(clearedViewCount) views) for controller ID: \(controllerId)")
     }
 
     /// Removes a player (called when explicitly disposed)
     func removePlayer(for controllerId: Int) {
-        print("🗑️ [SharedPlayerManager] removePlayer called for controllerId: \(controllerId)")
-        print("📊 [SharedPlayerManager] Current players count: \(players.count), players: \(players.keys.sorted())")
+        assertMainThread()
+        npLog("🗑️ [SharedPlayerManager] removePlayer called for controllerId: \(controllerId)")
+        npLog("📊 [SharedPlayerManager] Current players count: \(players.count), players: \(players.keys.sorted())")
 
         // First stop all views using this player
         stopAllViewsForController(controllerId)
 
         // Remove player from manager
-        print("🧹 [SharedPlayerManager] Removing player from players dict for controllerId: \(controllerId)")
+        npLog("🧹 [SharedPlayerManager] Removing player from players dict for controllerId: \(controllerId)")
         players.removeValue(forKey: controllerId)
-        print("✅ [SharedPlayerManager] Player removed. New players count: \(players.count), players: \(players.keys.sorted())")
+        lruControllerOrder.removeAll { $0 == controllerId }
+        npLog("✅ [SharedPlayerManager] Player removed. New players count: \(players.count), players: \(players.keys.sorted())")
 
         // Remove and dispose view controller
         if let viewController = playerViewControllers.removeValue(forKey: controllerId) {
             viewController.player = nil
             viewController.delegate = nil
-            print("🗑️ [SharedPlayerManager] Disposed AVPlayerViewController for controller \(controllerId)")
+            npLog("🗑️ [SharedPlayerManager] Disposed AVPlayerViewController for controller \(controllerId)")
         }
 
         // Remove all views for this controller
         let viewCountBefore = videoPlayerViews.count
         videoPlayerViews = videoPlayerViews.filter { $0.value.view?.controllerId != controllerId }
         let viewCountAfter = videoPlayerViews.count
-        print("🧹 [SharedPlayerManager] Removed \(viewCountBefore - viewCountAfter) views. New view count: \(viewCountAfter)")
+        npLog("🧹 [SharedPlayerManager] Removed \(viewCountBefore - viewCountAfter) views. New view count: \(viewCountAfter)")
 
         // Clear primary view tracking
         primaryViewIdForController.removeValue(forKey: controllerId)
@@ -375,7 +500,7 @@ class SharedPlayerManager: NSObject {
         loopingByController.removeValue(forKey: controllerId)
         completionClaimed.removeValue(forKey: controllerId)
 
-        print("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
+        npLog("✅ [SharedPlayerManager] Fully removed player for controller ID: \(controllerId)")
     }
 
     /// Clears all players (e.g., on logout)
@@ -388,6 +513,7 @@ class SharedPlayerManager: NSObject {
         playerViewControllers.removeAll()
 
         players.removeAll()
+        lruControllerOrder.removeAll()
         videoPlayerViews.removeAll()
         primaryViewIdForController.removeAll()
         lastAutoPipContext.removeAll()
@@ -400,15 +526,31 @@ class SharedPlayerManager: NSObject {
         controllersWithManualPiP.removeAll()
         loopingByController.removeAll()
         completionClaimed.removeAll()
+        controllerEventSinks.removeAll()
     }
 
     // MARK: - AirPlay Route Detection
+
+    /// True while the global route detector reports multiple available routes
+    var isAirPlayRouteAvailable: Bool {
+        globalRouteDetector?.multipleRoutesDetected ?? false
+    }
+
+    /// Starts global route detection if not already running. Called when a
+    /// platform view is created — replaces the previous per-view
+    /// AVRouteDetector instances (route detection is power-expensive; one
+    /// app-wide detector serves all views).
+    @available(iOS 11.0, *)
+    func ensureRouteDetectionStarted() {
+        guard globalRouteDetector == nil else { return }
+        startAirPlayRouteDetection()
+    }
 
     /// Starts global AirPlay route detection
     /// This monitors AirPlay device availability across the entire app
     @available(iOS 11.0, *)
     func startAirPlayRouteDetection() {
-        print("🔍 [SharedPlayerManager] Starting global AirPlay route detection")
+        npLog("🔍 [SharedPlayerManager] Starting global AirPlay route detection")
 
         // Clean up any existing detector
         if let existingDetector = globalRouteDetector {
@@ -428,7 +570,7 @@ class SharedPlayerManager: NSObject {
             context: nil
         )
 
-        print("✅ [SharedPlayerManager] Global AirPlay route detection started, multipleRoutesDetected: \(globalRouteDetector?.multipleRoutesDetected ?? false)")
+        npLog("✅ [SharedPlayerManager] Global AirPlay route detection started, multipleRoutesDetected: \(globalRouteDetector?.multipleRoutesDetected ?? false)")
 
         // Send initial availability state
         if let isAvailable = globalRouteDetector?.multipleRoutesDetected {
@@ -439,10 +581,10 @@ class SharedPlayerManager: NSObject {
     /// Stops global AirPlay route detection
     @available(iOS 11.0, *)
     func stopAirPlayRouteDetection() {
-        print("🛑 [SharedPlayerManager] Stopping global AirPlay route detection")
+        npLog("🛑 [SharedPlayerManager] Stopping global AirPlay route detection")
 
         guard let detector = globalRouteDetector else {
-            print("⚠️ [SharedPlayerManager] No global route detector to stop")
+            npLog("⚠️ [SharedPlayerManager] No global route detector to stop")
             return
         }
 
@@ -450,7 +592,7 @@ class SharedPlayerManager: NSObject {
         detector.isRouteDetectionEnabled = false
         globalRouteDetector = nil
 
-        print("✅ [SharedPlayerManager] Global AirPlay route detection stopped")
+        npLog("✅ [SharedPlayerManager] Global AirPlay route detection stopped")
     }
 
     /// Sends AirPlay availability event to Flutter through all registered views
@@ -458,13 +600,23 @@ class SharedPlayerManager: NSObject {
         // Clean up nil/deallocated views first
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
 
-        print("📡 [SharedPlayerManager] Sending AirPlay availability event to \(videoPlayerViews.count) view(s): \(isAvailable)")
+        npLog("📡 [SharedPlayerManager] Sending AirPlay availability event to \(videoPlayerViews.count) view(s): \(isAvailable)")
 
         // Send event through all registered views
         for (_, wrapper) in videoPlayerViews {
             if let view = wrapper.view {
                 view.sendEvent("airPlayAvailabilityChanged", data: ["isAvailable": isAvailable])
             }
+        }
+
+        // Also send through the controller-level channels so availability
+        // survives view disposal (previously done by per-view detectors)
+        for controllerId in controllerEventSinks.keys {
+            sendControllerEvent(
+                "airPlayAvailabilityChanged",
+                data: ["isAvailable": isAvailable],
+                for: controllerId
+            )
         }
     }
 
@@ -473,7 +625,7 @@ class SharedPlayerManager: NSObject {
         if keyPath == "multipleRoutesDetected" {
             if #available(iOS 11.0, *) {
                 if let isAvailable = globalRouteDetector?.multipleRoutesDetected {
-                    print("🔄 [SharedPlayerManager] AirPlay availability changed: \(isAvailable)")
+                    npLog("🔄 [SharedPlayerManager] AirPlay availability changed: \(isAvailable)")
                     sendAirPlayAvailabilityEvent(isAvailable: isAvailable)
                 }
             }
@@ -483,16 +635,18 @@ class SharedPlayerManager: NSObject {
     /// Register a VideoPlayerView instance
     /// Multiple views can be registered for the same controller (e.g., list + detail screen)
     func registerVideoPlayerView(_ view: VideoPlayerView, viewId: Int64) {
+        assertMainThread()
         let key = "\(viewId)"
         videoPlayerViews[key] = WeakVideoPlayerViewWrapper(view: view)
-        print("   → Registered view with ID \(viewId), total views: \(videoPlayerViews.count)")
+        npLog("   → Registered view with ID \(viewId), total views: \(videoPlayerViews.count)")
     }
     
     /// Unregister a VideoPlayerView when it's disposed
     func unregisterVideoPlayerView(viewId: Int64) {
+        assertMainThread()
         let key = "\(viewId)"
         videoPlayerViews.removeValue(forKey: key)
-        print("   → Unregistered view with ID \(viewId), remaining views: \(videoPlayerViews.count)")
+        npLog("   → Unregistered view with ID \(viewId), remaining views: \(videoPlayerViews.count)")
     }
 
     /// Find another active view for a given controller (excluding a specific viewId)
@@ -506,12 +660,12 @@ class SharedPlayerManager: NSObject {
             if let view = wrapper.view,
                view.controllerId == controllerId,
                view.viewId != excludedViewId {
-                print("   🔍 Found alternative view \(view.viewId) for controller \(controllerId)")
+                npLog("   🔍 Found alternative view \(view.viewId) for controller \(controllerId)")
                 return view
             }
         }
 
-        print("   ⚠️ No alternative view found for controller \(controllerId)")
+        npLog("   ⚠️ No alternative view found for controller \(controllerId)")
         return nil
     }
 
@@ -528,7 +682,7 @@ class SharedPlayerManager: NSObject {
             }
         }
 
-        print("   🔍 Found \(views.count) view(s) for controller \(controllerId)")
+        npLog("   🔍 Found \(views.count) view(s) for controller \(controllerId)")
         return views
     }
 
@@ -541,10 +695,10 @@ class SharedPlayerManager: NSObject {
     func setManualPiPActive(_ controllerId: Int, active: Bool) {
         if active {
             controllersWithManualPiP.insert(controllerId)
-            print("🎬 Marked controller \(controllerId) as having manual PiP active")
+            npLog("🎬 Marked controller \(controllerId) as having manual PiP active")
         } else {
             controllersWithManualPiP.remove(controllerId)
-            print("🎬 Cleared manual PiP flag for controller \(controllerId)")
+            npLog("🎬 Cleared manual PiP flag for controller \(controllerId)")
         }
     }
 
@@ -569,7 +723,7 @@ class SharedPlayerManager: NSObject {
     /// This should be called whenever play() is called on a view
     func setPrimaryView(_ viewId: Int64, for controllerId: Int) {
         primaryViewIdForController[controllerId] = viewId
-        print("   🎯 Set primary view for controller \(controllerId) → ViewId \(viewId)")
+        npLog("   🎯 Set primary view for controller \(controllerId) → ViewId \(viewId)")
     }
 
     /// Check if a specific view is the primary view for a controller
@@ -652,7 +806,7 @@ class SharedPlayerManager: NSObject {
 
         guard let target = targetView else {
             // Target view not registered yet — re-applied when it registers.
-            print("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → no target view yet")
+            npLog("🐛 [PIP] setAutomaticPipView cid=\(controllerId) fullscreen=\(fullscreenContext) → no target view yet")
             return
         }
 
@@ -749,10 +903,10 @@ class SharedPlayerManager: NSObject {
         // Clean up nil/deallocated views first
         videoPlayerViews = videoPlayerViews.filter { $0.value.view != nil }
         
-        print("📊 Current state: \(videoPlayerViews.count) active views registered")
+        npLog("📊 Current state: \(videoPlayerViews.count) active views registered")
         for (key, wrapper) in videoPlayerViews {
             if let view = wrapper.view {
-                print("   - ViewId \(key): Controller \(view.controllerId ?? -1), canStartAuto: \(view.canStartPictureInPictureAutomatically), current: \(view.playerViewController.canStartPictureInPictureAutomaticallyFromInline)")
+                npLog("   - ViewId \(key): Controller \(view.controllerId ?? -1), canStartAuto: \(view.canStartPictureInPictureAutomatically), current: \(view.isAutomaticInlinePiPEnabled)")
             }
         }
         
@@ -760,7 +914,7 @@ class SharedPlayerManager: NSObject {
             // Never arm a controller with no live views (e.g. a disposed playlist
             // track still lingering in a caller's bookkeeping).
             guard videoPlayerViews.contains(where: { $0.value.view?.controllerId == controllerId }) else {
-                print("⚠️ Skipping auto-PiP arm — no live views for controller \(controllerId)")
+                npLog("⚠️ Skipping auto-PiP arm — no live views for controller \(controllerId)")
                 return
             }
 
@@ -769,40 +923,39 @@ class SharedPlayerManager: NSObject {
             // stale disposed one) from re-arming itself and contending.
             if let active = controllerWithAutomaticPiP, active != controllerId,
                lastAutoPipContext[active] != nil {
-                print("⚠️ Skipping auto-PiP arm for \(controllerId) — controller \(active) is the on-screen target")
+                npLog("⚠️ Skipping auto-PiP arm for \(controllerId) — controller \(active) is the on-screen target")
                 return
             }
 
             // Check if manual PiP is active for this controller
             if isManualPiPActive(controllerId) {
-                print("⚠️ Cannot enable automatic PiP for controller \(controllerId) - manual PiP is active")
+                npLog("⚠️ Cannot enable automatic PiP for controller \(controllerId) - manual PiP is active")
                 return
             }
 
             // Disable automatic PiP on all other controllers first
             if let previousControllerId = controllerWithAutomaticPiP, previousControllerId != controllerId {
-                print("🎬 Disabling automatic PiP for controller \(previousControllerId)")
+                npLog("🎬 Disabling automatic PiP for controller \(previousControllerId)")
                 // Disable on ALL platform views for the previous controller
                 var disabledCount = 0
                 for (viewKey, wrapper) in videoPlayerViews {
                     if let view = wrapper.view, view.controllerId == previousControllerId {
-                        let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                        view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                        let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                        print("   → ViewId \(viewKey): \(wasBefore) → \(isAfter)")
+                        let wasBefore = view.isAutomaticInlinePiPEnabled
+                        view.setAutomaticInlinePiP(false)
+                        npLog("   → ViewId \(viewKey): \(wasBefore) → \(view.isAutomaticInlinePiPEnabled)")
                         disabledCount += 1
                     }
                 }
-                print("   → Disabled on \(disabledCount) platform view(s) for controller \(previousControllerId)")
+                npLog("   → Disabled on \(disabledCount) platform view(s) for controller \(previousControllerId)")
             }
             
             // Find the PRIMARY (most recently played) platform view for this controller
-            print("🎬 Enabling automatic PiP for controller \(controllerId)")
+            npLog("🎬 Enabling automatic PiP for controller \(controllerId)")
             
             // First, disable ALL views for this controller
-            for (viewKey, wrapper) in videoPlayerViews {
+            for (_, wrapper) in videoPlayerViews {
                 if let view = wrapper.view, view.controllerId == controllerId {
-                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
+                    view.setAutomaticInlinePiP(false)
                 }
             }
             
@@ -811,40 +964,40 @@ class SharedPlayerManager: NSObject {
             if let primaryViewId = primaryViewIdForController[controllerId] {
                 let key = "\(primaryViewId)"
                 if let wrapper = videoPlayerViews[key], let view = wrapper.view {
-                    print("   🔍 Checking primary view \(primaryViewId):")
-                    print("      - view.canStartPictureInPictureAutomatically: \(view.canStartPictureInPictureAutomatically)")
-                    print("      - playerViewController.allowsPictureInPicturePlayback: \(view.playerViewController.allowsPictureInPicturePlayback)")
-                    print("      - player rate: \(view.player?.rate ?? -1)")
+                    npLog("   🔍 Checking primary view \(primaryViewId):")
+                    npLog("      - view.canStartPictureInPictureAutomatically: \(view.canStartPictureInPictureAutomatically)")
+                    npLog("      - allowsInlinePictureInPicture: \(view.allowsInlinePictureInPicture)")
+                    npLog("      - player rate: \(view.player?.rate ?? -1)")
 
                     if view.canStartPictureInPictureAutomatically {
-                        let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                        view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-                        let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                        print("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [PRIMARY]")
-                        print("   ✅ Enabled on PRIMARY platform view for controller \(controllerId)")
+                        let wasBefore = view.isAutomaticInlinePiPEnabled
+                        view.setAutomaticInlinePiP(true)
+                        let isAfter = view.isAutomaticInlinePiPEnabled
+                        npLog("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [PRIMARY]")
+                        npLog("   ✅ Enabled on PRIMARY platform view for controller \(controllerId)")
                         enabledOnView = true
                     } else {
-                        print("   ⚠️ Primary view doesn't allow automatic PiP")
+                        npLog("   ⚠️ Primary view doesn't allow automatic PiP")
                     }
                 } else {
-                    print("   ⚠️ Primary view (ViewId \(primaryViewId)) not found or disposed")
+                    npLog("   ⚠️ Primary view (ViewId \(primaryViewId)) not found or disposed")
                 }
             } else {
-                print("   ⚠️ No primary view set for controller \(controllerId)")
+                npLog("   ⚠️ No primary view set for controller \(controllerId)")
             }
 
             // FALLBACK: If no primary view was found or it was disposed, pick ANY view for this controller
             // This handles the case where the primary view was disposed but other views still exist
             if !enabledOnView {
-                print("   🔄 Looking for any available view for controller \(controllerId)")
-                for (viewKey, wrapper) in videoPlayerViews {
+                npLog("   🔄 Looking for any available view for controller \(controllerId)")
+                for (_, wrapper) in videoPlayerViews {
                     if let view = wrapper.view, view.controllerId == controllerId {
                         if view.canStartPictureInPictureAutomatically {
-                            let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                            view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = true
-                            let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                            print("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [FALLBACK]")
-                            print("   ✅ Enabled on fallback platform view for controller \(controllerId)")
+                            let wasBefore = view.isAutomaticInlinePiPEnabled
+                            view.setAutomaticInlinePiP(true)
+                            let isAfter = view.isAutomaticInlinePiPEnabled
+                            npLog("   → ViewId \(view.viewId): \(wasBefore) → \(isAfter) [FALLBACK]")
+                            npLog("   ✅ Enabled on fallback platform view for controller \(controllerId)")
                             // Set this as the new primary view
                             primaryViewIdForController[controllerId] = view.viewId
                             enabledOnView = true
@@ -854,31 +1007,30 @@ class SharedPlayerManager: NSObject {
                 }
 
                 if !enabledOnView {
-                    print("   ⚠️ No available view found for controller \(controllerId) that allows automatic PiP")
+                    npLog("   ⚠️ No available view found for controller \(controllerId) that allows automatic PiP")
                 }
             }
 
             // Only set controllerWithAutomaticPiP if we actually enabled a view
             if enabledOnView {
                 controllerWithAutomaticPiP = controllerId
-                print("   ✅ Set controller \(controllerId) as the active automatic PiP controller")
+                npLog("   ✅ Set controller \(controllerId) as the active automatic PiP controller")
             } else {
-                print("   ⚠️ Not setting as active automatic PiP controller - no view was enabled")
+                npLog("   ⚠️ Not setting as active automatic PiP controller - no view was enabled")
             }
         } else {
             // Disable automatic PiP for ALL platform views of the specified controller
-            print("🎬 Disabling automatic PiP for controller \(controllerId)")
+            npLog("🎬 Disabling automatic PiP for controller \(controllerId)")
             var disabledCount = 0
             for (viewKey, wrapper) in videoPlayerViews {
                 if let view = wrapper.view, view.controllerId == controllerId {
-                    let wasBefore = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                    view.playerViewController.canStartPictureInPictureAutomaticallyFromInline = false
-                    let isAfter = view.playerViewController.canStartPictureInPictureAutomaticallyFromInline
-                    print("   → ViewId \(viewKey): \(wasBefore) → \(isAfter)")
+                    let wasBefore = view.isAutomaticInlinePiPEnabled
+                    view.setAutomaticInlinePiP(false)
+                    npLog("   → ViewId \(viewKey): \(wasBefore) → \(view.isAutomaticInlinePiPEnabled)")
                     disabledCount += 1
                 }
             }
-            print("   → Disabled on \(disabledCount) platform view(s) for controller \(controllerId)")
+            npLog("   → Disabled on \(disabledCount) platform view(s) for controller \(controllerId)")
             
             if controllerWithAutomaticPiP == controllerId {
                 controllerWithAutomaticPiP = nil

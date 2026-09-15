@@ -5,6 +5,181 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-07-07
+
+### Fixed
+- **Android: video no longer pauses when expanding the PiP window back into
+  the app.** The close-button detection sampled the Flutter lifecycle once,
+  300 ms after the PiP flag flipped off — but on expand-back `resumed` often
+  arrives later than that (the exit animation has to finish first), so the
+  return was misclassified as a dismissal and playback was paused. The check
+  now waits up to 2 s for `resumed` and only pauses when it never arrives
+  (the genuine X-button dismiss case).
+
+## [1.5.1] - 2026-07-07
+
+### Changed
+- **Removed the `dismissible_page` dependency** (#50). The fullscreen player's
+  swipe-down-to-dismiss is now a small built-in implementation with the same
+  behavior (drag follows the finger with scale/corner-radius/background-fade,
+  15% release threshold). `dismissible_page` had been unmaintained since 2023;
+  dropping it also fixes dependency resolution on pub mirrors that are missing
+  that package. No API changes.
+- Package metadata (`homepage`/`repository`/`issue_tracker`) now points at the
+  canonical `plug-and-pay/flutter-native-video-player` repository.
+
+## [1.5.0] - 2026-07-07
+
+Playback resilience release: stalled-load watchdog, Android decoder fallback, iOS total-player cap, and PiP audio fixes.
+
+### Added
+- **Stalled-playback watchdog.** New `NativeVideoPlayerConfig.loadTimeout` (default 30 s) and `bufferingTimeout` (default off). The native load path only ever reports "ready" or an explicit player error — a stalled decoder emits neither, leaving apps on an infinite spinner. When a player now sits in `initializing`/`loading` (or, opted-in, `buffering`) past the timeout, the controller synthesizes the same `error` activity event a native failure produces (message: "Load timed out…"/"Buffering timed out…") and best-effort pauses the stuck pipeline, so app error/retry UI actually shows. `null` disables either watchdog.
+- **Android decoder fallback (default on).** The shared player is now built with `DefaultRenderersFactory.setEnableDecoderFallback(true)`: when the primary hardware decoder fails to initialize, ExoPlayer falls back to the next decoder instead of failing playback.
+- **`androidForceSoftwareDecoders` (opt-in, default off).** Restricts `MediaCodec` selection to software decoders (`OMX.google.*` / `c2.android.*`) via a custom `MediaCodecSelector`, falling back to the default list when no software decoder exists for a mime type. Escape hatch for devices whose vendor hardware decoders crash; expect higher CPU use and possibly dropped frames on high-res content.
+- **iOS total-player cap with LRU eviction.** New `NativeVideoPlayerConfig.iosMaxTotalPlayers` (default 6). `maxConcurrentPlayingPlayers` bounds *playing* players, but paused players keep their `AVPlayerItem` alive — and iOS's finite decode pipeline makes NEW items fail once enough accumulate. Creating a player beyond the cap now tears down the least-recently-used player that is not playing, not in PiP, not on AirPlay, and not texture-backed (soft cap: active playback is never killed). The evicted controller is notified (`playerEvicted`) and transparently re-loads its last source at the eviction position on its next `play()`.
+- **`getPictureInPictureStatus()`.** Ground-truth PiP query: `isPipEnabled` is event-driven on iOS but poll-derived on Android (150 ms, fullscreen-only), so it can be stale exactly when the app backgrounds into PiP. The new call queries the platform directly on Android and refreshes the flag.
+
+### Fixed
+- **Android PiP no longer goes silent.** Two races conspired to mute PiP (video kept playing without sound): (1) `BackgroundPlaybackGuard` read the stale polled `isPipEnabled` on the `paused`/`hidden` transition and could pause an active PiP session — it now confirms via `getPictureInPictureStatus()` and re-checks the playback state after the await; the Android PiP poll also fires its first check immediately instead of after the first 150 ms tick. (2) Audio focus was abandoned the instant `isPlaying` flipped false — a plain pause now defers the abandon by a 30 s grace period (cancelled on resume; stop/end/dispose still abandon immediately), so a transient pause during the PiP transition no longer surrenders the audio session.
+
+## [1.4.0] - 2026-07-02
+
+### Added
+
+- **Embedded caption text-size scaling** (#43): `NativeVideoPlayerSubtitleStyle.embeddedTextScale`
+  (default `1.0` = platform default) and the convenience method
+  `controller.setNativeSubtitleTextScale(double)` scale the text size of EMBEDDED
+  (native-rendered) subtitle tracks — ExoPlayer's `SubtitleView` on Android (both the
+  lightweight and PlayerView display paths), `AVPlayerItem.textStyleRules` on iOS.
+  Takes effect live without a playback restart, survives quality/audio/variant switches,
+  item reloads, and native view recreation, and scales relative to the user's system
+  caption size preference. Sidecar overlay sizing (`subtitleStyle.fontSize`) is unaffected.
+
+## [1.3.2] - 2026-07-02
+
+### Fixed
+
+- **Android**: dismissing the Dart fullscreen dialog (back button) now disarms the
+  activity-global auto-enter PiP (`cancelOnLeavePiP`). Previously the armed state leaked
+  permanently after one fullscreen visit, so any later app-leave entered PiP — even from
+  inline playback or with no video playing (Huddle HAB-837).
+- **Android**: closing the PiP window with its X button now pauses playback instead of
+  leaving the media session playing audio in the background. Expanding the PiP window back
+  into the app keeps playing as before (Huddle HAB-838).
+- **Android**: the media notification uses a proper monochrome small icon (host
+  `ic_notification` drawable, then the FCM default-notification-icon meta-data) instead of
+  the tinted launcher icon that rendered as a white square (#45).
+- **Cast**: LIVE streams start at the live edge instead of the beginning of the DVR
+  window — `currentTime` is omitted from the LOAD request unless explicitly set (#44).
+
+## [1.3.1] - 2026-06-24
+
+iOS Swift Package Manager build fix.
+
+### Fixed
+- **iOS: SwiftPM builds failed with `Cannot find 'npLog' in scope`.** The plugin keeps two parallel iOS source trees: CocoaPods compiles everything under `Classes/` (`s.source_files = 'Classes/**/*.swift'`), while the Swift Package Manager target (`ios/better_native_video_player`) symlinks each *subdirectory* of `Classes/` into its `Sources/` folder. `Logging.swift` — which defines `npLog` and is the only file at the top level of `Classes/` — had no symlink, so it was excluded from the SPM target and any call site (e.g. `VideoPlayerView.swift`) failed to compile under a SwiftPM build. CocoaPods builds were unaffected. Added the missing `Logging.swift` symlink to the SPM target. (#36, #42)
+
+## [1.3.0] - 2026-06-23
+
+Quality-selection and Android background-playback fixes.
+
+### Fixed
+- **Quality switching no longer drops audio (iOS + Android).** Selecting an HLS quality — or switching back to Auto — previously reloaded a single video-only variant playlist, replacing the master. On adaptive streams that carry audio as a separate rendition (`#EXT-X-MEDIA:TYPE=AUDIO`), that silenced the audio while video kept playing. The plugin now keeps the master loaded and constrains the **video track** via the player's track selector (`preferredMaximumResolution`/`preferredPeakBitRate` on iOS, `setMaxVideoSize`/`setMaxVideoBitrate` on Android), so audio is untouched and the switch is instant (no buffering reload).
+- **`qualityChangedStream` now emits the selected quality.** Native emits the quality fields flat in the event map, but the Dart handler only accepted a nested `quality` key, so the stream stayed silent and any UI bound to it was stuck on "Auto". The handler now accepts both shapes.
+- **iOS: position/time updates no longer stop when Auto quality is enabled.** The old auto-quality monitor reused the shared periodic time observer that drives `timeUpdate`, clobbering position reporting. The monitor is removed — AVPlayer's native ABR handles Auto.
+- **Android: background playback (live + VOD) no longer dies after a few minutes.** The plugin posted a media notification but never ran a real foreground service, so Doze/App-Standby cut the app's network and ExoPlayer failed with `UnknownHostException`. Playback now runs as a real foreground service while playing (stopped on pause/stop), and the shared player uses `setWakeMode(WAKE_MODE_NETWORK)` (partial WakeLock + WifiLock). Adds the `WAKE_LOCK` permission to the plugin manifest.
+
+## [1.2.1] - 2026-06-22
+
+Android Picture-in-Picture subtitle fix.
+
+### Fixed
+- **Subtitles no longer render oversized in Android Picture-in-Picture.** Android never reported PiP state (only iOS emitted PiP events), so the Flutter caption overlay stayed visible and drew its large fullscreen-landscape font into the small PiP window. The controller now tracks Android PiP via the `floating` package's status while fullscreen — entering PiP hides the caption overlay and suppresses native (embedded/sidecar) caption rendering; exiting restores the previous selection. As a side effect, `isPipEnabled` / `isPipEnabledStream` now reflect PiP state on Android. iOS unchanged.
+
+## [1.2.0] - 2026-06-18
+
+Orientation- and fullscreen-aware sidecar caption sizing.
+
+### Added
+- **Captions can grow when fullscreen in landscape.** `NativeVideoPlayerSubtitleStyle` gains three optional overrides — `fullscreenLandscapeFontSize`, `fullscreenLandscapeFontWeight`, and `fullscreenLandscapeLineHeight` — applied only while the player is fullscreen *and* in landscape orientation. Each falls back to the matching base value (`fontSize` / `fontWeight` / `lineHeight`) when null, so inline and fullscreen-portrait keep the base typography. The widget reads live `MediaQuery` orientation, so both the inline player and the Dart fullscreen route restyle on rotation.
+
+### Fixed
+- **A player constructed while another is fullscreen no longer forces the device back to portrait.** When several players are alive (e.g. multiple video tiles on one screen) and one is in Dart fullscreen, constructing or re-mounting another player ran its `preferredOrientations` through `FullscreenManager.setPreferredOrientations`, which immediately reset the device orientation — fighting the fullscreen player and snapping it out of landscape on rotation. `FullscreenManager` now tracks whether a player is fullscreen and, while one is, records a constructed player's preferred orientations as the restore baseline **without** applying them to the device. No effect on the single-player case.
+
+## [1.1.3] - 2026-06-18
+
+Android subtitle de-duplication and exact-track selection fixes.
+
+### Fixed
+- **A sidecar caption no longer appears twice on Android.** URL sidecar subtitles are attached natively (so captions render in PiP and native fullscreen), which made them echo back from the native track list *in addition to* the Dart sidecar entry — e.g. two identical "Nederlands" rows. `getAvailableSubtitleTracks()` now suppresses, by language, the native echo of any sidecar it attached natively, so each caption is listed once. iOS is unaffected (no native sideload), so a genuine embedded track such as "CC" still appears alongside the sidecar.
+- **Selecting a subtitle pins the exact track instead of every track in that language.** Android selection used `setPreferredTextLanguage`, which enabled *all* text tracks sharing the language — with a sidecar and an embedded track both in, say, Dutch, both were enabled at once, rendering two overlapping caption tracks and crashing playback. `setSubtitleTrack()` now applies a `TrackSelectionOverride` on the specific track group (the same approach as audio-track selection), and subtitle tracks are enumerated/selected by a stable flat index across track groups (a per-group index collided between the embedded and sidecar groups).
+
+## [1.1.2] - 2026-06-18
+
+Re-release of 1.1.1 with a clean package archive — 1.1.1 accidentally bundled
+the local `build/` directory (~13 MB). No code changes from 1.1.1.
+
+## [1.1.1] - 2026-06-18
+
+Sidecar (VTT/SRT) subtitle fixes for fullscreen and outline rendering.
+
+### Fixed
+- **Captions anchor to the video, not the screen, in fullscreen.** The Flutter sidecar-subtitle overlay now constrains its cue block to the video's content rect (`Center` + `AspectRatio`, matching the texture path's letterbox fit) instead of the full widget bounds. Previously, in portrait fullscreen with a 16:9 video, captions sat at the bottom of the *screen* — well below the letterboxed video.
+- **`videoSize` is now reported from platform-view players too** (iOS `AVPlayerItem.presentationSize` KVO; Android `Player.Listener.onVideoSizeChanged` on the SurfaceView/PlayerView paths), so `controller.videoSize` / `videoSizeStream` is populated in all rendering modes — including Dart fullscreen, which the overlay needs to letterbox-match captions.
+- **`subtitleStyle` is forwarded into the Dart fullscreen player.** `FullscreenVideoPlayer` (and the controller's `_enterDartFullscreen`) now pass the app's `subtitleStyle` to the fullscreen `NativeVideoPlayer`, so fullscreen captions match the inline player instead of falling back to the default style.
+- **Crisp caption outline.** The caption outline is now a true vector stroke (a stroked text pass under the filled pass) instead of four diagonal corner shadows, which left the cardinal edges uncovered and doubled visibly once `outlineWidth >= 1`. `outlineWidth` is now an even stroke width in logical pixels at any value.
+
+## [1.1.0] - 2026-06-12
+
+The performance release: every item of `PERFORMANCE_ROADMAP.md` is
+implemented and verified on physical devices (Galaxy S21, iPhone 13 Pro
+Max) — full before/after measurements live in the roadmap's "Final A/B
+comparison" section. All new behavior is opt-in; defaults are unchanged
+except for the two leak fixes below, which apply automatically.
+
+### Added
+- **Lightweight inline views** (`NativeVideoPlayerConfig.lightweightInlineViews`, default off): views created with native controls hidden (`showNativeControls: false` or a custom `overlayBuilder`) host a bare video surface — `UIView` + `AVPlayerLayer` on iOS instead of a per-tile `AVPlayerViewController`, `SurfaceView` + `AspectRatioFrameLayout` (+ `SubtitleView` for captions) on Android instead of a full Media3 `PlayerView`. Measured on the N=6 stress feed (iOS simulator): janky frames 37% → 24%, average frame total 9.1ms → 6.6ms. PiP, Now Playing, fullscreen, subtitles, and the native sidecar caption handoff keep working. Limitation: `setShowNativeControls(true)` at runtime is ignored for a view created lightweight.
+- **Android disk cache + precache** (`androidEnableDiskCache`, default off): opt-in Media3 `SimpleCache` (LRU-evicted, `androidDiskCacheMaxBytes`, default 100MB) wrapped around playback and quality-switch data sources, plus `NativeVideoPlayerCache.precache(url)` to warm upcoming feed items up to `androidPrecacheBytes` (default 2MB; HLS precaching covers the playlists and leading segments). DRM and non-HTTP sources bypass the cache; cached items replay offline. Silent no-op on iOS.
+- **Texture rendering mode** (experimental: `androidTextureMode` / `iosTextureMode`, default off): inline tiles with hidden native controls render as Flutter textures — `TextureRegistry.createSurfaceProducer()` on Android (Impeller-compatible), `FlutterTexture` + `AVPlayerItemVideoOutput` on iOS (BT.709-correct, AES-HLS compatible). Feed scrolling stops fighting platform-view gesture claiming and hybrid-composition overhead disappears. Automatic platform-view fallback preserves every capability: tiles with automatic PiP stay (light) platform views; manual `enterPictureInPicture()` from a texture tile live-swaps the tile to a platform view (same shared player) before starting PiP; fullscreen falls back to the Dart fullscreen player; FairPlay DRM requires platform-view mode. New `controller.videoSizeStream` reports the natural video size (used for texture letterboxing, available in all modes on Android and in texture mode on iOS).
+- **`NativeVideoPlayerConfig.viewportCapHeadroom`** (iOS, default 1.5): controls the headroom multiplier of the viewport quality cap. 1.5 keeps the first HLS variant at-or-above the tile size selectable (visually lossless); 1.0 maximizes savings.
+
+### Fixed
+- **iOS platform views now deallocate when disposed.** Every platform view was permanently retained by its per-view EventChannel handler registration (the engine's handler block strongly captures the view and was never deregistered), so a view's `deinit` could never run — each created view leaked along with its notification observers. The Dart widget now notifies the native side on platform-view disposal (`viewDisposed`), which deregisters the per-view channels and lets the view deallocate; KVO registration is now bookkept so teardown removes exactly what was added (re-loads no longer stack duplicate item/player observers either). Verified with `heap(1)`: view counts return to baseline after open/close cycles, in both display modes.
+- **`dispose()` no longer leaks the native player when it races platform-view teardown.** Disposing a controller routed the native release through the view-bound `dispose` call, which lands after the platform view unregisters when a tile unmounts (`NO_VIEW`, silently swallowed) — leaking one fully-buffered native player per disposed controller. On a Galaxy S21 this OOM-killed the app after a few feed visits (Java heap ratcheting ~+1.1MB per visit, MediaCodec allocation failure at the 256MB limit). `dispose()` now always issues the controller-ID-routed `disposeController` as the authoritative release (idempotent on both platforms). Measured after the fix: heap flat across six feed re-entries (6.2→6.3MB) vs the baseline's monotonic 4.6→12.6MB climb. Pre-existing on 1.0.1.
+
+## [1.0.1] - 2026-06-11
+
+### Changed
+- Removed internal development notes from the repository and package archive; clarified a few doc comments. No functional changes.
+
+## [1.0.0] - 2026-06-11
+
+First stable release. Everything below is additive — no breaking changes to
+the existing controller/widget API.
+
+### Added
+- **Sidecar subtitles**: load external VTT/SRT files (URL, local file, or raw content) via `load(sidecarSubtitles:)` or `setSidecarSubtitles()`, rendered in a fully styleable Flutter overlay (`NativeVideoPlayerSubtitleStyle`). Sidecar and embedded HLS tracks are merged into one list (`getAvailableSubtitleTracks()` / `setSubtitleTrack()`). On Android, sidecar sources are also sideloaded natively so captions stay visible in PiP and native fullscreen.
+- **Audio track selection**: `getAvailableAudioTracks()` / `setAudioTrack()` for multi-audio HLS streams, with an `audioTrackChanged` control event.
+- **Chromecast** (separate `package:better_native_video_player/cast.dart` entrypoint): pure-Dart CASTV2 session — load with metadata and caption tracks, play/pause/seek/stop, volume/mute, caption switching, looping, and a live `statusStream` reflecting receiver-side changes. Device discovery uses the system Bonjour browser on iOS (works on physical devices without the restricted multicast entitlement) and pure-Dart mDNS elsewhere.
+- **Offline downloads**: `VideoDownloadController` with progress streams, persistent index, cancel/remove, and `localPathFor()` for offline playback.
+- **Resume positions**: `load(startAt:)` applied natively before the first frame, plus `PositionCheckpoints` for throttled position persistence.
+- **A-B playback ranges**: `setPlaybackRange(start, end, loop:)` / `clearPlaybackRange()`.
+- **Playlists**: `NativeVideoPlayerPlaylist` with auto-advance and per-item startAt.
+- **Playback analytics**: `PlaybackAnalytics` QoE event stream (startup time, stalls, watched time, quality switches, completion).
+- **Background playback guard**: `BackgroundPlaybackGuard` pauses on background and resumes on foreground (PiP/AirPlay exempt).
+- **Scrub-preview storyboards**: `StoryboardThumbnails` parses WebVTT storyboards and uniform sprite grids (Vimeo/Bunny style); example ships a drag-to-preview seek bar.
+- **Performance configuration**: `NativeVideoPlayerConfig` with concurrent-playback caps, viewport-based HLS quality capping, buffer presets, and Android playback prioritization.
+- **Companion package** `better_native_video_extractor` (in-repo): WebView-free Vimeo/YouTube extraction (Referer support, thumbnails, storyboards, expiry-aware cache, extraction-failure event stream).
+- Example app: AirPlay + subtitles test bench, Chromecast remote-control screen, downloads screen, audio/sidecar/extractor/playlist/player-features demos.
+
+### Fixed
+- Chromecast discovery crashed with an unhandled `SocketException` on physical iPhones; scans now run natively (iOS) and failures surface as a catchable `CastDiscoveryException` with actionable guidance.
+- Chromecast seek snapping the position back to zero (receiver statuses without `currentTime` were treated as position 0; seeking exactly at the duration finished the stream).
+- Vimeo playback compatibility: the extractor prefers the H.264 `avc_url` HLS variant (AVPlayer could fail to decode the default variant).
+
+### Changed
+- Internal refactors for maintainability: the iOS method handler is split into topical files and the Dart controller's event plumbing into a part file. No public API changes.
+
 ## [0.4.11] - 2026-01-27
 
 ### Added

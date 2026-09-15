@@ -4,9 +4,9 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.media3.common.util.UnstableApi
@@ -99,10 +99,10 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
         if (session !== registeredSession) {
             registeredSession?.let { prev ->
                 runCatching { removeSession(prev) }
-                    .onFailure { Log.w(TAG, "removeSession failed: ${it.message}") }
+                    .onFailure { NpLog.w(TAG, "removeSession failed: ${it.message}") }
             }
             runCatching { addSession(session) }
-                .onFailure { Log.w(TAG, "addSession failed: ${it.message}") }
+                .onFailure { NpLog.w(TAG, "addSession failed: ${it.message}") }
             registeredSession = session
         }
 
@@ -186,16 +186,35 @@ class VideoPlayerMediaSessionService : MediaSessionService() {
 
     // ── icon helper ─────────────────────────────────────────────────────────
 
+    /**
+     * The status-bar small icon must be a flat, alpha-only drawable — Android tints it, so a
+     * full-color launcher icon renders as a solid white square. Prefer a dedicated
+     * notification icon from the host app:
+     * 1. a drawable named `ic_notification` in the host app,
+     * 2. the FCM default notification icon meta-data,
+     * 3. a generic platform media icon.
+     */
     private fun resolveNotificationIcon(): Int {
-        val resId = resources.getIdentifier("ic_notification", "drawable", packageName)
-        return if (resId != 0) resId else android.R.drawable.ic_media_play
+        val byName = resources.getIdentifier("ic_notification", "drawable", packageName)
+        if (byName != 0) return byName
+
+        try {
+            val appInfo = packageManager.getApplicationInfo(packageName, PackageManager.GET_META_DATA)
+            val fcmIcon = appInfo.metaData
+                ?.getInt("com.google.firebase.messaging.default_notification_icon", 0) ?: 0
+            if (fcmIcon != 0) return fcmIcon
+        } catch (e: Exception) {
+            NpLog.w(TAG, "Could not read notification icon meta-data: ${e.message}")
+        }
+
+        return android.R.drawable.ic_media_play
     }
 
     // ── Media3 listener for Android 12+ background-start restriction ────────
 
     private inner class ServiceListener : Listener {
         override fun onForegroundServiceStartNotAllowedException() {
-            Log.w(TAG, "Foreground service start not allowed (Android 12+ restriction)")
+            NpLog.w(TAG, "Foreground service start not allowed (Android 12+ restriction)")
         }
     }
 

@@ -3,48 +3,43 @@ import Foundation
 
 extension VideoPlayerView {
     func addObservers(to item: AVPlayerItem) {
-        // (Re)register item-scoped observers, moving them off any previously
-        // observed item — safe to call again on a reload or quality switch.
-        registerItemObservers(on: item)
-
-        // Player-scoped observers register once; re-adding would duplicate them.
-        if !didRegisterPlayerObservers {
-            // Observe player's timeControlStatus to track play/pause state changes
-            player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
-
-            // Observe AirPlay connection status
-            player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
-            didRegisterPlayerObservers = true
-        }
-
-        // Audio route changes (AirPlay). Not item-scoped — register once.
-        if !didRegisterRouteChangeObserver {
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAudioRouteChange),
-                name: AVAudioSession.routeChangeNotification,
-                object: nil
-            )
-            didRegisterRouteChangeObserver = true
-        }
-    }
-
-    /// Registers item-scoped KVO/notification observers on `item`, moving them
-    /// off any previously observed item first. No-op if already on `item`.
-    private func registerItemObservers(on item: AVPlayerItem) {
-        // Already observing this exact item — nothing to do.
-        if observedPlayerItem === item { return }
-
-        // Moving to a new item: tear down observers on the previous one so we
-        // don't leak them and so `deinit` removes from the right item.
-        if let previous = observedPlayerItem {
-            removeItemObservers(from: previous)
-        }
+        // Called once per load: drop the previous item's registrations first
+        // so removal at teardown stays balanced (KVO throws on removing a
+        // never-registered observer, and double-adds deliver twice).
+        removeItemObservers()
 
         item.addObserver(self, forKeyPath: "status", options: [.new, .old], context: nil)
         item.addObserver(self, forKeyPath: "playbackBufferEmpty", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "playbackLikelyToKeepUp", options: [.new], context: nil)
+        // Report the video's display size so the Dart subtitle overlay can pin
+        // captions to the video's content rect (platform views don't emit this
+        // the way the texture renderer does).
         item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
+        observedItem = item
+
+        // Player-level observers are registered once per view, not per load
+        if !hasPlayerStateObservers, let player = player {
+            // Observe player's timeControlStatus to track play/pause state changes
+            player.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
+
+            // Observe AirPlay connection status
+            player.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
+            hasPlayerStateObservers = true
+        }
+
+        // Observe audio route changes to detect AirPlay device changes
+        // (remove first so re-loads don't stack duplicate deliveries)
+        NotificationCenter.default.removeObserver(
+            self,
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioRouteChange),
+            name: AVAudioSession.routeChangeNotification,
+            object: nil
+        )
 
         NotificationCenter.default.addObserver(
             self,
@@ -62,19 +57,50 @@ extension VideoPlayerView {
             name: .AVPlayerItemDidPlayToEndTime,
             object: item
         )
-
-        observedPlayerItem = item
     }
 
-    /// Removes the item-scoped KVO and notification observers from `item`.
-    /// Must mirror `registerItemObservers(on:)` exactly.
-    func removeItemObservers(from item: AVPlayerItem) {
+    /// Removes the KVO registrations made on [observedItem], if any.
+    func removeItemObservers() {
+        guard let item = observedItem else { return }
         item.removeObserver(self, forKeyPath: "status")
         item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
         item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
         item.removeObserver(self, forKeyPath: "presentationSize")
-        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemFailedToPlayToEndTime, object: item)
-        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .AVPlayerItemFailedToPlayToEndTime,
+            object: item
+        )
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: item
+        )
+        observedItem = nil
+    }
+
+    /// Removes the player-level KVO registrations, if registered.
+    func removePlayerStateObservers() {
+        guard hasPlayerStateObservers else { return }
+        player?.removeObserver(self, forKeyPath: "timeControlStatus")
+        player?.removeObserver(self, forKeyPath: "externalPlaybackActive")
+        hasPlayerStateObservers = false
+    }
+
+    /// Called by SharedPlayerManager just before the total-player LRU cap
+    /// tears down this view's shared player (see enforceTotalPlayerCap):
+    /// balances every registration made against the player and its item so
+    /// the player deallocates cleanly, and resets the bookkeeping so a later
+    /// evicted-player re-load registers fresh observers on the revived player
+    /// (handleLoad's recovery path).
+    func prepareForPlayerEviction() {
+        removeItemObservers()
+        removePlayerStateObservers()
+
+        if let timeObserver = timeObserver {
+            player?.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
     }
 
     public override func observeValue(
@@ -113,7 +139,7 @@ extension VideoPlayerView {
                 // This is important for seeking while paused - user needs to know buffering is done
                 if item.isPlaybackLikelyToKeepUp {
                     sendEvent("loading")
-                    
+
                     // Restore the playback state after buffering completes
                     // This tells the UI whether the video is playing or paused
                     if let player = player {
@@ -125,6 +151,17 @@ extension VideoPlayerView {
                     }
                 }
             case "presentationSize":
+                // Display size (rotation already applied by AVFoundation), so the
+                // Dart overlay can letterbox-match captions. Mirror the texture
+                // renderer's payload shape.
+                let size = item.presentationSize
+                if size.width > 0 && size.height > 0 {
+                    sendEvent("videoSize", data: [
+                        "width": Double(size.width),
+                        "height": Double(size.height),
+                        "rotationCorrection": 0,
+                    ])
+                }
                 emitVideoDimensionsIfAvailable(from: item)
             default: break
             }
@@ -135,6 +172,10 @@ extension VideoPlayerView {
             switch keyPath {
             case "timeControlStatus":
                 guard let player = player else { return }
+
+                // The texture frame pump only runs while playing (plus
+                // one-shot expectFrame renders while paused)
+                textureRenderer?.setRunning(player.timeControlStatus == .playing)
 
                 switch player.timeControlStatus {
                 case .playing:
@@ -147,16 +188,16 @@ extension VideoPlayerView {
                     if mediaInfo == nil, let controllerIdValue = controllerId {
                         mediaInfo = SharedPlayerManager.shared.getMediaInfo(for: controllerIdValue)
                         if mediaInfo != nil {
-                            print("📱 [Observer] Retrieved media info from SharedPlayerManager for playback")
+                            npLog("📱 [Observer] Retrieved media info from SharedPlayerManager for playback")
                             currentMediaInfo = mediaInfo // Update local copy
                         }
                     }
 
                     if let mediaInfo = mediaInfo {
-                        print("📱 [Observer] Player started playing, updating Now Playing info for: \(mediaInfo["title"] ?? "Unknown")")
+                        npLog("📱 [Observer] Player started playing, updating Now Playing info for: \(mediaInfo["title"] ?? "Unknown")")
                         setupNowPlayingInfo(mediaInfo: mediaInfo)
                     } else {
-                        print("⚠️ [Observer] No media info available when playing - media controls may not show correctly")
+                        npLog("⚠️ [Observer] No media info available when playing - media controls may not show correctly")
                     }
 
                     // No auto-PiP arming here — setAutomaticPipView is the single
@@ -180,7 +221,7 @@ extension VideoPlayerView {
                         // The automatic PiP system already checks if video is playing before triggering
                         if #available(iOS 14.2, *) {
                             if let controllerIdValue = controllerId {
-                                print("📱 [Observer] Video paused, but keeping automatic PiP state unchanged for controller \(controllerIdValue)")
+                                npLog("📱 [Observer] Video paused, but keeping automatic PiP state unchanged for controller \(controllerIdValue)")
                             }
                         }
 
@@ -198,11 +239,15 @@ extension VideoPlayerView {
 
                 if isActive {
                     // When AirPlay connects, try to get device name with multiple retry attempts
-                    print("🎯 AVPlayer externalPlaybackActive changed to: \(isActive)")
+                    npLog("🎯 AVPlayer externalPlaybackActive changed to: \(isActive)")
+
+                    // The receiver (TV) renders beyond the inline view's size:
+                    // lift the viewport quality cap while external playback is on
+                    liftViewportCap()
 
                     // Try to get device name immediately
                     let deviceName = getAirPlayDeviceName()
-                    print("📱 Initial device name check: \(deviceName ?? "nil")")
+                    npLog("📱 Initial device name check: \(deviceName ?? "nil")")
 
                     // Send initial event (might have deviceName or might be nil)
                     var eventData: [String: Any] = ["isConnected": isActive, "isConnecting": false]
@@ -224,12 +269,16 @@ extension VideoPlayerView {
 
                     // If device name is nil, retry multiple times with increasing delays
                     if deviceName == nil {
-                        print("⏳ Device name not available yet, starting retry sequence...")
+                        npLog("⏳ Device name not available yet, starting retry sequence...")
                         retryGetAirPlayDeviceName(attempt: 1, maxAttempts: 4)
                     }
                 } else {
                     // Disconnected from AirPlay
-                    print("🎯 AVPlayer externalPlaybackActive changed to: \(isActive)")
+                    npLog("🎯 AVPlayer externalPlaybackActive changed to: \(isActive)")
+
+                    // Back to local rendering: restore the viewport quality cap
+                    applyViewportCapIfAppropriate()
+
                     var eventData: [String: Any] = ["isConnected": false, "isConnecting": false]
 
                     // Send through per-view event channel (legacy)
@@ -248,30 +297,9 @@ extension VideoPlayerView {
             }
         }
 
-        // Handle AVRouteDetector observations
-        if #available(iOS 11.0, *) {
-            if let detector = object as? AVRouteDetector, detector == routeDetector {
-                switch keyPath {
-                case "multipleRoutesDetected":
-                    let isAvailable = routeDetector?.multipleRoutesDetected ?? false
-                    print("AVRouteDetector multipleRoutesDetected changed to: \(isAvailable)")
-                    let eventData: [String: Any] = ["isAvailable": isAvailable]
-
-                    // Send through per-view event channel (legacy)
-                    sendEvent("airPlayAvailabilityChanged", data: eventData)
-
-                    // Send through controller-level event channel (persists when views disposed)
-                    if let controllerIdValue = controllerId {
-                        SharedPlayerManager.shared.sendControllerEvent(
-                            "airPlayAvailabilityChanged",
-                            data: eventData,
-                            for: controllerIdValue
-                        )
-                    }
-                default: break
-                }
-            }
-        }
+        // Note: AirPlay availability changes are observed by the app-wide
+        // route detector in SharedPlayerManager, which fans the event out to
+        // all per-view and controller-level channels.
     }
 
     @objc func playerItemFailedToPlay(notification: Notification) {
@@ -340,62 +368,35 @@ extension VideoPlayerView {
 
     // MARK: - AirPlay Route Detection
 
-    /// Sets up AVRouteDetector to monitor AirPlay availability
-    @available(iOS 11.0, *)
-    func setupAirPlayRouteDetector() {
-        print("Setting up AirPlay route detector")
-        routeDetector = AVRouteDetector()
-        routeDetector?.isRouteDetectionEnabled = true
-
-        // Observe changes to multipleRoutesDetected
-        routeDetector?.addObserver(
-            self,
-            forKeyPath: "multipleRoutesDetected",
-            options: [.new, .initial],
-            context: nil
-        )
-
-        print("AirPlay route detector setup complete, multipleRoutesDetected: \(routeDetector?.multipleRoutesDetected ?? false)")
-    }
-
-    /// Observes AirPlay route availability changes
-    @objc func handleAirPlayRouteChange() {
-        if #available(iOS 11.0, *) {
-            if let isAvailable = routeDetector?.multipleRoutesDetected {
-                sendEvent("airPlayAvailabilityChanged", data: ["isAvailable": isAvailable])
-            }
-        }
-    }
-
     /// Gets the name of the currently connected AirPlay device
     func getAirPlayDeviceName() -> String? {
         let audioSession = AVAudioSession.sharedInstance()
         let currentRoute = audioSession.currentRoute
 
-        print("🔍 Checking audio route for AirPlay device")
-        print("   - Route description: \(currentRoute)")
-        print("   - Output count: \(currentRoute.outputs.count)")
-        print("   - Input count: \(currentRoute.inputs.count)")
+        npLog("🔍 Checking audio route for AirPlay device")
+        npLog("   - Route description: \(currentRoute)")
+        npLog("   - Output count: \(currentRoute.outputs.count)")
+        npLog("   - Input count: \(currentRoute.inputs.count)")
 
         // Look for AirPlay output in the current route
         for (index, output) in currentRoute.outputs.enumerated() {
-            print("   - Output[\(index)]: type=\(output.portType.rawValue), name='\(output.portName)', uid=\(output.uid)")
+            npLog("   - Output[\(index)]: type=\(output.portType.rawValue), name='\(output.portName)', uid=\(output.uid)")
 
             // AirPlay outputs have port type .airPlay
             if output.portType == .airPlay {
-                print("✅ Found AirPlay device at output[\(index)]: '\(output.portName)'")
+                npLog("✅ Found AirPlay device at output[\(index)]: '\(output.portName)'")
                 return output.portName
             }
         }
 
         // Log all output types we found for debugging
         let outputTypes = currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")
-        print("⚠️ No AirPlay device found. Current output types: [\(outputTypes)]")
+        npLog("⚠️ No AirPlay device found. Current output types: [\(outputTypes)]")
 
         // Also check if video is being sent via AirPlay but audio route hasn't updated
         if let player = player, player.isExternalPlaybackActive {
-            print("ℹ️ Note: Player shows externalPlaybackActive=true but no AirPlay in audio route")
-            print("   This may indicate video-only AirPlay where audio route lags behind")
+            npLog("ℹ️ Note: Player shows externalPlaybackActive=true but no AirPlay in audio route")
+            npLog("   This may indicate video-only AirPlay where audio route lags behind")
         }
 
         return nil
@@ -411,7 +412,7 @@ extension VideoPlayerView {
     ///   - maxAttempts: Maximum number of retry attempts
     func retryGetAirPlayDeviceName(attempt: Int, maxAttempts: Int) {
         guard attempt <= maxAttempts else {
-            print("❌ Failed to get device name after \(maxAttempts) attempts")
+            npLog("❌ Failed to get device name after \(maxAttempts) attempts")
             return
         }
 
@@ -424,17 +425,17 @@ extension VideoPlayerView {
         default: delay = 1.0
         }
 
-        print("🔄 Retry attempt \(attempt)/\(maxAttempts) - waiting \(delay)s...")
+        npLog("🔄 Retry attempt \(attempt)/\(maxAttempts) - waiting \(delay)s...")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
 
             let deviceName = self.getAirPlayDeviceName()
-            print("🔍 Attempt \(attempt) result: \(deviceName ?? "still nil")")
+            npLog("🔍 Attempt \(attempt) result: \(deviceName ?? "still nil")")
 
             if let deviceName = deviceName {
                 // Success! Send event with device name
-                print("✅ Device name found on attempt \(attempt): \(deviceName)")
+                npLog("✅ Device name found on attempt \(attempt): \(deviceName)")
                 var eventData: [String: Any] = ["isConnected": true, "isConnecting": false]
                 eventData["deviceName"] = deviceName
 
@@ -454,7 +455,7 @@ extension VideoPlayerView {
                 self.retryGetAirPlayDeviceName(attempt: attempt + 1, maxAttempts: maxAttempts)
             } else {
                 // Exhausted all retries
-                print("⚠️ Device name still not available after \(maxAttempts) attempts")
+                npLog("⚠️ Device name still not available after \(maxAttempts) attempts")
                 // Send event without device name - the Dart caching layer will handle it
                 var eventData: [String: Any] = ["isConnected": true, "isConnecting": false]
 
@@ -475,7 +476,7 @@ extension VideoPlayerView {
 
     /// Handles audio route changes to detect AirPlay device changes
     @objc func handleAudioRouteChange(notification: Notification) {
-        print("🔔 Audio route change notification received")
+        npLog("🔔 Audio route change notification received")
 
         // Log the reason for the route change
         if let reason = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt {
@@ -490,7 +491,7 @@ extension VideoPlayerView {
             case .routeConfigurationChange: reasonString = "RouteConfigurationChange"
             default: reasonString = "Unknown(\(reason))"
             }
-            print("   - Reason: \(reasonString)")
+            npLog("   - Reason: \(reasonString)")
         }
 
         guard let player = player else { return }
@@ -511,12 +512,12 @@ extension VideoPlayerView {
 
         // Only send events for AirPlay-related changes
         if deviceName != nil || isPlayerActive {
-            print("📡 AirPlay state change detected:")
-            print("   - Device: \(deviceName ?? "none")")
-            print("   - Player active: \(isPlayerActive)")
-            print("   - System active: \(isSystemActive)")
-            print("   - Connected: \(isConnected)")
-            print("   - Connecting: \(isConnecting)")
+            npLog("📡 AirPlay state change detected:")
+            npLog("   - Device: \(deviceName ?? "none")")
+            npLog("   - Player active: \(isPlayerActive)")
+            npLog("   - System active: \(isSystemActive)")
+            npLog("   - Connected: \(isConnected)")
+            npLog("   - Connecting: \(isConnecting)")
 
             var eventData: [String: Any] = [
                 "isConnected": isConnected,
@@ -538,7 +539,7 @@ extension VideoPlayerView {
                 )
             }
         } else {
-            print("   - No AirPlay-related changes (device=nil, playerActive=false)")
+            npLog("   - No AirPlay-related changes (device=nil, playerActive=false)")
         }
     }
 }

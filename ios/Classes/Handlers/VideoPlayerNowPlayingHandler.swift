@@ -36,7 +36,7 @@ class RemoteCommandManager {
         lock.lock()
         defer { lock.unlock() }
         currentOwnerViewId = viewId
-        print("🎛️ Remote command ownership transferred to view \(viewId)")
+        npLog("🎛️ Remote command ownership transferred to view \(viewId)")
     }
 
     /// Clear ownership (e.g., when owner is disposed)
@@ -45,7 +45,7 @@ class RemoteCommandManager {
         defer { lock.unlock() }
         if currentOwnerViewId == viewId {
             currentOwnerViewId = nil
-            print("🎛️ Remote command ownership cleared from view \(viewId)")
+            npLog("🎛️ Remote command ownership cleared from view \(viewId)")
         }
     }
 
@@ -66,7 +66,7 @@ class RemoteCommandManager {
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
-        print("🎛️ Removed all remote command targets")
+        npLog("🎛️ Removed all remote command targets")
     }
 
     /// Atomically set owner and remove all targets
@@ -83,31 +83,48 @@ class RemoteCommandManager {
         commandCenter.skipForwardCommand.removeTarget(nil)
         commandCenter.skipBackwardCommand.removeTarget(nil)
         commandCenter.changePlaybackPositionCommand.removeTarget(nil)
-        print("🎛️ Atomically transferred ownership to view \(viewId) and cleared targets")
+        npLog("🎛️ Atomically transferred ownership to view \(viewId) and cleared targets")
     }
 }
 
 extension VideoPlayerView {
     /// Sets up the Now Playing info for the Control Center and Lock Screen
     func setupNowPlayingInfo(mediaInfo: [String: Any]) {
+        npLog("🎵 setupNowPlayingInfo called for view \(viewId)")
+        npLog("   → Media title: \(mediaInfo["title"] ?? "Unknown")")
+
         // Withhold metadata while suppressed (floating player hidden behind the
-        // sleep mixer). restoreNowPlayingIfNeeded clears the flag before calling
+        // sleep mixer). setNowPlayingSuppressed clears the flag before calling
         // back in, so a genuine restore isn't blocked.
         if isNowPlayingSuppressed {
-            print("🎵 setupNowPlayingInfo skipped for view \(viewId) - Now Playing suppressed")
+            npLog("🎵 setupNowPlayingInfo skipped for view \(viewId) - Now Playing suppressed")
             return
         }
-        print("🎵 setupNowPlayingInfo called for view \(viewId)")
-        print("   → Media title: \(mediaInfo["title"] ?? "Unknown")")
-        print("   → Current Now Playing info before update: \(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String ?? "nil")")
+
+        // Short-circuit: this fires on every transition to .playing (including
+        // after buffering stalls). If this view already owns the remote
+        // commands and the metadata is unchanged, a position/rate refresh is
+        // all that's needed — skip the audio-session activation, artwork
+        // download and remote-command re-registration.
+        let infoKey = [
+            "title", "subtitle", "artworkUrl",
+            "showSkipControls", "showSystemNextTrackControl", "showSystemPreviousTrackControl",
+        ].map { "\(mediaInfo[$0] ?? "")" }.joined(separator: "|")
+        if hasRegisteredRemoteCommands,
+           RemoteCommandManager.shared.isOwner(viewId),
+           lastAppliedNowPlayingInfoKey == infoKey {
+            updateNowPlayingPlaybackTime()
+            return
+        }
+        lastAppliedNowPlayingInfoKey = infoKey
 
         // CRITICAL: Ensure audio session is active
         // iOS won't show Now Playing info if the audio session is not active
         do {
             try AVAudioSession.sharedInstance().setActive(true)
-            print("   → Audio session activated successfully")
+            npLog("   → Audio session activated successfully")
         } catch {
-            print("   ⚠️ Failed to activate audio session: \(error.localizedDescription)")
+            npLog("   ⚠️ Failed to activate audio session: \(error.localizedDescription)")
         }
 
         var nowPlayingInfo: [String: Any] = [:]
@@ -143,7 +160,7 @@ extension VideoPlayerView {
         // --- Playback rate (0 = paused, 1 = playing) ---
         let playbackRate = player?.rate ?? 0.0
         nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = playbackRate
-        print("   → Playback rate: \(playbackRate)")
+        npLog("   → Playback rate: \(playbackRate)")
 
         // Tag the info so cleanupRemoteCommandOwnership can tell if this view
         // still owns it at dispose time.
@@ -151,40 +168,7 @@ extension VideoPlayerView {
 
         // --- Commit initial metadata immediately (before artwork loads) ---
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
-        print("   → Now Playing info SET to: \(nowPlayingInfo[MPMediaItemPropertyTitle] ?? "Unknown")")
-
-        // Verify immediately
-        let immediateCheck = MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String ?? "nil"
-        print("   → Verified Now Playing info immediately after set: \(immediateCheck)")
-
-        // Check again after a delay to see if something clears it
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let delayedCheck = MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String ?? "nil"
-            print("   → Delayed check (0.5s later): Now Playing info is: \(delayedCheck)")
-            if delayedCheck == "nil" {
-                print("   ⚠️ WARNING: Now Playing info was CLEARED by something after we set it!")
-            }
-
-            // Diagnostic: Check audio session state
-            let audioSession = AVAudioSession.sharedInstance()
-            print("   → Audio session category: \(audioSession.category.rawValue)")
-            print("   → Audio session is active: \(audioSession.isOtherAudioPlaying ? "No (other audio playing)" : "Yes")")
-
-            // Diagnostic: Check remote command center
-            let commandCenter = MPRemoteCommandCenter.shared()
-            print("   → Play command has targets: \(commandCenter.playCommand.isEnabled)")
-            print("   → Pause command has targets: \(commandCenter.pauseCommand.isEnabled)")
-
-            // Diagnostic: Dump all Now Playing info
-            if let info = MPNowPlayingInfoCenter.default().nowPlayingInfo {
-                print("   → Complete Now Playing info:")
-                for (key, value) in info {
-                    print("      • \(key): \(value)")
-                }
-            } else {
-                print("   → Now Playing info is completely nil!")
-            }
-        }
+        npLog("   → Now Playing info SET to: \(nowPlayingInfo[MPMediaItemPropertyTitle] ?? "Unknown")")
 
         // --- Load artwork asynchronously (if available) ---
         if let artworkUrlString = mediaInfo["artworkUrl"] as? String,
@@ -199,7 +183,7 @@ extension VideoPlayerView {
 
                 var updatedInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
                 guard let ownerId = updatedInfo[NowPlayingOwnership.key] as? Int64, ownerId == self.viewId else {
-                    print("🎵 Dropping late artwork for view \(self.viewId) - no longer owns Now Playing info")
+                    npLog("🎵 Dropping late artwork for view \(self.viewId) - no longer owns Now Playing info")
                     return
                 }
                 let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in
@@ -241,7 +225,7 @@ extension VideoPlayerView {
         // Already registered and still the owner: the installed targets are this view's, so
         // there is nothing to redo.
         if hasRegisteredRemoteCommands, RemoteCommandManager.shared.isOwner(viewId) {
-            print("🎛️ View \(viewId) already has remote commands registered and is still owner - skipping re-registration")
+            npLog("🎛️ View \(viewId) already has remote commands registered and is still owner - skipping re-registration")
             return
         }
 
@@ -249,7 +233,7 @@ extension VideoPlayerView {
         // along the way. Re-taking ownership alone would leave the owner and the installed
         // handlers on different views, and every command would then fail its `isOwner` guard —
         // so fall through and re-register, which restores that pairing.
-        print("🎛️ View \(viewId) registering remote commands (first time: \(!hasRegisteredRemoteCommands))")
+        npLog("🎛️ View \(viewId) registering remote commands (first time: \(!hasRegisteredRemoteCommands))")
 
         // Atomically take ownership and clear all existing targets
         // This prevents race conditions when multiple views try to register concurrently
@@ -263,7 +247,7 @@ extension VideoPlayerView {
 
             // Only handle if we still own the remote commands
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received play command but is not owner")
+                npLog("⚠️ View \(self.viewId) received play command but is not owner")
                 return .commandFailed
             }
 
@@ -289,7 +273,7 @@ extension VideoPlayerView {
 
             // Only handle if we still own the remote commands
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received pause command but is not owner")
+                npLog("⚠️ View \(self.viewId) received pause command but is not owner")
                 return .commandFailed
             }
 
@@ -316,7 +300,7 @@ extension VideoPlayerView {
             guard let self = self else { return .commandFailed }
 
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received previous track command but is not owner")
+                npLog("⚠️ View \(self.viewId) received previous track command but is not owner")
                 return .commandFailed
             }
 
@@ -330,7 +314,7 @@ extension VideoPlayerView {
             guard let self = self else { return .commandFailed }
 
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received next track command but is not owner")
+                npLog("⚠️ View \(self.viewId) received next track command but is not owner")
                 return .commandFailed
             }
 
@@ -349,7 +333,7 @@ extension VideoPlayerView {
             }
 
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received skip forward command but is not owner")
+                npLog("⚠️ View \(self.viewId) received skip forward command but is not owner")
                 return .commandFailed
             }
 
@@ -371,7 +355,7 @@ extension VideoPlayerView {
             }
 
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received skip backward command but is not owner")
+                npLog("⚠️ View \(self.viewId) received skip backward command but is not owner")
                 return .commandFailed
             }
 
@@ -393,7 +377,7 @@ extension VideoPlayerView {
             }
 
             guard RemoteCommandManager.shared.isOwner(self.viewId) else {
-                print("⚠️ View \(self.viewId) received change position command but is not owner")
+                npLog("⚠️ View \(self.viewId) received change position command but is not owner")
                 return .commandFailed
             }
 
@@ -412,15 +396,15 @@ extension VideoPlayerView {
             return .success
         }
 
-        print("🎛️ View \(viewId) registered remote command handlers")
+        npLog("🎛️ View \(viewId) registered remote command handlers")
 
         // Verify remote commands are enabled
-        print("   → Play command enabled: \(commandCenter.playCommand.isEnabled)")
-        print("   → Pause command enabled: \(commandCenter.pauseCommand.isEnabled)")
-        print("   → Previous track enabled: \(commandCenter.previousTrackCommand.isEnabled)")
-        print("   → Next track enabled: \(commandCenter.nextTrackCommand.isEnabled)")
-        print("   → Skip forward enabled: \(commandCenter.skipForwardCommand.isEnabled)")
-        print("   → Skip backward enabled: \(commandCenter.skipBackwardCommand.isEnabled)")
+        npLog("   → Play command enabled: \(commandCenter.playCommand.isEnabled)")
+        npLog("   → Pause command enabled: \(commandCenter.pauseCommand.isEnabled)")
+        npLog("   → Previous track enabled: \(commandCenter.previousTrackCommand.isEnabled)")
+        npLog("   → Next track enabled: \(commandCenter.nextTrackCommand.isEnabled)")
+        npLog("   → Skip forward enabled: \(commandCenter.skipForwardCommand.isEnabled)")
+        npLog("   → Skip backward enabled: \(commandCenter.skipBackwardCommand.isEnabled)")
     }
 
     /// Refreshes the lock-screen / Control Center prev/next button availability
@@ -447,7 +431,7 @@ extension VideoPlayerView {
         currentMediaInfo = mediaInfo
 
         guard RemoteCommandManager.shared.isOwner(viewId) else {
-            print("🎛️ View \(viewId) refreshSystemTrackControlsAvailability skipped — not owner")
+            npLog("🎛️ View \(viewId) refreshSystemTrackControlsAvailability skipped — not owner")
             return
         }
 
@@ -462,7 +446,7 @@ extension VideoPlayerView {
         commandCenter.skipForwardCommand.isEnabled = shouldShowTrackNavigation
             ? (!showSystemNextTrackControl && showSkipControls)
             : showSkipControls
-        print("🎛️ View \(viewId) refreshed track-nav availability — prev: \(commandCenter.previousTrackCommand.isEnabled), next: \(commandCenter.nextTrackCommand.isEnabled)")
+        npLog("🎛️ View \(viewId) refreshed track-nav availability — prev: \(commandCenter.previousTrackCommand.isEnabled), next: \(commandCenter.nextTrackCommand.isEnabled)")
     }
 
     /// Updates playback time and rate dynamically (e.g., every second or on state change)
@@ -481,7 +465,7 @@ extension VideoPlayerView {
         // This prevents multiple views from fighting over Now Playing info
         guard RemoteCommandManager.shared.isOwner(viewId) else {
             if isPlaying {
-                print("⚠️ View \(viewId) is playing but doesn't own remote commands")
+                npLog("⚠️ View \(viewId) is playing but doesn't own remote commands")
             }
             return
         }
@@ -528,12 +512,12 @@ extension VideoPlayerView {
             let controllerViewIds = Set(controllerViews.map { $0.viewId })
             if let ownerId = currentInfo?[NowPlayingOwnership.key] as? Int64, controllerViewIds.contains(ownerId) {
                 MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-                print("🙈 View \(viewId) suppressed Now Playing info")
+                npLog("🙈 View \(viewId) suppressed Now Playing info")
             }
         } else if let mediaInfo = currentMediaInfo {
             // Flags are already cleared above, so setupNowPlayingInfo republishes
             // from this (the current primary/rendering) view.
-            print("👀 View \(viewId) restoring Now Playing info")
+            npLog("👀 View \(viewId) restoring Now Playing info")
             setupNowPlayingInfo(mediaInfo: mediaInfo)
             updateNowPlayingPlaybackTime()
         }

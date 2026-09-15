@@ -1,6 +1,7 @@
 package com.huddlecommunity.better_native_video_player.handlers
 
-import android.util.Log
+import com.huddlecommunity.better_native_video_player.NpLog
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.URL
@@ -108,10 +109,10 @@ object VideoPlayerQualityHandler {
                 )
             })
 
-            Log.d(TAG, "Parsed ${qualities.size} quality variants from HLS playlist")
+            NpLog.d(TAG, "Parsed ${qualities.size} quality variants from HLS playlist")
             result
         } catch (e: Exception) {
-            Log.e(TAG, "Error fetching HLS qualities: ${e.message}", e)
+            NpLog.e(TAG, "Error fetching HLS qualities: ${e.message}", e)
             emptyList()
         }
     }
