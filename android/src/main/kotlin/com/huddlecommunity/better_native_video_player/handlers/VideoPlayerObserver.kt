@@ -1,13 +1,15 @@
 package com.huddlecommunity.better_native_video_player.handlers
 
+import com.huddlecommunity.better_native_video_player.NpLog
+
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.C
 import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.ExoPlayer
 
 /**
  * Observes ExoPlayer state changes and reports them via EventHandler
@@ -19,12 +21,13 @@ class VideoPlayerObserver(
     private val notificationHandler: com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler? = null,
     private val getMediaInfo: (() -> Map<String, Any>?)? = null,
     private val controllerId: Int? = null,
-    private val viewId: Long? = null
+    private val viewId: Long? = null,
+    private val updateIntervalMs: Long = 500L,
+    private val prioritizeActivePlayback: Boolean = false
 ) : Player.Listener {
 
     companion object {
         private const val TAG = "VideoPlayerObserver"
-        private const val UPDATE_INTERVAL_MS = 500L // Update every 500ms
     }
 
     // Track if we've already sent a buffering event to avoid duplicates
@@ -36,72 +39,73 @@ class VideoPlayerObserver(
     private var lastVideoHeight = 0
 
     private val handler = Handler(Looper.getMainLooper())
+
+    // The ticker only runs while the player is actually playing: paused/idle
+    // players don't change position, so ticking them is wasted channel
+    // traffic and main-thread wakeups (multiplied by the number of players in
+    // a feed). One final update is sent on pause/seek so UIs stay correct.
+    private var isTickerRunning = false
+
     private val timeUpdateRunnable = object : Runnable {
         override fun run() {
-            var position: Long
-            var duration: Long
-
-            // Check if this is a live stream (not just dynamic, but actually non-seekable live)
-            val timeline = player.currentTimeline
-            val window = Timeline.Window()
-
-            val isLiveStream = !timeline.isEmpty &&
-                timeline.getWindow(player.currentMediaItemIndex, window).isDynamic &&
-                !window.isSeekable
-
-            if (isLiveStream) {
-                // For HLS live streams, use the seekable window to calculate relative position
-                // Get the window information
-                timeline.getWindow(player.currentMediaItemIndex, window)
-
-                // Duration is the seekable window size
-                duration = window.durationMs
-
-                // Position is relative to the seekable window start
-                // windowStartTimeMs gives us the absolute start time of the window
-                position = player.currentPosition - window.windowStartTimeMs
-
-                // Clamp position to valid range
-                if (position < 0) position = 0
-                if (position > duration) position = duration
-            } else {
-                // Regular VOD content - use direct position and duration
-                position = player.currentPosition
-                duration = player.duration
+            sendTimeUpdate()
+            if (isTickerRunning) {
+                handler.postDelayed(this, updateIntervalMs)
             }
-
-            // Get buffered position
-            val bufferedPosition = player.bufferedPosition.toInt() // milliseconds
-
-            // Check if currently buffering
-            val isBuffering = player.playbackState == Player.STATE_BUFFERING
-            val videoWidth = player.videoSize.width
-            val videoHeight = player.videoSize.height
-
-            if (duration > 0) {
-                val payload = mutableMapOf<String, Any>(
-                    "position" to position.toInt(),
-                    "duration" to duration.toInt(),
-                    "bufferedPosition" to bufferedPosition,
-                    "isBuffering" to isBuffering
-                )
-                addVideoDimensionsToPayload(payload, videoWidth, videoHeight)
-                eventHandler.sendEvent("timeUpdate", payload)
-            }
-
-            // Schedule next update
-            handler.postDelayed(this, UPDATE_INTERVAL_MS)
         }
     }
 
-    init {
-        // Start periodic time updates
-        handler.post(timeUpdateRunnable)
-    }
+    /** Sends a single timeUpdate event with the current position/duration. */
+    fun sendTimeUpdate() {
+        var position: Long
+        var duration: Long
 
-    fun release() {
-        // Stop periodic updates
-        handler.removeCallbacks(timeUpdateRunnable)
+        // Check if this is a live stream (not just dynamic, but actually non-seekable live)
+        val timeline = player.currentTimeline
+        val window = Timeline.Window()
+
+        val isLiveStream = !timeline.isEmpty &&
+            timeline.getWindow(player.currentMediaItemIndex, window).isDynamic &&
+            !window.isSeekable
+
+        if (isLiveStream) {
+            // For HLS live streams, use the seekable window to calculate relative position
+            // Get the window information
+            timeline.getWindow(player.currentMediaItemIndex, window)
+
+            // Duration is the seekable window size
+            duration = window.durationMs
+
+            // Position is relative to the seekable window start
+            // windowStartTimeMs gives us the absolute start time of the window
+            position = player.currentPosition - window.windowStartTimeMs
+
+            // Clamp position to valid range
+            if (position < 0) position = 0
+            if (position > duration) position = duration
+        } else {
+            // Regular VOD content - use direct position and duration
+            position = player.currentPosition
+            duration = player.duration
+        }
+
+        // Get buffered position
+        val bufferedPosition = player.bufferedPosition.toInt() // milliseconds
+
+        // Check if currently buffering
+        val isBuffering = player.playbackState == Player.STATE_BUFFERING
+        val videoSize = player.videoSize
+
+        if (duration > 0) {
+            val payload = mutableMapOf<String, Any>(
+                "position" to position.toInt(),
+                "duration" to duration.toInt(),
+                "bufferedPosition" to bufferedPosition,
+                "isBuffering" to isBuffering
+            )
+            addVideoDimensionsToPayload(payload, videoSize.width, videoSize.height)
+            eventHandler.sendEvent("timeUpdate", payload)
+        }
     }
 
     private fun addVideoDimensionsToPayload(payload: MutableMap<String, Any>, width: Int, height: Int) {
@@ -111,6 +115,7 @@ class VideoPlayerObserver(
         }
     }
 
+    /** Emits a `videoDimensions` event, deduplicated against the last reported size. */
     private fun maybeEmitVideoDimensions(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
         if (width == lastVideoWidth && height == lastVideoHeight) return
@@ -122,6 +127,7 @@ class VideoPlayerObserver(
         )
     }
 
+    /** Falls back to the selected video track format when `videoSize` is not populated yet. */
     private fun resolveCurrentVideoDimensions(): Pair<Int, Int>? {
         val currentVideoSize = player.videoSize
         if (currentVideoSize.width > 0 && currentVideoSize.height > 0) {
@@ -143,11 +149,40 @@ class VideoPlayerObserver(
         return null
     }
 
-    override fun onPlaybackStateChanged(playbackState: Int) {
-        Log.d(TAG, "Playback state changed: $playbackState, isLoading: ${player.isLoading}")
+    private fun emitCurrentVideoDimensions() {
         resolveCurrentVideoDimensions()?.let { (width, height) ->
             maybeEmitVideoDimensions(width, height)
         }
+    }
+
+    private fun startTicker() {
+        if (isTickerRunning) return
+        isTickerRunning = true
+        handler.post(timeUpdateRunnable)
+    }
+
+    private fun stopTicker() {
+        if (!isTickerRunning) return
+        isTickerRunning = false
+        handler.removeCallbacks(timeUpdateRunnable)
+    }
+
+    init {
+        // A shared player may already be playing when this observer attaches
+        // (view reattachment with the same controller ID)
+        if (player.isPlaying) {
+            startTicker()
+        }
+    }
+
+    fun release() {
+        // Stop periodic updates
+        stopTicker()
+    }
+
+    override fun onPlaybackStateChanged(playbackState: Int) {
+        NpLog.d(TAG, "Playback state changed: $playbackState, isLoading: ${player.isLoading}")
+        emitCurrentVideoDimensions()
         when (playbackState) {
             Player.STATE_IDLE -> {
                 // Player is idle
@@ -156,7 +191,7 @@ class VideoPlayerObserver(
                 // Send buffering event when entering BUFFERING state
                 // Only send if we haven't already reported buffering
                 if (!hasReportedBuffering) {
-                    Log.d(TAG, "Entering BUFFERING state, sending buffering event")
+                    NpLog.d(TAG, "Entering BUFFERING state, sending buffering event")
                     eventHandler.sendEvent("buffering")
                     hasReportedBuffering = true
                 }
@@ -189,22 +224,43 @@ class VideoPlayerObserver(
     }
 
     override fun onIsPlayingChanged(isPlaying: Boolean) {
-        Log.d(TAG, "Is playing changed: $isPlaying, playbackState: ${player.playbackState}")
+        NpLog.d(TAG, "Is playing changed: $isPlaying, playbackState: ${player.playbackState}")
+        if (isPlaying) {
+            startTicker()
+        } else {
+            // One final update so paused UIs show the exact position
+            sendTimeUpdate()
+            stopTicker()
+        }
+
+        // With prioritizeActivePlayback, playing players win network/IO
+        // contention over paused ones (shared PriorityTaskManager attached in
+        // SharedPlayerManager.buildPlayer)
+        if (prioritizeActivePlayback) {
+            (player as? ExoPlayer)?.setPriority(
+                if (isPlaying) C.PRIORITY_PLAYBACK else C.PRIORITY_PLAYBACK_PRELOAD
+            )
+            NpLog.d(
+                TAG,
+                "Playback priority -> ${if (isPlaying) "PLAYBACK" else "PLAYBACK_PRELOAD"} (view $viewId)"
+            )
+        }
+
         if (isPlaying) {
             // ALWAYS update media session/notification when playback starts
             // This ensures media controls show the correct info whether in normal view or PiP
             val mediaInfo = getMediaInfo?.invoke()
             if (mediaInfo != null && notificationHandler != null) {
                 val title = mediaInfo["title"] as? String
-                Log.d(TAG, "📱 [Observer] Player started playing, updating media session for: $title")
+                NpLog.d(TAG, "📱 [Observer] Player started playing, updating media session for: $title")
                 notificationHandler.setupMediaSession(mediaInfo)
-                Log.d(TAG, "✅ [Observer] Media session updated - controls should now show correct info")
+                NpLog.d(TAG, "✅ [Observer] Media session updated - controls should now show correct info")
             } else {
                 if (mediaInfo == null) {
-                    Log.w(TAG, "⚠️ [Observer] No media info available when playing - media controls may not show correctly")
+                    NpLog.w(TAG, "⚠️ [Observer] No media info available when playing - media controls may not show correctly")
                 }
                 if (notificationHandler == null) {
-                    Log.w(TAG, "⚠️ [Observer] No notification handler available")
+                    NpLog.w(TAG, "⚠️ [Observer] No notification handler available")
                 }
             }
             eventHandler.sendEvent("play")
@@ -219,13 +275,13 @@ class VideoPlayerObserver(
     }
 
     override fun onIsLoadingChanged(isLoading: Boolean) {
-        Log.d(TAG, "Is loading changed: $isLoading, playbackState: ${player.playbackState}, isPlaying: ${player.isPlaying}, playWhenReady: ${player.playWhenReady}")
+        NpLog.d(TAG, "Is loading changed: $isLoading, playbackState: ${player.playbackState}, isPlaying: ${player.isPlaying}, playWhenReady: ${player.playWhenReady}")
 
         // Send buffering event when loading starts in BUFFERING state
         // This catches cases where isLoading changes before playbackState
         // Only send if we haven't already reported buffering
         if (isLoading && player.playbackState == Player.STATE_BUFFERING && !hasReportedBuffering) {
-            Log.d(TAG, "Loading started while in BUFFERING state, sending buffering event")
+            NpLog.d(TAG, "Loading started while in BUFFERING state, sending buffering event")
             eventHandler.sendEvent("buffering")
             hasReportedBuffering = true
         } else if (!isLoading && player.playbackState == Player.STATE_READY) {
@@ -250,28 +306,36 @@ class VideoPlayerObserver(
         }
     }
 
-    override fun onPlayerError(error: PlaybackException) {
-        Log.e(TAG, "Player error: ${error.message}", error)
-        eventHandler.sendEvent(
-            "error",
-            mapOf("message" to (error.message ?: "Unknown error"))
-        )
-    }
-
     override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
         maybeEmitVideoDimensions(videoSize.width, videoSize.height)
     }
 
     override fun onTracksChanged(tracks: Tracks) {
-        resolveCurrentVideoDimensions()?.let { (width, height) ->
-            maybeEmitVideoDimensions(width, height)
-        }
+        emitCurrentVideoDimensions()
     }
 
     override fun onRenderedFirstFrame() {
-        resolveCurrentVideoDimensions()?.let { (width, height) ->
-            maybeEmitVideoDimensions(width, height)
+        emitCurrentVideoDimensions()
+    }
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int
+    ) {
+        // Seeking while paused must still update the UI position (the ticker
+        // only runs during playback)
+        if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+            sendTimeUpdate()
         }
+    }
+
+    override fun onPlayerError(error: PlaybackException) {
+        NpLog.e(TAG, "Player error: ${error.message}", error)
+        eventHandler.sendEvent(
+            "error",
+            mapOf("message" to (error.message ?: "Unknown error"))
+        )
     }
 
     override fun onDeviceInfoChanged(deviceInfo: androidx.media3.common.DeviceInfo) {
@@ -281,7 +345,7 @@ class VideoPlayerObserver(
         // Only send event if the state changed
         if (isExternalPlaybackActive != wasExternalPlaybackActive) {
             wasExternalPlaybackActive = isExternalPlaybackActive
-            Log.d(TAG, "Cast/external playback changed: $isExternalPlaybackActive")
+            NpLog.d(TAG, "Cast/external playback changed: $isExternalPlaybackActive")
             eventHandler.sendEvent(
                 "airPlayConnectionChanged",
                 mapOf("isConnected" to isExternalPlaybackActive)

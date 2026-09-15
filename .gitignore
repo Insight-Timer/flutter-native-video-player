@@ -74,3 +74,9 @@ app.*.map.json
 # Coverage
 coverage/
 *.lcov
+# Local-only notes
+*.local.md
+PROMPT_*.md
+
+# Example build output
+example/**/build/

@@ -47,6 +47,8 @@ enum PlayerControlState {
   fullscreenExited,
   timeUpdated,
   videoDimensionsUpdated,
+  subtitleTrackChanged,
+  audioTrackChanged,
 }
 
 /// Activity state event for playback changes
@@ -157,6 +159,10 @@ class PlayerControlEvent {
         return PlayerControlState.timeUpdated;
       case 'videoDimensions':
         return PlayerControlState.videoDimensionsUpdated;
+      case 'subtitleChange':
+        return PlayerControlState.subtitleTrackChanged;
+      case 'audioTrackChange':
+        return PlayerControlState.audioTrackChanged;
       default:
         return PlayerControlState.none;
     }

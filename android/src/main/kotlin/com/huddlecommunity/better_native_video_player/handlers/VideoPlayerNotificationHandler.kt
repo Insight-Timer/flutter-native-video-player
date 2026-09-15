@@ -7,7 +7,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -15,6 +14,7 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSession.ConnectionResult
+import com.huddlecommunity.better_native_video_player.NpLog
 import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
 
 /**
@@ -29,6 +29,7 @@ class VideoPlayerNotificationHandler(
     private var eventHandler: VideoPlayerEventHandler
 ) {
     companion object {
+        private const val TAG = "VideoPlayerNotification"
         private var sessionCounter = 0
     }
 
@@ -91,7 +92,7 @@ class VideoPlayerNotificationHandler(
         // notification swipe) still pass through.
         override fun stop() {
             if (suppressSystemStop) {
-                Log.w("VideoPlayerNH", "Ignoring MediaSession stop() during foreground teardown")
+                NpLog.w(TAG, "Ignoring MediaSession stop() during foreground teardown")
                 return
             }
             super.stop()

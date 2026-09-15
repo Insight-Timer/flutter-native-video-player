@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../models/native_video_player_audio_track.dart';
 import '../models/native_video_player_quality.dart';
 import '../models/native_video_player_subtitle_track.dart';
 import '../models/native_video_player_track_disable_result.dart';
@@ -13,6 +14,52 @@ class VideoPlayerMethodChannel {
   final int primaryPlatformViewId;
   final MethodChannel _methodChannel;
 
+  /// Creates a texture-rendered backend (Android `androidTextureMode`).
+  ///
+  /// [creationParams] must include the Dart-allocated `viewId` (from
+  /// `platformViewsRegistry.getNextPlatformViewId()`, so it can never
+  /// collide with a real platform view). Returns the engine `textureId`
+  /// to render with a `Texture` widget. Throws on failure — the widget
+  /// falls back gracefully.
+  static Future<int> createTextureView(
+    Map<String, dynamic> creationParams,
+  ) async {
+    final result = await const MethodChannel(
+      'native_video_player',
+    ).invokeMapMethod<String, Object?>('createTextureView', creationParams);
+    return result!['textureId']! as int;
+  }
+
+  /// Disposes all native texture backends (hot-restart hygiene: the Dart
+  /// isolate forgets them but they survive natively). Called once per
+  /// isolate before the first [createTextureView]. Failures are swallowed.
+  static Future<void> disposeAllTextureViews() async {
+    try {
+      await const MethodChannel(
+        'native_video_player',
+      ).invokeMethod<void>('disposeAllTextureViews');
+    } catch (e) {
+      debugPrint('disposeAllTextureViews failed: $e');
+    }
+  }
+
+  /// Tells the native side a platform view has been disposed.
+  ///
+  /// On iOS this releases the per-view EventChannel stream handler, whose
+  /// engine-side registration strongly retains the native view — without
+  /// this call the view (and its observers) can never deallocate. Android
+  /// cleans up in `PlatformView.dispose` and treats this as a no-op.
+  /// Static because it can target any view, not just the primary one.
+  static Future<void> notifyViewDisposed(int platformViewId) async {
+    try {
+      await const MethodChannel(
+        'native_video_player',
+      ).invokeMethod<void>('viewDisposed', {'viewId': platformViewId});
+    } catch (e) {
+      debugPrint('Error notifying view disposal for view $platformViewId: $e');
+    }
+  }
+
   /// Loads a video URL
   Future<void> load({
     required String url,
@@ -20,6 +67,8 @@ class VideoPlayerMethodChannel {
     Map<String, String>? headers,
     Map<String, dynamic>? mediaInfo,
     Map<String, dynamic>? drmConfig,
+    List<Map<String, dynamic>>? sidecarSubtitles,
+    int? startAtMs,
   }) async {
     final Map<String, Object> params = <String, Object>{
       'url': url,
@@ -39,7 +88,63 @@ class VideoPlayerMethodChannel {
       params['drmConfig'] = drmConfig;
     }
 
+    if (sidecarSubtitles != null) {
+      params['sidecarSubtitles'] = sidecarSubtitles;
+    }
+
+    if (startAtMs != null && startAtMs > 0) {
+      params['startAtMs'] = startAtMs;
+    }
+
     await _methodChannel.invokeMethod<void>('load', params);
+  }
+
+  /// Attaches sidecar subtitle sources natively (Android: rebuilds the
+  /// MediaItem with SubtitleConfigurations so captions can render in
+  /// PiP/native fullscreen). No-op failure by design.
+  Future<void> setSidecarSubtitles(
+    List<Map<String, dynamic>> sidecarSubtitles,
+  ) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setSidecarSubtitles', {
+        'viewId': primaryPlatformViewId,
+        'sidecarSubtitles': sidecarSubtitles,
+      });
+    } catch (e) {
+      debugPrint('Failed to set sidecar subtitles: $e');
+    }
+  }
+
+  /// Selects/deselects the natively sideloaded sidecar text track (Android;
+  /// used while PiP or native fullscreen hides the Flutter subtitle overlay).
+  Future<void> setNativeSidecarActive({
+    required bool active,
+    String? language,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setNativeSidecarActive', {
+        'viewId': primaryPlatformViewId,
+        'active': active,
+        if (language != null) 'language': language,
+      });
+    } catch (e) {
+      debugPrint('Failed to toggle native sidecar captions: $e');
+    }
+  }
+
+  /// Suppresses/restores native subtitle rendering around Android PiP, where the
+  /// system SubtitleView would otherwise render oversized captions in the small
+  /// PiP window. The native side snapshots the pre-PiP selection and restores it
+  /// when [suppressed] is false again.
+  Future<void> setSubtitlesSuppressedForPip(bool suppressed) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setSubtitlesSuppressedForPip', {
+        'viewId': primaryPlatformViewId,
+        'suppressed': suppressed,
+      });
+    } catch (e) {
+      debugPrint('Failed to toggle PiP subtitle suppression: $e');
+    }
   }
 
   /// Starts or resumes video playback
@@ -85,6 +190,20 @@ class VideoPlayerMethodChannel {
       });
     } catch (e) {
       debugPrint('Error calling setVolume: $e');
+    }
+  }
+
+  /// Sets the text-size scale for embedded (native-rendered) subtitle
+  /// tracks. 1.0 = platform default. Issue #43.
+  Future<void> setEmbeddedTextScale(double scale) async {
+    try {
+      await _methodChannel
+          .invokeMethod<void>('setEmbeddedTextScale', <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'scale': scale,
+      });
+    } catch (e) {
+      debugPrint('Error calling setEmbeddedTextScale: $e');
     }
   }
 
@@ -249,6 +368,41 @@ class VideoPlayerMethodChannel {
         'suppressed': suppressed,
       },
     );
+  }
+
+  /// Gets the alternate audio tracks of the current media
+  Future<List<NativeVideoPlayerAudioTrack>> getAvailableAudioTracks() async {
+    try {
+      final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+        'getAvailableAudioTracks',
+        <String, Object>{'viewId': primaryPlatformViewId},
+      );
+      if (result is List) {
+        return result
+            .map(
+              (dynamic e) => NativeVideoPlayerAudioTrack.fromMap(
+                e as Map<dynamic, dynamic>,
+              ),
+            )
+            .toList();
+      }
+      return <NativeVideoPlayerAudioTrack>[];
+    } catch (e) {
+      debugPrint('Error fetching audio tracks: $e');
+      return <NativeVideoPlayerAudioTrack>[];
+    }
+  }
+
+  /// Selects an alternate audio track
+  Future<void> setAudioTrack(NativeVideoPlayerAudioTrack track) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setAudioTrack', <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'track': track.toMap(),
+      });
+    } catch (e) {
+      debugPrint('Error calling setAudioTrack: $e');
+    }
   }
 
   /// Checks if Picture-in-Picture is available

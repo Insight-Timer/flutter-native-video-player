@@ -1,20 +1,26 @@
 package com.huddlecommunity.better_native_video_player.handlers
 
+import com.huddlecommunity.better_native_video_player.NpLog
+
 import android.app.Activity
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.common.MimeTypes
+import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -22,6 +28,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import com.huddlecommunity.better_native_video_player.manager.SharedPlayerManager
+import com.huddlecommunity.better_native_video_player.manager.VideoCacheManager
 
 /**
  * Handles method calls from Flutter for video player control
@@ -35,10 +42,46 @@ class VideoPlayerMethodHandler(
     private val notificationHandler: VideoPlayerNotificationHandler,
     private val updateMediaInfo: ((Map<String, Any>?) -> Unit)? = null,
     private val controllerId: Int? = null,
-    private val enableHDR: Boolean = false
+    private val enableHDR: Boolean = false,
+    private val enableDiskCache: Boolean = false,
+    private val diskCacheMaxBytes: Long = VideoCacheManager.DEFAULT_MAX_BYTES
 ) {
     companion object {
         private const val TAG = "VideoPlayerMethod"
+
+        /**
+         * Determines if a URL is an HLS stream (.m3u8 extension or common
+         * HLS patterns). Shared with VideoCacheManager.precache, which must
+         * warm playlists+segments for HLS rather than raw bytes.
+         */
+        internal fun isHlsUrl(url: String): Boolean {
+            val lowerUrl = url.lowercase()
+            // .m3u8 extension (most reliable indicator)
+            if (lowerUrl.contains(".m3u8")) {
+                return true
+            }
+            // /hls/ as a path segment (not substring, avoiding false
+            // positives like "english")
+            return Regex("/hls/").containsMatchIn(lowerUrl)
+        }
+    }
+
+    /**
+     * Wraps [upstream] with the shared disk cache when enabled. DRM streams
+     * and non-http sources (file://, content://, extracted assets) always
+     * bypass the cache.
+     */
+    private fun maybeWrapWithCache(
+        upstream: DataSource.Factory,
+        url: String,
+        hasDrm: Boolean
+    ): DataSource.Factory {
+        if (!enableDiskCache || hasDrm || !url.startsWith("http", ignoreCase = true)) {
+            NpLog.d(TAG, "Disk cache bypass (enabled=$enableDiskCache, drm=$hasDrm) for $url")
+            return upstream
+        }
+        NpLog.d(TAG, "Disk cache wrap for $url")
+        return VideoCacheManager.buildCacheFactory(context, upstream, diskCacheMaxBytes)
     }
 
     private var availableQualities: List<Map<String, Any>> = emptyList()
@@ -47,10 +90,22 @@ class VideoPlayerMethodHandler(
     private val bitrateCheckInterval = 5000L // 5 seconds
     private var currentVideoIsHls = false // Track if current video is HLS for quality switching
 
+    // Ingredients of the last load, kept so sidecar subtitles can be attached
+    // after the fact (the media source must be rebuilt fresh; Media3 forbids
+    // reusing prepared MediaSource instances)
+    private var lastMediaItem: MediaItem? = null
+    private var lastDataSourceFactory: DataSource.Factory? = null
+
+    // Sidecar subtitle configurations attached to the current media source.
+    // They load UNSELECTED: the Flutter overlay renders inline captions; the
+    // native track is only selected during PiP/native fullscreen, where the
+    // Flutter UI is not visible (see setNativeSidecarActive).
+    private var sidecarSubtitleConfigs: List<MediaItem.SubtitleConfiguration> = emptyList()
+
     // Callback to handle fullscreen requests from Flutter
     var onFullscreenRequest: ((Boolean) -> Unit)? = null
 
-    // Callback to force the PlayerView to re-bind its Surface to the player.
+    // Callback to force the display path to re-bind its Surface to the player.
     // Needed after re-enabling the video track: on some devices (e.g. OnePlus 15) the
     // renderer otherwise reconnects to an offscreen ImageReader instead of the SurfaceView,
     // causing a frozen video with live audio.
@@ -60,10 +115,15 @@ class VideoPlayerMethodHandler(
      * Handles incoming method calls from Flutter
      */
     fun handleMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        Log.d(TAG, "Handling method call: ${call.method}")
+        NpLog.d(TAG, "Handling method call: ${call.method}")
 
         when (call.method) {
             "load" -> handleLoad(call, result)
+            "setSidecarSubtitles" -> handleSetSidecarSubtitles(call, result)
+            "setNativeSidecarActive" -> handleSetNativeSidecarActive(call, result)
+            "setSubtitlesSuppressedForPip" -> handleSetSubtitlesSuppressedForPip(call, result)
+            "getAvailableAudioTracks" -> handleGetAvailableAudioTracks(result)
+            "setAudioTrack" -> handleSetAudioTrack(call, result)
             "play" -> handlePlay(result)
             "pause" -> handlePause(result)
             "seekTo" -> handleSeekTo(call, result)
@@ -124,10 +184,8 @@ class VideoPlayerMethodHandler(
      */
     private fun handleGetVideoDimensions(result: MethodChannel.Result) {
         val videoSize = player.videoSize
-        val width = videoSize.width
-        val height = videoSize.height
-        if (width > 0 && height > 0) {
-            result.success(mapOf("width" to width, "height" to height))
+        if (videoSize.width > 0 && videoSize.height > 0) {
+            result.success(mapOf("width" to videoSize.width, "height" to videoSize.height))
             return
         }
         result.success(null)
@@ -149,6 +207,7 @@ class VideoPlayerMethodHandler(
         val headers = args["headers"] as? Map<String, String>
         val mediaInfo = args["mediaInfo"] as? Map<String, Any>
         val drmConfig = args["drmConfig"] as? Map<*, *>
+        val startAtMs = (args["startAtMs"] as? Number)?.toLong() ?: 0L
 
         // Cache track nav flags early so getAvailableCommands() reflects them when
         // setMediaSource() triggers onAvailableCommandsChanged below.
@@ -158,11 +217,11 @@ class VideoPlayerMethodHandler(
         updateMediaInfo?.invoke(mediaInfo)
         mediaInfo?.let {
             val title = it["title"] as? String
-            Log.d(TAG, "📱 Stored media info during load: $title")
+            NpLog.d(TAG, "📱 Stored media info during load: $title")
         }
 
-        Log.d(TAG, "Loading video: $url (autoPlay: $autoPlay)")
-        Log.d(TAG, "Current player state - playbackState: ${player.playbackState}, duration: ${player.duration}, hasMedia: ${player.currentMediaItem != null}")
+        NpLog.d(TAG, "Loading video: $url (autoPlay: $autoPlay)")
+        NpLog.d(TAG, "Current player state - playbackState: ${player.playbackState}, duration: ${player.duration}, hasMedia: ${player.currentMediaItem != null}")
 
         // Only send "loading" event if player is actually starting to load new media
         // Don't send if player is already in IDLE state with no media loaded
@@ -173,12 +232,12 @@ class VideoPlayerMethodHandler(
                                       player.duration < 0 && 
                                       player.currentMediaItem == null
         if (isPlayerIdleWithNoMedia) {
-            Log.d(TAG, "Player is already idle with no media (playbackState=${player.playbackState}, duration=${player.duration}, hasMedia=${player.currentMediaItem != null}), skipping loading event")
+            NpLog.d(TAG, "Player is already idle with no media (playbackState=${player.playbackState}, duration=${player.duration}, hasMedia=${player.currentMediaItem != null}), skipping loading event")
             // Don't send loading event - the initial state should have already sent "idle"
             // If initial state wasn't sent yet, it will be sent when EventChannel connects
         } else {
             // Player has media or is in a different state, send loading event
-            Log.d(TAG, "Sending loading event - player is not idle or has media")
+            NpLog.d(TAG, "Sending loading event - player is not idle or has media")
             eventHandler.sendEvent("loading")
         }
 
@@ -187,18 +246,24 @@ class VideoPlayerMethodHandler(
         val isHls = isHlsUrl(url)
         currentVideoIsHls = isHls // Track for quality switching
 
-        Log.d(TAG, "Video source type - Local: $isLocalFile, HLS: $isHls")
+        NpLog.d(TAG, "Video source type - Local: $isLocalFile, HLS: $isHls")
 
         // Build data source factory
         // For remote URLs with custom headers, use HTTP-specific data source
         // For local files, use DefaultDataSource which supports file:// URIs
-        val finalDataSourceFactory = if (!isLocalFile && headers != null) {
+        val upstreamDataSourceFactory = if (!isLocalFile && headers != null) {
             DefaultHttpDataSource.Factory().apply {
                 setDefaultRequestProperties(headers)
             }
         } else {
             DefaultDataSource.Factory(context)
         }
+        // Opt-in disk cache wrap. hasDrm mirrors the condition under which a
+        // DrmConfiguration is set on the MediaItem below — protected content
+        // must never be written to the cache.
+        val hasDrm = drmConfig?.get("licenseUrl") != null
+        val finalDataSourceFactory =
+            maybeWrapWithCache(upstreamDataSourceFactory, url, hasDrm)
 
         // Build MediaItem with metadata
         val mediaItemBuilder = MediaItem.Builder()
@@ -228,7 +293,7 @@ class VideoPlayerMethodHandler(
                     "widevine" -> C.WIDEVINE_UUID
                     "clearkey", "aes-128" -> C.CLEARKEY_UUID
                     else -> {
-                        Log.w(TAG, "Unknown DRM type: $drmType, defaulting to Widevine")
+                        NpLog.w(TAG, "Unknown DRM type: $drmType, defaulting to Widevine")
                         C.WIDEVINE_UUID
                     }
                 }
@@ -241,34 +306,34 @@ class VideoPlayerMethodHandler(
                 }
 
                 mediaItemBuilder.setDrmConfiguration(drmBuilder.build())
-                Log.d(TAG, "DRM configured - Type: $drmType, License URL: $licenseUrl")
+                NpLog.d(TAG, "DRM configured - Type: $drmType, License URL: $licenseUrl")
             } else {
-                Log.w(TAG, "DRM config provided but licenseUrl is missing")
+                NpLog.w(TAG, "DRM config provided but licenseUrl is missing")
             }
         }
 
         val mediaItem = mediaItemBuilder.build()
 
-        // Create appropriate MediaSource based on URL type
-        val mediaSource: MediaSource = if (isHls) {
-            // HLS stream
-            Log.d(TAG, "Creating HLS media source")
-            HlsMediaSource.Factory(finalDataSourceFactory)
-                .createMediaSource(mediaItem)
-        } else {
-            // Progressive download/playback (MP4, local files, etc.)
-            Log.d(TAG, "Creating progressive media source")
-            ProgressiveMediaSource.Factory(finalDataSourceFactory)
-                .createMediaSource(mediaItem)
-        }
+        // Remember the ingredients so sidecar subtitles can be (re)attached
+        // later without re-passing the load parameters
+        lastMediaItem = mediaItem
+        lastDataSourceFactory = finalDataSourceFactory
+        sidecarSubtitleConfigs = parseSidecarSubtitleConfigs(args["sidecarSubtitles"] as? List<*>)
 
-        // Set media source
-        player.setMediaSource(mediaSource)
+        // Set media source (main source merged with any sidecar subtitles).
+        // A resume position (startAtMs) is handed to ExoPlayer up front so
+        // playback begins there directly — no visible seek after start.
+        val mediaSource = buildMediaSourceWithSidecars(mediaItem, finalDataSourceFactory)
+        if (startAtMs > 0) {
+            player.setMediaSource(mediaSource, startAtMs)
+        } else {
+            player.setMediaSource(mediaSource)
+        }
         player.prepare()
 
         // Configure HDR settings for ExoPlayer using TrackSelectionParameters
         if (!enableHDR) {
-            Log.d(TAG, "🎨 HDR disabled - ExoPlayer will use automatic tone-mapping for HDR content")
+            NpLog.d(TAG, "🎨 HDR disabled - ExoPlayer will use automatic tone-mapping for HDR content")
             // Note: ExoPlayer automatically tone-maps HDR content to SDR on devices
             // that don't support HDR or when the display doesn't support it.
             //
@@ -283,14 +348,14 @@ class VideoPlayerMethodHandler(
             //
             // See: https://github.com/androidx/media/issues/1074
         } else {
-            Log.d(TAG, "🎨 HDR enabled - allowing native HDR playback")
+            NpLog.d(TAG, "🎨 HDR enabled - allowing native HDR playback")
         }
 
         // Fetch qualities asynchronously for HLS streams
         if (url.contains(".m3u8")) {
             CoroutineScope(Dispatchers.Main).launch {
                 availableQualities = VideoPlayerQualityHandler.fetchHLSQualities(url)
-                Log.d(TAG, "Fetched ${availableQualities.size} qualities")
+                NpLog.d(TAG, "Fetched ${availableQualities.size} qualities")
 
                 // Store in SharedPlayerManager if this is a shared player
                 if (controllerId != null) {
@@ -305,7 +370,7 @@ class VideoPlayerMethodHandler(
                         "label" to (defaultQuality["label"] ?: "Auto"),
                         "isAuto" to (defaultQuality["isAuto"] ?: true)
                     ))
-                    Log.d(TAG, "Sent qualityChange event with ${availableQualities.size} available qualities")
+                    NpLog.d(TAG, "Sent qualityChange event with ${availableQualities.size} available qualities")
                 }
             }
         }
@@ -325,7 +390,7 @@ class VideoPlayerMethodHandler(
 
                     // Auto play if requested - MUST be done after player is ready
                     if (autoPlay) {
-                        Log.d(TAG, "Auto-playing video after ready")
+                        NpLog.d(TAG, "Auto-playing video after ready")
                         player.play()
                         // Play event will be sent automatically by VideoPlayerObserver
                     }
@@ -408,13 +473,258 @@ class VideoPlayerMethodHandler(
             } else {
                 androidx.media3.common.Player.REPEAT_MODE_OFF
             }
-            Log.d(TAG, "Looping set to: $looping")
+            NpLog.d(TAG, "Looping set to: $looping")
         }
         result.success(null)
     }
 
     /**
      * Changes video quality (for HLS streams)
+     */
+    /**
+     * Lists the alternate audio tracks (languages, audio description,
+     * commentary) of the current media — the audio mirror of the subtitle
+     * track API (issues #23/#16). Index is the track's position within its
+     * audio track group, matching what handleSetAudioTrack expects.
+     */
+    private fun handleGetAvailableAudioTracks(result: MethodChannel.Result) {
+        try {
+            val tracks = mutableListOf<Map<String, Any>>()
+            for (group in player.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_AUDIO) continue
+                for (trackIndex in 0 until group.length) {
+                    val format = group.getTrackFormat(trackIndex)
+                    val languageCode = format.language ?: "unknown"
+                    val displayName = format.label?.takeIf { it.isNotEmpty() }
+                        ?: try {
+                            java.util.Locale(languageCode)
+                                .getDisplayLanguage(java.util.Locale.getDefault())
+                                .takeIf { it.isNotEmpty() } ?: languageCode
+                        } catch (e: Exception) {
+                            languageCode
+                        }
+                    tracks.add(
+                        mapOf(
+                            "index" to tracks.size,
+                            "language" to languageCode,
+                            "displayName" to displayName,
+                            "isSelected" to group.isTrackSelected(trackIndex)
+                        )
+                    )
+                }
+            }
+            NpLog.d(TAG, "🔊 Total audio tracks found: ${tracks.size}")
+            result.success(tracks)
+        } catch (e: Exception) {
+            NpLog.e(TAG, "Error getting audio tracks: ${e.message}", e)
+            result.success(emptyList<Map<String, Any>>())
+        }
+    }
+
+    /**
+     * Selects an alternate audio track by flat index (the enumeration order
+     * of handleGetAvailableAudioTracks). Uses a TrackSelectionOverride —
+     * unlike a preferred-language hint, this distinguishes multiple tracks
+     * of the same language (e.g. "English" vs "English audio description").
+     */
+    private fun handleSetAudioTrack(call: MethodCall, result: MethodChannel.Result) {
+        try {
+            val args = call.arguments as? Map<*, *>
+            val trackInfo = args?.get("track") as? Map<*, *>
+            val requestedIndex = trackInfo?.get("index") as? Int
+            if (requestedIndex == null) {
+                result.error("INVALID_TRACK", "Invalid audio track data", null)
+                return
+            }
+
+            var flatIndex = 0
+            for (group in player.currentTracks.groups) {
+                if (group.type != C.TRACK_TYPE_AUDIO) continue
+                for (trackIndex in 0 until group.length) {
+                    if (flatIndex == requestedIndex) {
+                        player.trackSelectionParameters = player.trackSelectionParameters
+                            .buildUpon()
+                            .setOverrideForType(
+                                TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
+                            )
+                            .build()
+
+                        val format = group.getTrackFormat(trackIndex)
+                        val languageCode = format.language ?: "unknown"
+                        val displayName = format.label?.takeIf { it.isNotEmpty() } ?: languageCode
+                        NpLog.d(TAG, "🔊 Selected audio track: $displayName ($languageCode)")
+                        eventHandler.sendEvent(
+                            "audioTrackChange",
+                            mapOf(
+                                "index" to requestedIndex,
+                                "language" to languageCode,
+                                "displayName" to displayName,
+                                "isSelected" to true
+                            )
+                        )
+                        result.success(null)
+                        return
+                    }
+                    flatIndex++
+                }
+            }
+            result.error("INVALID_INDEX", "Invalid audio track index", null)
+        } catch (e: Exception) {
+            NpLog.e(TAG, "Error setting audio track: ${e.message}", e)
+            result.error("AUDIO_TRACK_ERROR", e.message, null)
+        }
+    }
+
+    /**
+     * Parses the Dart-side sidecar subtitle maps (URL sources only) into
+     * Media3 SubtitleConfigurations. Loaded UNSELECTED by design — see the
+     * sidecarSubtitleConfigs field comment.
+     */
+    private fun parseSidecarSubtitleConfigs(raw: List<*>?): List<MediaItem.SubtitleConfiguration> {
+        if (raw == null) return emptyList()
+        return raw.mapNotNull { entry ->
+            val map = entry as? Map<*, *> ?: return@mapNotNull null
+            val url = map["url"] as? String ?: return@mapNotNull null
+            val mimeType = when ((map["format"] as? String)?.lowercase()) {
+                "srt" -> MimeTypes.APPLICATION_SUBRIP
+                else -> MimeTypes.TEXT_VTT
+            }
+            MediaItem.SubtitleConfiguration.Builder(android.net.Uri.parse(url))
+                .setMimeType(mimeType)
+                .setLanguage(map["language"] as? String)
+                .setLabel(map["label"] as? String)
+                .setSelectionFlags(0)
+                .build()
+        }
+    }
+
+    /**
+     * Builds the playback MediaSource: the type-specific main source merged
+     * with one SingleSampleMediaSource per sidecar subtitle (the documented
+     * Media3 pattern for sideloading when not using DefaultMediaSourceFactory).
+     */
+    private fun buildMediaSourceWithSidecars(
+        mediaItem: MediaItem,
+        dataSourceFactory: DataSource.Factory
+    ): MediaSource {
+        val mainSource: MediaSource = if (currentVideoIsHls) {
+            NpLog.d(TAG, "Creating HLS media source")
+            HlsMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        } else {
+            NpLog.d(TAG, "Creating progressive media source")
+            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+        }
+        if (sidecarSubtitleConfigs.isEmpty()) return mainSource
+
+        NpLog.d(TAG, "Merging ${sidecarSubtitleConfigs.size} sidecar subtitle source(s)")
+        val subtitleSources = sidecarSubtitleConfigs.map { config ->
+            SingleSampleMediaSource.Factory(dataSourceFactory)
+                .createMediaSource(config, C.TIME_UNSET)
+        }
+        return MergingMediaSource(mainSource, *subtitleSources.toTypedArray())
+    }
+
+    /**
+     * Attaches sidecar subtitles after a load: rebuilds the media source with
+     * the merged subtitle tracks, preserving position and play state.
+     */
+    private fun handleSetSidecarSubtitles(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        sidecarSubtitleConfigs = parseSidecarSubtitleConfigs(args?.get("sidecarSubtitles") as? List<*>)
+
+        val mediaItem = lastMediaItem
+        val dataSourceFactory = lastDataSourceFactory
+        if (mediaItem == null || dataSourceFactory == null) {
+            // Nothing loaded yet: the configs apply at the next load
+            result.success(null)
+            return
+        }
+
+        val position = player.currentPosition
+        val wasPlaying = player.playWhenReady
+        player.setMediaSource(buildMediaSourceWithSidecars(mediaItem, dataSourceFactory))
+        player.prepare()
+        player.seekTo(position)
+        player.playWhenReady = wasPlaying
+        NpLog.d(TAG, "Rebuilt media source with sidecar subtitles at ${position}ms")
+        result.success(null)
+    }
+
+    /**
+     * Selects/deselects the native sidecar text track. Driven by the Dart
+     * controller when entering/leaving PiP or native fullscreen — contexts
+     * where the Flutter subtitle overlay is not visible, so the platform's
+     * SubtitleView must take over rendering.
+     */
+    private fun handleSetNativeSidecarActive(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val active = args?.get("active") as? Boolean ?: false
+        val language = args?.get("language") as? String
+
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .apply {
+                if (active && language != null) {
+                    setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    setPreferredTextLanguage(language)
+                } else {
+                    setPreferredTextLanguage(null)
+                    setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                }
+            }
+            .build()
+        NpLog.d(TAG, "Native sidecar track active=$active language=$language")
+        result.success(null)
+    }
+
+    // Remembers whether the text track type was disabled before entering PiP, so
+    // the prior subtitle selection (sidecar preferred-language or embedded
+    // TrackSelectionOverride) is restored on exit.
+    private var textDisabledBeforePip: Boolean? = null
+
+    /**
+     * Suppresses all subtitle rendering while in Android PiP and restores it on
+     * exit. In PiP the Flutter overlay is gone and the native SubtitleView
+     * renders captions at the system default size, which is oversized in the tiny
+     * PiP window. Disabling the player's text track type hides every subtitle
+     * source (embedded and sidecar) at once; the TrackSelectionOverride in
+     * `overrides` survives buildUpon(), so the exact track resumes on restore.
+     */
+    private fun handleSetSubtitlesSuppressedForPip(call: MethodCall, result: MethodChannel.Result) {
+        val suppressed = (call.arguments as? Map<*, *>)?.get("suppressed") as? Boolean ?: false
+        val params = player.trackSelectionParameters
+        if (suppressed) {
+            // Snapshot the baseline only once so repeated suppress calls don't
+            // overwrite it with the already-disabled state.
+            if (textDisabledBeforePip == null) {
+                textDisabledBeforePip = params.disabledTrackTypes.contains(C.TRACK_TYPE_TEXT)
+            }
+            player.trackSelectionParameters = params.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+        } else {
+            val wasDisabled = textDisabledBeforePip
+            textDisabledBeforePip = null
+            if (wasDisabled != null) {
+                player.trackSelectionParameters = params.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, wasDisabled)
+                    .build()
+            }
+        }
+        NpLog.d(TAG, "PiP subtitle suppression=$suppressed (restoreDisabled=$textDisabledBeforePip)")
+        result.success(null)
+    }
+
+    /**
+     * Pins or releases the HLS video quality.
+     *
+     * Crucially this does NOT reload a variant playlist. Each QualityLevel.url
+     * is a single video-only variant; on adaptive HLS the audio lives in a
+     * separate `#EXT-X-MEDIA:TYPE=AUDIO` rendition referenced only by the
+     * master. Calling setMediaSource(HlsMediaSource(variantUrl)) therefore
+     * dropped the audio. Instead we keep the master source loaded and constrain
+     * the *video* track via trackSelectionParameters — audio is untouched and
+     * the switch is instant (no buffering reload).
      */
     private fun handleSetQuality(call: MethodCall, result: MethodChannel.Result) {
         // Check if current video is HLS before attempting quality switch
@@ -435,100 +745,46 @@ class VideoPlayerMethodHandler(
         isAutoQuality = isAuto
 
         if (isAuto) {
-            // Start with the middle quality for auto mode
-            val midIndex = (availableQualities.size / 2 - 1).coerceAtLeast(0)
-            if (midIndex >= availableQualities.size) {
-                result.error("NO_QUALITIES", "No qualities available", null)
-                return
-            }
-
-            val initialQuality = availableQualities[midIndex]
-            switchToQuality(initialQuality, result)
-
-            // Start monitoring quality
-            startQualityMonitoring()
-        } else {
-            val url = qualityInfo["url"] as? String
-            val label = qualityInfo["label"] as? String
-
-            if (url == null) {
-                result.error("INVALID_QUALITY", "Quality URL is required", null)
-                return
-            }
-
-            eventHandler.sendEvent("loading")
-
-            // Save current state
-            val wasPlaying = player.isPlaying
-            val currentPosition = player.currentPosition
-
-            // Build new media source
-            // Use DefaultDataSource for consistency with load method
-            val dataSourceFactory = DefaultDataSource.Factory(context)
-            val mediaItem = MediaItem.fromUri(url)
-            val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
-                .createMediaSource(mediaItem)
-
-            // Switch to new quality
-            player.setMediaSource(mediaSource)
-            player.prepare()
-            player.seekTo(currentPosition)
-            
-            // Only resume playback if it was playing before
-            if (wasPlaying) {
-                player.play()
-            }
+            // Lift the manual ceiling so ABR resumes. Use MAX rather than
+            // clearVideoSizeConstraints() — the latter would also wipe the
+            // separate viewport cap (setViewportSize) applied by
+            // PlayerBackendSession, which is an independent constraint.
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .setMaxVideoSize(Int.MAX_VALUE, Int.MAX_VALUE)
+                .setMaxVideoBitrate(Int.MAX_VALUE)
+                .build()
 
             eventHandler.sendEvent("qualityChange", mapOf(
-                "url" to url,
-                "label" to (label ?: ""),
+                "url" to (qualityInfo["url"] as? String ?: ""),
+                "label" to (qualityInfo["label"] as? String ?: "Auto"),
+                "isAuto" to true
+            ))
+            result.success(null)
+        } else {
+            val width = (qualityInfo["width"] as? Number)?.toInt()
+            val height = (qualityInfo["height"] as? Number)?.toInt()
+            val bitrate = (qualityInfo["bitrate"] as? Number)?.toInt()
+
+            player.trackSelectionParameters = player.trackSelectionParameters
+                .buildUpon()
+                .apply {
+                    if (width != null && height != null && width > 0 && height > 0) {
+                        setMaxVideoSize(width, height)
+                    }
+                    if (bitrate != null && bitrate > 0) {
+                        setMaxVideoBitrate(bitrate)
+                    }
+                }
+                .build()
+
+            eventHandler.sendEvent("qualityChange", mapOf(
+                "url" to (qualityInfo["url"] as? String ?: ""),
+                "label" to (qualityInfo["label"] as? String ?: ""),
                 "isAuto" to false
             ))
-
             result.success(null)
         }
-    }
-
-    private fun startQualityMonitoring() {
-        // Quality monitoring is simplified for now
-        // In a production app, you would implement bandwidth monitoring here
-        Log.d(TAG, "Auto quality monitoring enabled (simplified implementation)")
-    }
-
-    private fun switchToQuality(quality: Map<String, Any>, result: MethodChannel.Result?) {
-        val url = quality["url"] as? String ?: return
-        val label = quality["label"] as? String ?: "Unknown"
-
-        eventHandler.sendEvent("loading")
-
-        // Save current state
-        val wasPlaying = player.isPlaying
-        val currentPosition = player.currentPosition
-
-        // Build new media source
-        // Use DefaultDataSource for consistency with load method
-        val dataSourceFactory = DefaultDataSource.Factory(context)
-        val mediaItem = MediaItem.fromUri(url)
-        val mediaSource = HlsMediaSource.Factory(dataSourceFactory)
-            .createMediaSource(mediaItem)
-
-        // Switch to new quality
-        player.setMediaSource(mediaSource)
-        player.prepare()
-        player.seekTo(currentPosition)
-
-        // Only resume playback if it was playing before
-        if (wasPlaying) {
-            player.play()
-        }
-
-        eventHandler.sendEvent("qualityChange", mapOf(
-            "url" to url,
-            "label" to label,
-            "isAuto" to isAutoQuality
-        ))
-
-        result?.success(null)
     }
 
     /**
@@ -543,7 +799,7 @@ class VideoPlayerMethodHandler(
             val cachedQualities = SharedPlayerManager.getQualities(controllerId)
             if (cachedQualities != null && cachedQualities.isNotEmpty()) {
                 availableQualities = cachedQualities
-                Log.d(TAG, "🔄 Restored ${cachedQualities.size} qualities from cache for controller $controllerId")
+                NpLog.d(TAG, "🔄 Restored ${cachedQualities.size} qualities from cache for controller $controllerId")
                 result.success(cachedQualities)
             } else {
                 result.success(availableQualities)
@@ -563,10 +819,10 @@ class VideoPlayerMethodHandler(
             // Shared player: SharedPlayerManager.removePlayer() releases the
             // notification handler, stops the service, and releases the player.
             SharedPlayerManager.removePlayer(context, controllerId)
-            Log.d(TAG, "Removed shared player for controller ID: $controllerId")
+            NpLog.d(TAG, "Removed shared player for controller ID: $controllerId")
         } else {
             // Non-shared player: tear down the foreground service and MediaSession
-            // here rather than relying on PlatformView.dispose() running first.
+            // here rather than relying on the backend's dispose running first.
             // release() is idempotent, so a later dispose call is safe.
             notificationHandler.release()
         }
@@ -580,7 +836,7 @@ class VideoPlayerMethodHandler(
      * Triggers the native fullscreen dialog
      */
     private fun handleEnterFullScreen(result: MethodChannel.Result) {
-        Log.d(TAG, "Flutter requested enter fullscreen")
+        NpLog.d(TAG, "Flutter requested enter fullscreen")
         onFullscreenRequest?.invoke(true)
         result.success(null)
     }
@@ -590,7 +846,7 @@ class VideoPlayerMethodHandler(
      * Dismisses the native fullscreen dialog
      */
     private fun handleExitFullScreen(result: MethodChannel.Result) {
-        Log.d(TAG, "Flutter requested exit fullscreen")
+        NpLog.d(TAG, "Flutter requested exit fullscreen")
         onFullscreenRequest?.invoke(false)
         result.success(null)
     }
@@ -600,7 +856,7 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple technology and not available on Android
      */
     private fun handleIsAirPlayAvailable(result: MethodChannel.Result) {
-        Log.d(TAG, "AirPlay availability checked - not supported on Android")
+        NpLog.d(TAG, "AirPlay availability checked - not supported on Android")
         // AirPlay is not available on Android
         result.success(false)
     }
@@ -610,7 +866,7 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple technology and not available on Android
      */
     private fun handleShowAirPlayPicker(result: MethodChannel.Result) {
-        Log.d(TAG, "AirPlay picker requested but not supported on Android")
+        NpLog.d(TAG, "AirPlay picker requested but not supported on Android")
         // Simply return success - AirPlay is not available on Android
         result.success(null)
     }
@@ -620,7 +876,7 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple technology and not available on Android
      */
     private fun handleStartAirPlayDetection(result: MethodChannel.Result) {
-        Log.d(TAG, "AirPlay detection start requested but not supported on Android")
+        NpLog.d(TAG, "AirPlay detection start requested but not supported on Android")
         // Simply return success - AirPlay is not available on Android
         result.success(null)
     }
@@ -630,7 +886,7 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple technology and not available on Android
      */
     private fun handleStopAirPlayDetection(result: MethodChannel.Result) {
-        Log.d(TAG, "AirPlay detection stop requested but not supported on Android")
+        NpLog.d(TAG, "AirPlay detection stop requested but not supported on Android")
         // Simply return success - AirPlay is not available on Android
         result.success(null)
     }
@@ -640,7 +896,7 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple technology and not available on Android
      */
     private fun handleDisconnectAirPlay(result: MethodChannel.Result) {
-        Log.d(TAG, "AirPlay disconnect requested but not supported on Android")
+        NpLog.d(TAG, "AirPlay disconnect requested but not supported on Android")
         // Simply return success - AirPlay is not available on Android
         result.success(null)
     }
@@ -671,29 +927,8 @@ class VideoPlayerMethodHandler(
      * AirPlay is an Apple-only technology
      */
     private fun checkAndSendAirPlayAvailability() {
-        Log.d(TAG, "📡 AirPlay availability check: false (Android)")
+        NpLog.d(TAG, "📡 AirPlay availability check: false (Android)")
         eventHandler.sendEvent("airPlayAvailabilityChanged", mapOf("isAvailable" to false))
-    }
-
-    /**
-     * Determines if a URL is an HLS stream
-     * Checks for .m3u8 extension or common HLS patterns
-     */
-    private fun isHlsUrl(url: String): Boolean {
-        val lowerUrl = url.lowercase()
-        // Check for .m3u8 extension (most reliable indicator)
-        if (lowerUrl.contains(".m3u8")) {
-            return true
-        }
-        // Check for /hls/ as a path segment (not substring to avoid false positives like "english")
-        if (Regex("/hls/").containsMatchIn(lowerUrl)) {
-            return true
-        }
-        // Check for manifest in path
-        if (lowerUrl.contains("manifest.m3u8")) {
-            return true
-        }
-        return false
     }
 
     // MARK: - Subtitle Track Handling
@@ -710,6 +945,13 @@ class VideoPlayerMethodHandler(
 
             // Get track selection parameters to find the selected track
             val trackSelectionParameters = player.trackSelectionParameters
+
+            // A flat index across ALL text tracks of ALL groups (same scheme as
+            // handleGetAvailableAudioTracks). ExoPlayer exposes a separate text
+            // track group per source (e.g. a sideloaded sidecar is its own
+            // group), so a per-group index would collide between groups.
+            // handleSetSubtitleTrack walks the same counter.
+            var flatIndex = 0
 
             // Iterate through all track groups
             for (groupIndex in 0 until currentTracks.groups.size) {
@@ -739,22 +981,23 @@ class VideoPlayerMethodHandler(
                             }
 
                         val trackInfo = mapOf(
-                            "index" to trackIndex,
+                            "index" to flatIndex,
                             "language" to languageCode,
                             "displayName" to displayName,
                             "isSelected" to isSelected
                         )
 
                         tracks.add(trackInfo)
-                        Log.d(TAG, "📝 Found subtitle track: $displayName ($languageCode) - Selected: $isSelected")
+                        NpLog.d(TAG, "📝 Found subtitle track: $displayName ($languageCode) - Selected: $isSelected")
+                        flatIndex++
                     }
                 }
             }
 
-            Log.d(TAG, "📝 Total subtitle tracks found: ${tracks.size}")
+            NpLog.d(TAG, "📝 Total subtitle tracks found: ${tracks.size}")
             result.success(tracks)
         } catch (e: Exception) {
-            Log.e(TAG, "Error getting subtitle tracks: ${e.message}", e)
+            NpLog.e(TAG, "Error getting subtitle tracks: ${e.message}", e)
             result.success(emptyList<Map<String, Any>>())
         }
     }
@@ -775,7 +1018,7 @@ class VideoPlayerMethodHandler(
 
             // Index -1 means disable subtitles
             if (index == -1) {
-                Log.d(TAG, "📝 Disabling subtitles")
+                NpLog.d(TAG, "📝 Disabling subtitles")
 
                 // Disable text track selection
                 val newParameters = player.trackSelectionParameters
@@ -801,27 +1044,40 @@ class VideoPlayerMethodHandler(
                 .buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
 
-            // Find the track format for the requested index
+            // Walk the same global text-track index used by
+            // handleGetAvailableSubtitleTracks to find the exact (group, track),
+            // then pin it with a TrackSelectionOverride. Selecting the specific
+            // track group — rather than setPreferredTextLanguage — avoids
+            // selecting EVERY track that shares the language, which would render
+            // two overlapping subtitles (and crash) when a sidecar and an
+            // embedded track share a language.
             val currentTracks = player.currentTracks
             var trackFound = false
             var selectedLanguage = "unknown"
             var selectedDisplayName = "Unknown"
+            var flatIndex = 0
 
-            for (groupIndex in 0 until currentTracks.groups.size) {
+            loop@ for (groupIndex in 0 until currentTracks.groups.size) {
                 val group = currentTracks.groups[groupIndex]
+                if (group.type != C.TRACK_TYPE_TEXT) continue
 
-                if (group.type == C.TRACK_TYPE_TEXT && index < group.length) {
-                    val format = group.getTrackFormat(index)
-                    selectedLanguage = format.language ?: "unknown"
-                    selectedDisplayName = format.label?.takeIf { it.isNotEmpty() }
-                        ?: selectedLanguage
+                for (trackIndex in 0 until group.length) {
+                    if (flatIndex == index) {
+                        val format = group.getTrackFormat(trackIndex)
+                        selectedLanguage = format.language ?: "unknown"
+                        selectedDisplayName = format.label?.takeIf { it.isNotEmpty() }
+                            ?: selectedLanguage
 
-                    // Set preferred text language to the selected track's language
-                    parametersBuilder = parametersBuilder
-                        .setPreferredTextLanguage(selectedLanguage)
+                        parametersBuilder = parametersBuilder
+                            .setOverrideForType(
+                                TrackSelectionOverride(group.mediaTrackGroup, trackIndex)
+                            )
 
-                    trackFound = true
-                    break
+                        trackFound = true
+                        break@loop
+                    }
+
+                    flatIndex++
                 }
             }
 
@@ -832,7 +1088,7 @@ class VideoPlayerMethodHandler(
 
             player.trackSelectionParameters = parametersBuilder.build()
 
-            Log.d(TAG, "📝 Selected subtitle track: $selectedDisplayName ($selectedLanguage)")
+            NpLog.d(TAG, "📝 Selected subtitle track: $selectedDisplayName ($selectedLanguage)")
 
             eventHandler.sendEvent("subtitleChange", mapOf(
                 "index" to index,
@@ -843,7 +1099,7 @@ class VideoPlayerMethodHandler(
 
             result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting subtitle track: ${e.message}", e)
+            NpLog.e(TAG, "Error setting subtitle track: ${e.message}", e)
             result.error("ERROR", "Failed to set subtitle track: ${e.message}", null)
         }
     }
@@ -853,11 +1109,9 @@ class VideoPlayerMethodHandler(
      *
      * When disabled on a demuxed HLS stream, ExoPlayer stops selecting video renditions
      * and only fetches audio segments — saving bandwidth during background playback.
+     * When re-enabled, video segment downloads resume from the current position.
      *
-     * When re-enabled, ExoPlayer resumes video segment downloads from the current position.
-     *
-     * Uses the same trackSelectionParameters API as subtitle disabling. Purely a bandwidth
-     * optimisation: the media notification is driven separately by
+     * Purely a bandwidth optimisation: the media notification is driven separately by
      * [handleSetBackgroundPlaybackActive], so background audio no longer requires tearing
      * the video renderer down.
      */
@@ -866,12 +1120,11 @@ class VideoPlayerMethodHandler(
             val args = call.arguments as? Map<*, *>
             val disabled = args?.get("disabled") as? Boolean ?: false
 
-            Log.d(TAG, "Setting video track disabled: $disabled")
+            NpLog.d(TAG, "Setting video track disabled: $disabled")
 
             if (disabled) {
-                // Check if HLS has demuxed (separate) audio tracks.
-                // If audio is muxed inside video segments, disabling video
-                // will not save bandwidth, so skip.
+                // If audio is muxed inside the video segments, disabling video saves no
+                // bandwidth (and would kill audio), so skip.
                 val hasDemuxedAudio = player.currentTracks.groups.any {
                     it.type == C.TRACK_TYPE_AUDIO
                 }
@@ -881,31 +1134,26 @@ class VideoPlayerMethodHandler(
                 }
             }
 
-            val newParameters = player.trackSelectionParameters
+            player.trackSelectionParameters = player.trackSelectionParameters
                 .buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, disabled)
                 .build()
-
-            player.trackSelectionParameters = newParameters
 
             if (!disabled) {
                 // A foreground-service teardown racing this re-enable fires onStop() on the
                 // session, dropping the player to STATE_IDLE and wiping the surface rebound
                 // below.
                 notificationHandler.armSystemStopSuppression()
-                // Disabling and re-enabling the video track releases and recreates the
-                // MediaCodecVideoRenderer. On some devices (OnePlus 15 with OxygenOS +
-                // SD 8 Elite C2 codec) the new renderer does not pick up the original
-                // SurfaceView and instead outputs to a placeholder ImageReader, leaving
-                // the UI frozen. Ask the view to re-bind the Surface to force
-                // setVideoSurface() on the new renderer.
+                // Re-enabling recreates the MediaCodecVideoRenderer; on some devices
+                // (OnePlus 15 / OxygenOS) the new renderer outputs to a placeholder
+                // ImageReader instead of the original surface, leaving the UI frozen.
                 onSurfaceRebindRequest?.invoke()
             }
 
-            Log.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
+            NpLog.d(TAG, "Video track ${if (disabled) "disabled" else "enabled"}")
             result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting video track disabled: ${e.message}", e)
+            NpLog.e(TAG, "Error setting video track disabled: ${e.message}", e)
             result.error("ERROR", "Failed to set video track disabled: ${e.message}", null)
         }
     }
@@ -933,7 +1181,7 @@ class VideoPlayerMethodHandler(
 
             result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting background playback active: ${e.message}", e)
+            NpLog.e(TAG, "Error setting background playback active: ${e.message}", e)
             result.error("ERROR", "Failed to set background playback active: ${e.message}", null)
         }
     }
@@ -951,7 +1199,7 @@ class VideoPlayerMethodHandler(
             notificationHandler.setNowPlayingSuppressed(suppressed)
             result.success(null)
         } catch (e: Exception) {
-            Log.e(TAG, "Error setting now playing suppressed: ${e.message}", e)
+            NpLog.e(TAG, "Error setting now playing suppressed: ${e.message}", e)
             result.error("ERROR", "Failed to set now playing suppressed: ${e.message}", null)
         }
     }

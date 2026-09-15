@@ -20,7 +20,19 @@ A Flutter plugin for native video playback on iOS and Android with advanced feat
 - ✅ Background playback with media notifications
 - ✅ Playback controls: play, pause, seek, volume, speed (0.25x - 2.0x)
 - ✅ Quality selection for HLS streams with real-time switching
-- ✅ **Subtitle/Closed Caption support** for HLS streams (VOD and Live) with language selection
+- ✅ **Subtitle/Closed Caption support** for HLS streams (VOD and Live) with language selection and adjustable embedded-caption text size
+- ✅ **Sidecar subtitles**: load external VTT/SRT files (URL, file, or raw content) with fully styleable, positionable rendering
+- ✅ **Audio track selection**: list and switch alternate audio renditions (languages, audio descriptions)
+- ✅ **Resume positions**: `load(startAt:)` applied natively before the first frame + `PositionCheckpoints` for persistence
+- ✅ **A-B loop / clip ranges**: `setPlaybackRange(start, end, loop:)`
+- ✅ **Playlists**: sequential playback with auto-advance on one controller
+- ✅ **Playback analytics**: startup time, stall count/duration, watched time, quality switches as a single event stream
+- ✅ **Scrub-preview storyboards**: parse WebVTT storyboards and sprite-sheet grids (Vimeo/Bunny style) for thumbnail previews
+- ✅ **Chromecast**: pure-Dart device discovery + full cast session (load with metadata/captions, play/pause/seek, volume, loop, live status stream) — no Cast SDK
+- ✅ **Offline downloads**: `VideoDownloadController` with progress streams, persistence, cancel/remove, and local playback
+- ✅ **Performance tuning**: global config for concurrent-playback caps, viewport-based quality capping (with lossless headroom control), lightweight inline views, playback priority, buffer presets
+- ✅ **Disk cache + precache** (Android): opt-in Media3 cache with LRU eviction and a byte-budgeted `NativeVideoPlayerCache.precache()` for upcoming feed items — cached items replay offline
+- ✅ **Texture rendering mode** (experimental, opt-in): render inline tiles as Flutter textures on both platforms — native-feeling feed scrolling, no hybrid-composition overhead, automatic platform-view fallback for PiP/fullscreen/DRM
 - ✅ **Separated event streams**: Activity events (play/pause/buffering) and Control events (quality/speed/PiP/fullscreen)
 - ✅ **Individual property streams**: Dedicated streams for position, duration, speed, state, fullscreen, PiP, AirPlay, and quality
 - ✅ Real-time playback position tracking with **buffered position indicator**
@@ -279,6 +291,16 @@ Add the following to your `Info.plist`:
 <key>UIBackgroundModes</key>
 <array>
     <string>audio</string>
+</array>
+
+<!-- Only if you use Chromecast discovery (CastDeviceDiscovery): iOS 14+
+     requires these for mDNS on the local network. The first scan triggers
+     the Local Network permission prompt. -->
+<key>NSLocalNetworkUsageDescription</key>
+<string>Used to find Cast devices on your network.</string>
+<key>NSBonjourServices</key>
+<array>
+    <string>_googlecast._tcp</string>
 </array>
 ```
 
@@ -684,6 +706,23 @@ showSubtitlePicker(
 );
 ```
 
+**Scaling Embedded Caption Text Size:**
+
+Embedded tracks are rendered by the platform caption renderers, so `subtitleStyle.fontSize` doesn't affect them. Use the embedded text scale instead — it takes effect live, survives quality switches and item reloads, and scales relative to the user's system caption size preference (`1.0` = platform default):
+
+```dart
+// Convenience method (150% captions)
+await _controller.setNativeSubtitleTextScale(1.5);
+
+// Or drive it through the style object alongside the sidecar styling
+_controller.setSubtitleStyle(
+  const NativeVideoPlayerSubtitleStyle(embeddedTextScale: 1.5),
+);
+
+// Back to the platform default
+await _controller.setNativeSubtitleTextScale(1.0);
+```
+
 **Example HLS Streams with Subtitles:**
 ```dart
 // Apple's example stream with multiple subtitle languages
@@ -696,11 +735,10 @@ final subtitles = await _controller.getAvailableSubtitleTracks();
 ```
 
 **Important Notes:**
-- Subtitles must be embedded in the HLS stream (in the master.m3u8 manifest)
-- External subtitle files (SRT, VTT) are not currently supported
-- Subtitle tracks are automatically detected from the stream
+- Embedded subtitle tracks are automatically detected from the stream
+- External subtitle files (SRT, VTT) are supported as *sidecar subtitles* — see the next section
 - Both VOD (Video on Demand) and Live streams are supported
-- Font rendering and styling are handled by the native players (AVPlayer on iOS, ExoPlayer on Android)
+- Font rendering and styling of *embedded* tracks are handled by the native players (AVPlayer on iOS, ExoPlayer on Android) — only the text size can be scaled via `embeddedTextScale` / `setNativeSubtitleTextScale`; *sidecar* subtitles are rendered by the plugin and fully styleable
 
 **Platform-Specific Behavior:**
 - **iOS**: Uses AVFoundation's `AVMediaSelectionGroup` for subtitle track management
@@ -708,6 +746,370 @@ final subtitles = await _controller.getAvailableSubtitleTracks();
 - Both platforms support WebVTT and other standard subtitle formats embedded in HLS streams
 
 See the `subtitle_example_screen.dart` in the example app for a complete implementation including a subtitle picker modal with font size controls.
+
+#### Sidecar Subtitles (External VTT/SRT Files)
+
+Load subtitle files that are **not** embedded in the stream — from a URL, a local file, or raw text — and render them in a styleable Flutter overlay. Works identically for HLS and MP4 on both platforms.
+
+```dart
+// Provide sidecar subtitles at load time...
+await controller.load(
+  url: 'https://example.com/video.mp4',
+  sidecarSubtitles: const [
+    NativeVideoPlayerSidecarSubtitle.url(
+      'https://example.com/subs_en.vtt',
+      language: 'en',
+      label: 'English',
+    ),
+    NativeVideoPlayerSidecarSubtitle.file(
+      '/path/to/dutch.srt',
+      language: 'nl',
+      label: 'Nederlands',
+    ),
+  ],
+);
+
+// ...or attach them later:
+await controller.setSidecarSubtitles([...]);
+
+// Sidecar tracks appear in the SAME list as embedded tracks —
+// the `source` field tells them apart:
+final tracks = await controller.getAvailableSubtitleTracks();
+for (final track in tracks) {
+  print('${track.displayName} (${track.source.name})'); // embedded | sidecar
+}
+
+// Selection works through the existing API for both kinds:
+await controller.setSubtitleTrack(tracks.firstWhere(
+  (t) => t.source == SubtitleTrackSource.sidecar,
+));
+```
+
+**Styling and positioning** (text style, colors, outline, alignment, padding):
+
+```dart
+NativeVideoPlayer(
+  controller: controller,
+  subtitleStyle: const NativeVideoPlayerSubtitleStyle(
+    fontSize: 22,
+    textColor: Colors.yellow,
+    backgroundColor: Colors.black54,
+    alignment: Alignment.topCenter, // position anywhere
+    padding: EdgeInsets.all(24),
+  ),
+)
+```
+
+**Platform notes:**
+- On **Android**, URL sources are *also* attached natively (`MediaItem.SubtitleConfiguration`) so captions stay visible in PiP and native fullscreen (with platform-default styling there).
+- On **iOS**, sidecar cues render in the Flutter overlay only — they are not visible inside native fullscreen, the PiP window, or on an AirPlay receiver (the phone keeps rendering them during AirPlay). Use embedded HLS tracks when receiver-side captions are required.
+
+#### Audio Track Selection
+
+List and switch alternate audio renditions (languages, audio descriptions) on both platforms:
+
+```dart
+final tracks = await controller.getAvailableAudioTracks();
+for (final track in tracks) {
+  print('${track.displayName} (${track.language}) selected: ${track.isSelected}');
+}
+await controller.setAudioTrack(tracks[1]);
+```
+
+An `audioTrackChange` control event (`PlayerControlState.audioTrackChanged`) is emitted on switches.
+
+#### Resume Positions (startAt) and Position Checkpoints
+
+Start playback at a stored position — applied natively *before* the first frame, so there is no visible seek after playback begins:
+
+```dart
+await controller.load(
+  url: 'https://example.com/video.mp4',
+  startAt: const Duration(minutes: 12, seconds: 30),
+);
+```
+
+To persist positions, `PositionCheckpoints` emits the position at most once per interval plus a final value on dispose:
+
+```dart
+final checkpoints = PositionCheckpoints(
+  controller,
+  interval: const Duration(seconds: 5),
+  onCheckpoint: (position) => storage.save(videoId, position),
+);
+// later, together with the player:
+checkpoints.dispose(); // flushes the last position
+```
+
+#### A-B Loop / Clip Range
+
+```dart
+// Loop a section (language practice, training clips, ...):
+await controller.setPlaybackRange(
+  start: const Duration(seconds: 10),
+  end: const Duration(seconds: 25),
+); // loop: true is the default
+
+// Or play a clip once and pause at its end:
+await controller.setPlaybackRange(start: a, end: b, loop: false);
+
+controller.clearPlaybackRange(); // back to unrestricted playback
+```
+
+Loading a new video clears the range automatically.
+
+#### Playlists
+
+Sequential playback of multiple sources on one controller with auto-advance:
+
+```dart
+final playlist = NativeVideoPlayerPlaylist(controller, items: const [
+  NativeVideoPlayerPlaylistItem(url: 'https://example.com/lesson1.mp4'),
+  NativeVideoPlayerPlaylistItem(
+    url: 'https://example.com/lesson2.mp4',
+    startAt: Duration(seconds: 30), // per-item resume positions
+  ),
+]);
+await playlist.start();
+playlist.currentIndexStream.listen((i) => print('now playing $i'));
+// playlist.next() / playlist.previous() / playlist.playItemAt(i)
+playlist.dispose(); // detach when done
+```
+
+Note: auto-advance relies on the `completed` event, so disable `setLooping` while a playlist is attached.
+
+#### Playback Analytics (QoE Events)
+
+Derive quality-of-experience metrics from the existing event streams — no extra platform traffic:
+
+```dart
+final analytics = PlaybackAnalytics(controller);
+analytics.events.listen((event) {
+  // startup (ms), stallStarted/stallEnded (+duration), seeked,
+  // qualityChanged, watchedHeartbeat (watched ms), completed
+  metrics.track(event.type.name, event.value);
+});
+print(analytics.stallCount);
+print(analytics.watchedDuration);
+analytics.dispose();
+```
+
+#### Background Playback Guard
+
+For players that should **not** keep playing when the app is backgrounded (the plugin supports background playback by default):
+
+```dart
+final guard = BackgroundPlaybackGuard(controller); // pauses on background
+guard.pauseInBackground = false; // flip at runtime (e.g. a user setting)
+guard.dispose();
+```
+
+PiP and AirPlay sessions are deliberately left running, and a video the user paused themselves stays paused on return.
+
+#### Scrub-Preview Storyboards (Thumbnail Previews)
+
+Show thumbnail previews while scrubbing. Both WebVTT storyboards and uniform sprite-sheet grids (what Vimeo's `thumb_preview` and Bunny Stream's `seek/_N.jpg` actually serve) are supported:
+
+```dart
+// WebVTT storyboard ("url#xywh=x,y,w,h" cues):
+final board = await StoryboardThumbnails.fromUrl('https://cdn.example.com/storyboard.vtt');
+
+// Or a uniform sprite grid (Vimeo thumb_preview / Bunny seek sheets):
+final board = StoryboardThumbnails.fromUniformGrid(
+  spriteUrls: ['https://cdn.example.com/sprites.webp'],
+  frameInterval: const Duration(seconds: 5),
+  columns: 10,
+  frameWidth: 426,
+  frameHeight: 240,
+  framesPerSprite: 120,
+);
+
+final thumb = board.thumbnailAt(scrubPosition);
+// thumb.url + thumb.region (crop rect inside the sprite sheet)
+```
+
+#### Performance Configuration
+
+Global tuning knobs in `NativeVideoPlayerConfig` (set `NativeVideoPlayerConfig.global` before creating controllers), built for multi-video feeds:
+
+```dart
+NativeVideoPlayerConfig.global = const NativeVideoPlayerConfig(
+  maxConcurrentPlayingPlayers: 2,    // LRU playback cap
+  qualityForViewportSize: true,      // cap HLS quality to the tile size
+  viewportCapHeadroom: 1.5,          // iOS cap headroom (1.5 = visually lossless, 1.0 = max savings)
+  prioritizeActivePlayback: true,    // Android: playing > preloading bandwidth
+  lightweightInlineViews: true,      // lighter native views when controls are hidden
+  androidBufferConfig: NativeVideoPlayerAndroidBufferConfig.feed(),
+  iosBufferConfig: NativeVideoPlayerIosBufferConfig.feed(),
+);
+```
+
+All flags default to off / current behavior. See `PERFORMANCE_ROADMAP.md` for the measured impact of each knob on real devices.
+
+- **`qualityForViewportSize`** — caps each player's ABR variant selection to its on-screen size, so a feed of small tiles stops decoding several full-resolution streams at once. Measured on a Galaxy S21: −58% Dalvik heap at six concurrent players (172→77MB), and it turns an OOM-crash sequence into a survivable one. The cap lifts automatically for fullscreen and AirPlay; manual quality selection is never constrained.
+- **`viewportCapHeadroom`** (iOS) — multiplier applied to the viewport cap. The default `1.5` keeps the first HLS variant at-or-above the tile size selectable (visually lossless); set `1.0` for maximum savings at the cost of one ladder step of sharpness.
+- **`lightweightInlineViews`** — when a tile hides native controls (`showNativeControls: false`), renders it with a bare `AVPlayerLayer` (iOS) / `SurfaceView` + subtitle overlay (Android) instead of a full `AVPlayerViewController` / Media3 `PlayerView`. Fullscreen, PiP (including automatic PiP on backgrounding), Now Playing and AirPlay all still work — verified on physical devices.
+- **`prioritizeActivePlayback`** (Android) — playing tiles get network/IO priority over paused/preloading ones via Media3's `PriorityTaskManager`.
+
+#### Disk Cache and Precaching (Android)
+
+Opt-in Media3 disk cache so revisited feed items skip the network, plus a precache API for upcoming items:
+
+```dart
+NativeVideoPlayerConfig.global = const NativeVideoPlayerConfig(
+  androidEnableDiskCache: true,
+  androidDiskCacheMaxBytes: 100 * 1024 * 1024, // LRU-evicted, default 100MB
+  androidPrecacheBytes: 2 * 1024 * 1024,       // per-precache budget, default 2MB
+);
+
+// Warm the cache for the next items in your feed (fire-and-forget):
+await NativeVideoPlayerCache.precache('https://example.com/video.m3u8');
+```
+
+Works for both progressive (MP4) and HLS sources — HLS precaching warms the playlists plus the leading segments up to the byte budget. DRM-protected and non-HTTP sources bypass the cache automatically. Cached items replay without a network connection. iOS is intentionally not covered (AVFoundation has no practical inline HLS cache); the call is a silent no-op there.
+
+#### Texture Rendering Mode (Experimental)
+
+By default every player is a native platform view. With texture mode, inline tiles render as ordinary Flutter textures instead:
+
+```dart
+NativeVideoPlayerConfig.global = const NativeVideoPlayerConfig(
+  androidTextureMode: true,
+  iosTextureMode: true,
+);
+```
+
+What you gain: feed scrolling behaves like a normal Flutter list (platform views claim drag gestures that start on a video and kill fling momentum — textures don't), the hybrid-composition overhead disappears, and tiles participate in normal Flutter compositing (clips, transforms, `RepaintBoundary`).
+
+What it costs and the contract:
+
+- Video frames are composited by the Flutter raster thread, which is **more expensive while many large tiles play simultaneously** on mid-range Android devices. Modern iPhones absorb it easily. Measure for your content size — see `PERFORMANCE_ROADMAP.md`.
+- Texture mode only applies to tiles with hidden native controls outside fullscreen hosts; other tiles automatically stay platform views.
+- **iOS PiP:** tiles with `canStartPictureInPictureAutomatically` keep using (light) platform views so automatic PiP works unchanged. Manual `enterPictureInPicture()` from a texture tile transparently swaps the tile to a platform view first (same shared player, visually seamless), then starts PiP.
+- Fullscreen from a texture tile uses the Dart fullscreen player (native fullscreen needs a platform view).
+- **FairPlay DRM requires platform-view mode** (iOS); AirPlay from a texture tile keeps playing on the receiver but freezes the local preview on the last frame.
+
+#### Companion Package: WebView-Free Vimeo/YouTube Extraction
+
+The repo ships a separate package, `packages/better_native_video_extractor`, that resolves Vimeo (and YouTube) videos to playable HLS/MP4 URLs, thumbnails, durations and storyboards over plain HTTP — no hidden WebViews. Supports Referer headers for domain-locked Vimeo videos and an expiry-aware cache:
+
+```dart
+final cache = VideoExtractionCache(VimeoExtractor(referer: 'https://yourdomain.com'));
+final video = await cache.extract('https://vimeo.com/76979871');
+await controller.load(url: video.playbackUrl!);
+Image.network(video.bestThumbnail!.url);
+```
+
+#### Chromecast (Google Cast)
+
+Chromecast support without the Cast SDK: the session protocol (CASTV2 over TLS) is pure Dart, and discovery uses the system Bonjour browser on iOS (required on physical devices — raw multicast needs a restricted Apple entitlement) with pure-Dart mDNS elsewhere. It lives in a **separate entrypoint** so its `CastDevice`/`CastSession` names can't collide with other packages — import it with a prefix:
+
+```dart
+import 'package:better_native_video_player/cast.dart' as nvp_cast;
+```
+
+Discover devices on the local network (mDNS):
+
+```dart
+try {
+  final devices = await nvp_cast.CastDeviceDiscovery.discover();
+  for (final d in devices) {
+    print('${d.displayName} (${d.model}) at ${d.host}:${d.port}');
+  }
+} on nvp_cast.CastDiscoveryException catch (e) {
+  // Wrong network or missing Local Network permission (see iOS Setup) —
+  // never crashes the app, just surfaces actionable guidance.
+  print(e.message);
+}
+```
+
+Connect and load media with metadata and caption tracks:
+
+```dart
+final session = await nvp_cast.CastSession.connect(devices.first);
+
+await session.loadMedia(
+  contentUrl: 'https://example.com/video.mp4', // receiver fetches this itself:
+  contentType: 'video/mp4',                    // must be HTTPS/CORS-readable
+  title: 'Big Buck Bunny',
+  subtitle: 'Blender Foundation',
+  imageUrl: 'https://example.com/poster.jpg',  // shows on the TV + cast dialogs
+  textTracks: [
+    nvp_cast.CastTextTrack(
+      trackId: 1,
+      url: 'https://example.com/subs_en.vtt',
+      language: 'en',
+      name: 'English',
+    ),
+  ],
+  activeTrackIds: [1],                         // start with captions on
+  startAt: const Duration(seconds: 30),
+);
+```
+
+Full transport control, including receiver-side state sync:
+
+```dart
+await session.play();
+await session.pause();
+await session.seek(const Duration(minutes: 2));
+await session.setVolume(0.4);   // receiver volume 0..1
+await session.setMuted(true);
+await session.setActiveTracks([1]); // captions on; [] = off
+session.setLooping(true);       // reloads the media when the receiver finishes
+
+// React to ANY change on the receiver — including changes made on the TV
+// or by other senders (Google Home app, voice commands):
+session.statusStream.listen((s) {
+  print('${s.playerState} ${s.position}/${s.duration} '
+      'vol ${(s.volumeLevel * 100).round()}% tracks ${s.activeTrackIds}');
+});
+
+await session.close();
+```
+
+Use `statusStream` to mirror the cast state in your own player UI (position slider, play/pause icon, volume) so the app always reflects what the TV is doing. See `example/lib/screens/perf/cast_screen.dart` for a complete picker + remote-control screen.
+
+**Note:** the receiver downloads `contentUrl`, `imageUrl`, and track URLs itself — they must be reachable from the Chromecast (public HTTPS, CORS headers for VTT tracks). `file://` and app-local paths won't work.
+
+#### Offline Downloads
+
+`VideoDownloadController` downloads videos for offline playback with progress reporting and a persistent index. The plugin deliberately doesn't depend on `path_provider` — you pass the directory:
+
+```dart
+final dir = await getApplicationDocumentsDirectory(); // path_provider
+final downloads = VideoDownloadController(
+  directoryPath: '${dir.path}/video_downloads',
+);
+
+// Start a download — the stream emits progress and closes on a terminal
+// status (completed / failed / canceled):
+downloads.download(
+  id: 'lesson-42',
+  url: 'https://example.com/video.mp4',
+  headers: {'Authorization': 'Bearer ...'}, // optional
+).listen((p) {
+  // p.fraction is 0..1 (null when the server sends no Content-Length)
+  print('${p.status} ${p.receivedBytes}/${p.totalBytes}');
+});
+```
+
+Manage and play downloaded files:
+
+```dart
+final all = await downloads.listDownloads();      // List<VideoDownload>
+final isDone = await downloads.isDownloaded('lesson-42');
+final path = await downloads.localPathFor('lesson-42');
+
+if (path != null) {
+  await controller.load(url: 'file://$path');     // plays fully offline
+}
+
+await downloads.cancel('lesson-42');              // stop an active download
+await downloads.remove('lesson-42');              // delete file + index entry
+```
+
+Calling `download()` again for an already-downloaded id immediately emits `completed`; calling it while the same id is downloading returns the existing stream (no duplicate work). Partial files are written as `.part` and only renamed on success, so an interrupted download never leaves a corrupt "completed" file.
 
 #### Separated Event Handling
 
@@ -1204,8 +1606,8 @@ NativeVideoPlayer(
 - `Future<void> initialize()` - Initialize the controller
 
 **Loading Videos:**
-- `Future<void> load({required String url, Map<String, String>? headers, Map<String, dynamic>? drmConfig})` - Load video URL or file (generic method, backward compatible). Supports optional DRM configuration for protected content.
-- `Future<void> loadUrl({required String url, Map<String, String>? headers, Map<String, dynamic>? drmConfig})` - Load remote video URL with optional HTTP headers and DRM configuration
+- `Future<void> load({required String url, Map<String, String>? headers, Map<String, dynamic>? drmConfig, List<NativeVideoPlayerSidecarSubtitle>? sidecarSubtitles, Duration? startAt, bool force})` - Load video URL or file (generic method, backward compatible). Supports DRM, sidecar subtitles, a native resume position (`startAt`) and `force` to replace an already-loaded video.
+- `Future<void> loadUrl({required String url, Map<String, String>? headers, Map<String, dynamic>? drmConfig, Duration? startAt, bool force})` - Load remote video URL with optional HTTP headers, DRM configuration and resume position
 - `Future<void> loadFile({required String path})` - Load local video file from device storage
 
 **DRM Configuration (`drmConfig` parameter):**
@@ -1222,6 +1624,15 @@ NativeVideoPlayer(
 - `Future<void> setSpeed(double speed)` - Set playback speed
 - `Future<void> setLooping(bool looping)` - Enable or disable video looping
 - `Future<void> setQuality(NativeVideoPlayerQuality quality)` - Set video quality
+- `Future<void> setPlaybackRange({required Duration start, required Duration end, bool loop})` - Confine playback to an A-B range (loop or pause-at-end)
+- `void clearPlaybackRange()` - Remove the A-B range
+
+**Tracks (subtitles & audio):**
+- `Future<List<NativeVideoPlayerSubtitleTrack>> getAvailableSubtitleTracks()` - Embedded **and** sidecar tracks merged (see `track.source`)
+- `Future<void> setSubtitleTrack(NativeVideoPlayerSubtitleTrack track)` - Select any track from the merged list (`.off()` disables)
+- `Future<void> setSidecarSubtitles(List<NativeVideoPlayerSidecarSubtitle> sources)` - Attach external VTT/SRT sources after load
+- `Future<List<NativeVideoPlayerAudioTrack>> getAvailableAudioTracks()` - List alternate audio renditions
+- `Future<void> setAudioTrack(NativeVideoPlayerAudioTrack track)` - Switch the audio rendition
 
 **Display Modes:**
 - `Future<bool> isPictureInPictureAvailable()` - Check if PiP is available on device
@@ -1256,6 +1667,7 @@ NativeVideoPlayer(
 - `Duration duration` - Total video duration
 - `Duration bufferedPosition` - How far the video has been buffered
 - `double volume` - Current volume (0.0-1.0)
+- `NativeVideoPlayerPlaybackRange? playbackRange` - Active A-B range, or null
 - `PlayerActivityState activityState` - Current activity state
 - `PlayerControlState controlState` - Current control state
 - `String? url` - Current video URL
@@ -1302,6 +1714,23 @@ NativeVideoPlayer(
 | `PlayerControlState.fullscreenEntered` | Fullscreen entered |
 | `PlayerControlState.fullscreenExited` | Fullscreen exited |
 | `PlayerControlState.timeUpdated` | Playback time updated |
+| `PlayerControlState.subtitleTrackChanged` | Subtitle track changed |
+| `PlayerControlState.audioTrackChanged` | Audio track changed |
+
+### Companion Helpers
+
+| Class | Purpose |
+|-------|---------|
+| `NativeVideoPlayerPlaylist` | Sequential playback with auto-advance on one controller |
+| `PlaybackAnalytics` | QoE event stream (startup, stalls, watched time, completion) |
+| `PositionCheckpoints` | Throttled resume-position reporting with final flush on dispose |
+| `BackgroundPlaybackGuard` | Pause on app background, resume on return (PiP/AirPlay exempt) |
+| `StoryboardThumbnails` | Scrub-preview thumbnails from storyboard VTT or sprite grids |
+| `VideoDownloadController` | Offline downloads: progress stream, persistent index, cancel/remove |
+| `CastDeviceDiscovery` ¹ | Chromecast discovery via mDNS (`_googlecast._tcp`) |
+| `CastSession` ¹ | Full Chromecast control: load/captions/transport/volume/loop + status stream |
+
+¹ Exported from `package:better_native_video_player/cast.dart` (separate entrypoint — import with a prefix).
 
 ## Architecture
 
@@ -1532,6 +1961,10 @@ See the `example` folder for a complete working example demonstrating:
 - **Separated Event Handling**: Activity and control events with detailed logging
 - **Custom Media Info**: Now Playing integration with metadata
 - **Buffered Position Indicator**: Visual representation of how much video has been preloaded
+- **Chromecast**: device scan, connect, load with captions, full remote control with live status (`screens/perf/cast_screen.dart`)
+- **Offline Downloads**: progress bar, cancel/remove, offline playback (`screens/perf/download_screen.dart`)
+- **Sidecar Subtitles & Audio Tracks**: external VTT/SRT styling demo and multi-audio HLS selection
+- **Player Features**: startAt/resume, A-B loop, playlist auto-advance, analytics, Vimeo extractor demos
 
 ### Running the Example
 

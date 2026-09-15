@@ -1,14 +1,22 @@
 package com.huddlecommunity.better_native_video_player.manager
 
+import com.huddlecommunity.better_native_video_player.NpLog
+
 import android.content.Context
 import android.content.Intent
-import android.util.Log
-import androidx.media3.common.C
+import android.os.Handler
+import android.os.Looper
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
+import androidx.media3.common.PriorityTaskManager
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler
 import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventHandler
+import io.flutter.plugin.common.EventChannel
 
 /**
  * Manages shared ExoPlayer instances and NotificationHandlers across multiple platform views
@@ -28,8 +36,7 @@ object SharedPlayerManager {
 
     // Per-view event handlers for each controller, so an event emitted from a view
     // with no Flutter listener (e.g. the floating player's secondary shared view) can
-    // be routed to whichever sibling view IS subscribed. Mirrors the iOS sendEvent
-    // sibling-routing fix (FLTR-20471).
+    // be routed to whichever sibling view IS subscribed.
     // Map<ControllerId, Map<ViewId, VideoPlayerEventHandler>>
     private val eventHandlers = mutableMapOf<Int, MutableMap<Long, VideoPlayerEventHandler>>()
 
@@ -37,26 +44,146 @@ object SharedPlayerManager {
     // This ensures qualities persist across view recreations
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
 
+    // Controller-level event sinks (native_video_player_controller_<id>).
+    // These persist while all platform views are disposed so controller-scoped
+    // events keep flowing after releaseResources(); mirrors the iOS
+    // SharedPlayerManager.controllerEventSinks design.
+    private val controllerEventSinks = mutableMapOf<Int, EventChannel.EventSink>()
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // One PriorityTaskManager shared by every player created with
+    // prioritizeActivePlayback: playing players load at C.PRIORITY_PLAYBACK
+    // while paused ones are demoted, so a feed's background players stop
+    // competing for bandwidth/IO with the videos actually being watched.
+    // Priorities only coordinate between players sharing this instance.
+    private val sharedPriorityTaskManager = PriorityTaskManager()
+
+    // Software-only MediaCodec selection (androidForceSoftwareDecoders):
+    // prefer the platform software decoders (OMX.google.* / c2.android.*),
+    // which behave far more consistently across devices than vendor
+    // hardware decoders. Falls back to the default (full) decoder list when
+    // no software decoder exists for a mime type, so enabling this can
+    // never make a stream unplayable that was playable before.
+    private val softwareMediaCodecSelector =
+        MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
+            val defaultDecoderInfos = MediaCodecSelector.DEFAULT.getDecoderInfos(
+                mimeType, requiresSecureDecoder, requiresTunnelingDecoder
+            )
+            val softwareDecoderInfos = defaultDecoderInfos.filter { decoderInfo ->
+                decoderInfo.name.startsWith("OMX.google.") ||
+                    decoderInfo.name.startsWith("c2.android.")
+            }
+            softwareDecoderInfos.ifEmpty { defaultDecoderInfos }
+        }
+
     /**
      * Gets or creates a player for the given controller ID
      * Returns a Pair<ExoPlayer, Boolean> where the Boolean indicates if the player already existed (true) or was newly created (false)
+     *
+     * [bufferConfig] (optional, from the Dart NativeVideoPlayerConfig) tunes
+     * DefaultLoadControl and only applies when the player is first created
+     * for this controller ID; null keeps ExoPlayer's defaults.
+     * [prioritizeActivePlayback] attaches the shared PriorityTaskManager.
+     * [forceSoftwareDecoders] restricts MediaCodec selection to software
+     * decoders (from the Dart NativeVideoPlayerConfig.androidForceSoftwareDecoders).
      */
-    fun getOrCreatePlayer(context: Context, controllerId: Int): Pair<ExoPlayer, Boolean> {
+    fun getOrCreatePlayer(
+        context: Context,
+        controllerId: Int,
+        bufferConfig: Map<*, *>? = null,
+        prioritizeActivePlayback: Boolean = false,
+        forceSoftwareDecoders: Boolean = false
+    ): Pair<ExoPlayer, Boolean> {
         val alreadyExisted = players.containsKey(controllerId)
         val player = players.getOrPut(controllerId) {
-            ExoPlayer.Builder(context)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(C.USAGE_MEDIA)
-                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                        .build(),
-                    true
-                )
-                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
-                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
-                .build()
+            buildPlayer(context, bufferConfig, prioritizeActivePlayback, forceSoftwareDecoders)
         }
         return Pair(player, alreadyExisted)
+    }
+
+    /**
+     * Builds an ExoPlayer with decoder-init fallback enabled, optionally with
+     * a tuned DefaultLoadControl, the shared PriorityTaskManager, and a
+     * software-only decoder preference.
+     */
+    fun buildPlayer(
+        context: Context,
+        bufferConfig: Map<*, *>? = null,
+        prioritizeActivePlayback: Boolean = false,
+        forceSoftwareDecoders: Boolean = false
+    ): ExoPlayer {
+        // Decoder fallback is always on: when the primary decoder for a
+        // format fails to initialize (flaky vendor hardware decoders are a
+        // recurring cause of playback dying with a fatal
+        // DecoderInitializationException), Media3 retries with the next
+        // decoder in the list instead of surfacing the error. This only
+        // engages when the primary decoder fails to initialize — devices
+        // with healthy decoders behave exactly as before.
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setEnableDecoderFallback(true)
+        if (forceSoftwareDecoders) {
+            // Opt-in compatibility mode: prefer software decoders outright
+            // (decoder fallback can't help when a hardware decoder
+            // initializes fine but then misbehaves) and use synchronous
+            // MediaCodec queueing, the most conservative codec
+            // interaction mode.
+            renderersFactory.setMediaCodecSelector(softwareMediaCodecSelector)
+            renderersFactory.forceDisableMediaCodecAsynchronousQueueing()
+            NpLog.d(TAG, "Building player with software-only decoder preference")
+        }
+        val builder = ExoPlayer.Builder(context, renderersFactory)
+            // Request audio focus: background/audio-only playback has to duck or
+            // pause for other apps the way a media app is expected to.
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                true
+            )
+            .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+            .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
+            // Keep the device awake for background playback. WAKE_MODE_NETWORK
+            // holds a partial WakeLock AND a WifiLock so the CPU and WiFi radio
+            // stay powered while playing — without it, screen-off WiFi
+            // power-save/Doze powers the radio down and streaming (live + VOD)
+            // stalls once the buffer drains. ExoPlayer only holds the locks
+            // while actually playing and releases them on pause/stop, so there
+            // is no battery cost when idle. Requires android.permission.WAKE_LOCK.
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+        if (prioritizeActivePlayback) {
+            builder.setPriorityTaskManager(sharedPriorityTaskManager)
+            // Start demoted: loading-while-paused yields to playing players.
+            // PriorityTaskManager only blocks when a HIGHER-priority task is
+            // active, so a lone player is never slowed down. The observer
+            // promotes/demotes on play/pause transitions.
+            builder.setPriority(C.PRIORITY_PLAYBACK_PRELOAD)
+        }
+        if (bufferConfig != null) {
+            val minBufferMs = (bufferConfig["minBufferMs"] as? Number)?.toInt() ?: 50000
+            val maxBufferMs = (bufferConfig["maxBufferMs"] as? Number)?.toInt() ?: 50000
+            val bufferForPlaybackMs =
+                (bufferConfig["bufferForPlaybackMs"] as? Number)?.toInt() ?: 2500
+            val bufferForPlaybackAfterRebufferMs =
+                (bufferConfig["bufferForPlaybackAfterRebufferMs"] as? Number)?.toInt() ?: 5000
+            builder.setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(
+                        minBufferMs,
+                        maxBufferMs,
+                        bufferForPlaybackMs,
+                        bufferForPlaybackAfterRebufferMs
+                    )
+                    .build()
+            )
+            NpLog.d(
+                TAG,
+                "Built player with buffer config: min=$minBufferMs max=$maxBufferMs " +
+                    "forPlayback=$bufferForPlaybackMs afterRebuffer=$bufferForPlaybackAfterRebufferMs"
+            )
+        }
+        return builder.build()
     }
 
     /**
@@ -80,7 +207,7 @@ object SharedPlayerManager {
     fun registerView(controllerId: Int, viewId: Long, reconnectCallback: () -> Unit) {
         val views = activeViews.getOrPut(controllerId) { mutableMapOf() }
         views[viewId] = reconnectCallback
-        Log.d(TAG, "Registered view $viewId for controller $controllerId (total views: ${views.size})")
+        NpLog.d(TAG, "Registered view $viewId for controller $controllerId (total views: ${views.size})")
     }
 
     /**
@@ -101,9 +228,7 @@ object SharedPlayerManager {
     /**
      * Routes an event to whichever sibling view for [controllerId] currently has a
      * live Flutter listener (single delivery), skipping [excludingViewId] (the view
-     * that tried to emit but had no listener). Returns true if delivered. Mirrors the
-     * iOS sendEvent findAllViewsForController fallback so system-control play/pause
-     * still reaches the Dart controller when the floating player owns playback.
+     * that tried to emit but had no listener). Returns true if delivered.
      */
     fun routeEventToSubscribedView(
         controllerId: Int,
@@ -129,14 +254,14 @@ object SharedPlayerManager {
         val views = activeViews[controllerId]
         if (views != null) {
             views.remove(viewId)
-            Log.d(TAG, "Unregistered view $viewId for controller $controllerId (remaining views: ${views.size})")
+            NpLog.d(TAG, "Unregistered view $viewId for controller $controllerId (remaining views: ${views.size})")
 
             // Notify all remaining views to reconnect their surfaces
             views.values.forEach { callback ->
                 try {
                     callback()
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error calling reconnect callback: ${e.message}", e)
+                    NpLog.e(TAG, "Error calling reconnect callback: ${e.message}", e)
                 }
             }
 
@@ -148,12 +273,42 @@ object SharedPlayerManager {
     }
 
     /**
+     * Registers a controller-level event sink for persistent events.
+     * Replaces any previous sink for the same controller (e.g. after a hot
+     * restart, where the new Dart isolate re-listens on the same channel).
+     */
+    fun registerControllerEventSink(controllerId: Int, sink: EventChannel.EventSink) {
+        controllerEventSinks[controllerId] = sink
+        NpLog.d(TAG, "Registered controller event sink for controller $controllerId")
+    }
+
+    /**
+     * Unregisters a controller-level event sink
+     */
+    fun unregisterControllerEventSink(controllerId: Int) {
+        controllerEventSinks.remove(controllerId)
+        NpLog.d(TAG, "Unregistered controller event sink for controller $controllerId")
+    }
+
+    /**
+     * Sends an event through the controller-level event channel.
+     * Safe to call without a registered sink (normal during initialization or
+     * after disposal); delivery happens on the main looper.
+     */
+    fun sendControllerEvent(controllerId: Int, eventName: String, data: Map<String, Any?> = emptyMap()) {
+        val sink = controllerEventSinks[controllerId] ?: return
+        val event = HashMap<String, Any?>(data)
+        event["event"] = eventName
+        mainHandler.post { sink.success(event) }
+    }
+
+    /**
      * Sets available qualities for a controller
      * This ensures qualities persist across view recreations
      */
     fun setQualities(controllerId: Int, qualities: List<Map<String, Any>>) {
         qualitiesCache[controllerId] = qualities
-        Log.d(TAG, "Stored ${qualities.size} qualities for controller $controllerId")
+        NpLog.d(TAG, "Stored ${qualities.size} qualities for controller $controllerId")
     }
 
     /**
@@ -173,7 +328,7 @@ object SharedPlayerManager {
         // Stop playback
         player.stop()
 
-        Log.d(TAG, "Stopped all views for controller $controllerId")
+        NpLog.d(TAG, "Stopped all views for controller $controllerId")
     }
 
     /**
@@ -198,7 +353,7 @@ object SharedPlayerManager {
         activeViews.remove(controllerId)
         eventHandlers.remove(controllerId)
 
-        Log.d(TAG, "Removed player for controller $controllerId")
+        NpLog.d(TAG, "Removed player for controller $controllerId")
 
         // If no more players, stop the service
         if (players.isEmpty()) {
@@ -221,19 +376,25 @@ object SharedPlayerManager {
         // Clear qualities cache
         qualitiesCache.clear()
 
+        // Drop per-view event handlers
+        eventHandlers.clear()
+
+        // Drop controller-level event sinks (their channels are torn down by
+        // the plugin on engine detach)
+        controllerEventSinks.clear()
+
         // Stop the service when clearing all players
         stopMediaSessionService(context)
     }
 
     /**
-     * Stops the MediaSessionService
+     * Stops the playback foreground service and removes its notification.
+     *
+     * Nuclear reset — clearAll() / last-player-removed code paths only. Per-handler
+     * cleanup goes through VideoPlayerNotificationHandler.release().
      */
     private fun stopMediaSessionService(context: Context) {
-        // Nuclear reset — clearAll() / last-player-removed code paths only.
-        // Per-handler cleanup is handled by VideoPlayerNotificationHandler.release()
-        // via clearActiveSessionIfMatches().
         VideoPlayerMediaSessionService.setActiveSession(null)
-        val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
-        context.stopService(serviceIntent)
+        context.stopService(Intent(context, VideoPlayerMediaSessionService::class.java))
     }
 }
