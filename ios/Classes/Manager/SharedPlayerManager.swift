@@ -102,6 +102,20 @@ class SharedPlayerManager: NSObject {
     /// (e.g. inline + Dart fullscreen) observe the same AVPlayerItem.
     private var completionClaimed: [Int: Bool] = [:]
 
+    /// The legible (subtitle) selection that applies to this controller's item:
+    /// the option index in the asset's legible media selection group, or -1 for
+    /// "off". Loading a source records -1, so subtitles stay off until the app
+    /// selects one; absent means nothing is loaded.
+    ///
+    /// AVFoundation stores the selection on the AVPlayerItem, and it changes
+    /// without anyone asking: an HLS caption rendition flagged DEFAULT is picked
+    /// as soon as the legible group resolves, and attaching a fresh
+    /// AVPlayerViewController to the shared player (Dart fullscreen host, second
+    /// inline view, native fullscreen, inline re-bind) re-runs AVKit's automatic
+    /// media selection. Both are corrected back to the recorded choice — see
+    /// VideoPlayerView.onLegibleSelectionChanged.
+    private var legibleSelectionByController: [Int: Int] = [:]
+
     struct PipSettings {
         let allowsPictureInPicture: Bool
         let canStartPictureInPictureAutomatically: Bool
@@ -120,6 +134,82 @@ class SharedPlayerManager: NSObject {
             npLog("✅ [SharedPlayerManager] Set audiovisualBackgroundPlaybackPolicy to continuesIfPossible")
         } else {
             npLog("ℹ️ [SharedPlayerManager] audiovisualBackgroundPlaybackPolicy not available (iOS < 15.0)")
+        }
+        configureMediaSelection(player)
+    }
+
+    /// Subtitles are chosen by the app (setSubtitleTrack), never by the OS:
+    /// with automatic criteria on, AVFoundation/AVKit picks a legible rendition
+    /// from the system language and accessibility caption settings — and does
+    /// so again every time a view controller attaches to the player, which is
+    /// how captions appeared on entering fullscreen without the user asking.
+    /// Manifest DEFAULT flags still apply, so audio selection is unaffected.
+    static func configureMediaSelection(_ player: AVPlayer) {
+        player.appliesMediaSelectionCriteriaAutomatically = false
+    }
+
+    private func configureMediaSelection(_ player: AVPlayer) {
+        SharedPlayerManager.configureMediaSelection(player)
+    }
+
+    // MARK: - Legible (Subtitle) Selection
+
+    /// Records the subtitle choice for [controllerId] (-1 = off) so it survives
+    /// view (re)attachment and the item's own automatic media selection.
+    func setLegibleSelection(_ optionIndex: Int, for controllerId: Int) {
+        assertMainThread()
+        legibleSelectionByController[controllerId] = optionIndex
+    }
+
+    /// Selects the recorded subtitle choice on the controller's current item when
+    /// the item is showing something else. Returns whether it re-selected, which
+    /// tells the caller a `currentMediaSelection` change is on its way.
+    @discardableResult
+    func applyLegibleSelection(for controllerId: Int) -> Bool {
+        assertMainThread()
+
+        guard let optionIndex = legibleSelectionByController[controllerId],
+              let player = players[controllerId],
+              let playerItem = player.currentItem,
+              let asset = playerItem.asset as? AVURLAsset,
+              let group = asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
+            return false
+        }
+
+        let selectedOption = playerItem.currentMediaSelection.selectedMediaOption(in: group)
+        let selectedIndex = selectedOption.flatMap { group.options.firstIndex(of: $0) } ?? -1
+        guard selectedIndex != optionIndex else { return false }
+
+        if optionIndex < 0 {
+            playerItem.select(nil, in: group)
+        } else if optionIndex < group.options.count {
+            playerItem.select(group.options[optionIndex], in: group)
+        } else {
+            return false
+        }
+
+        npLog("📝 [SharedPlayerManager] Applied legible selection \(optionIndex) over \(selectedIndex) for controller \(controllerId)")
+        return true
+    }
+
+    /// Restores the recorded subtitle choice after a view attached to the shared
+    /// player. Runs now and once more on the next main-queue tick, because AVKit
+    /// re-runs its own media selection somewhere in between; anything it does
+    /// later is caught by the item's media-selection observer.
+    func reapplyLegibleSelection(for controllerId: Int) {
+        assertMainThread()
+        guard legibleSelectionByController[controllerId] != nil else { return }
+
+        applyLegibleSelection(for: controllerId)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            self.applyLegibleSelection(for: controllerId)
+
+            for view in self.findAllViewsForController(controllerId) {
+                view.reportLegibleSelectionIfChanged()
+            }
         }
     }
 
@@ -488,6 +578,8 @@ class SharedPlayerManager: NSObject {
         // Remove media info cache
         mediaInfoCache.removeValue(forKey: controllerId)
 
+        legibleSelectionByController.removeValue(forKey: controllerId)
+
         // If this was the controller with automatic PiP, clear it
         if controllerWithAutomaticPiP == controllerId {
             controllerWithAutomaticPiP = nil
@@ -522,6 +614,7 @@ class SharedPlayerManager: NSObject {
         qualitiesCache.removeAll()
         qualityLevelsCache.removeAll()
         mediaInfoCache.removeAll()
+        legibleSelectionByController.removeAll()
         controllerWithAutomaticPiP = nil
         controllersWithManualPiP.removeAll()
         loopingByController.removeAll()

@@ -18,6 +18,11 @@ extension VideoPlayerView {
             fullscreenPlayerViewController.requiresLinearPlayback = requiresLinearPlayback
             fullscreenPlayerViewController.delegate = self
 
+            // Attaching a view controller re-runs AVKit's media selection; keep Dart's subtitle choice.
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.reapplyLegibleSelection(for: controllerIdValue)
+            }
+
             if preventFullscreenSwipeDismiss {
                 // Use .fullScreen modal style to prevent the iOS 13+ sheet dismiss gesture.
                 fullscreenPlayerViewController.modalPresentationStyle = .fullScreen

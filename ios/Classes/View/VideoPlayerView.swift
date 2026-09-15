@@ -183,6 +183,17 @@ import QuartzCore
     // 1.0 = system default. Re-applied to every new AVPlayerItem (issue #43).
     var embeddedTextScale: CGFloat = 1.0
 
+    // Legible option index this view last reported to Dart via subtitleChange
+    // (-1 = off, nil = nothing reported yet for the current item). Lets the
+    // media-selection observer report only genuine changes.
+    var lastReportedLegibleIndex: Int?
+
+    // Whether the item's own first legible selection has been corrected for the
+    // current item. Until it has, a selection change can't be a CC-menu pick —
+    // there was no chance to make one — so it is corrected even on a view with
+    // native controls.
+    var hasCorrectedInitialLegibleSelection: Bool = false
+
     // Store HDR setting
     var enableHDR: Bool = false
 
@@ -319,6 +330,8 @@ import QuartzCore
                     // controller won't auto-PiP); its view is reparented in on collapse.
                     resolvedViewController = sharedViewController
                     isDartFullscreenView = true
+                    // Attaching a view controller re-runs AVKit's media selection; keep Dart's subtitle choice.
+                    SharedPlayerManager.shared.reapplyLegibleSelection(for: controllerIdValue)
                 } else {
                     if alreadyExisted && !hasHandoffContext {
                         // Second platform view for this controller with NO floating handoff
@@ -326,6 +339,7 @@ import QuartzCore
                         let displayVC = AVPlayerViewController()
                         displayVC.player = sharedPlayer
                         resolvedViewController = displayVC
+                        SharedPlayerManager.shared.reapplyLegibleSelection(for: controllerIdValue)
                         npLog("✅ Created dedicated AVPlayerViewController for shared controller (controller ID: \(controllerIdValue)) - avoids black screen when navigating list↔detail")
                     } else {
                         // First view, or a recreated inline while a floating handoff is
@@ -341,6 +355,7 @@ import QuartzCore
             npLog("No controller ID provided, creating new player\(useLightView ? "" : " and view controller")")
             let newPlayer = AVPlayer()
             player = newPlayer
+            SharedPlayerManager.configureMediaSelection(newPlayer)
 
             // Configure for background playback
             if #available(iOS 15.0, *) {
@@ -659,6 +674,11 @@ import QuartzCore
         } else {
             playerViewController.player = nil
             playerViewController.player = player
+        }
+
+        // Re-attaching runs AVKit's media selection again; restore Dart's subtitle choice.
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.reapplyLegibleSelection(for: controllerIdValue)
         }
     }
 

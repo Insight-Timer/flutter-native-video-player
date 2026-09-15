@@ -15,6 +15,10 @@ extension VideoPlayerView {
         // captions to the video's content rect (platform views don't emit this
         // the way the texture renderer does).
         item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
+        // Subtitle selection can change without a setSubtitleTrack call
+        // (AVKit attach-time selection, native fullscreen CC menu); mirror it
+        // to Dart so the app's picker never disagrees with what is rendered.
+        item.addObserver(self, forKeyPath: "currentMediaSelection", options: [.new], context: nil)
         observedItem = item
 
         // Player-level observers are registered once per view, not per load
@@ -66,6 +70,7 @@ extension VideoPlayerView {
         item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
         item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
         item.removeObserver(self, forKeyPath: "presentationSize")
+        item.removeObserver(self, forKeyPath: "currentMediaSelection")
         NotificationCenter.default.removeObserver(
             self,
             name: .AVPlayerItemFailedToPlayToEndTime,
@@ -115,6 +120,11 @@ extension VideoPlayerView {
             case "status":
                 switch item.status {
                 case .readyToPlay:
+                    // The legible group is normally resolved by now: apply a choice
+                    // that was made while it wasn't, in case selecting it never
+                    // produced a currentMediaSelection change of its own.
+                    applyRecordedLegibleSelection()
+
                     // Only send isInitialized for new players, not for shared players
                     // Shared players already sent their state in the init
                     if !isSharedPlayer {
@@ -163,6 +173,8 @@ extension VideoPlayerView {
                     ])
                 }
                 emitVideoDimensionsIfAvailable(from: item)
+            case "currentMediaSelection":
+                onLegibleSelectionChanged()
             default: break
             }
         }
