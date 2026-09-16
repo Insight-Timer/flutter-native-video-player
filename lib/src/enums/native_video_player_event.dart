@@ -47,6 +47,11 @@ enum PlayerControlState {
   fullscreenExited,
   timeUpdated,
   videoDimensionsUpdated,
+
+  /// iOS-only. The platform view named in `viewId` gained or lost a picture.
+  /// A host showing a poster over the player can drop it on the first frame
+  /// instead of guessing how long the view takes to render.
+  readyForDisplayChanged,
 }
 
 /// Activity state event for playback changes
@@ -157,6 +162,8 @@ class PlayerControlEvent {
         return PlayerControlState.timeUpdated;
       case 'videoDimensions':
         return PlayerControlState.videoDimensionsUpdated;
+      case 'readyForDisplayChanged':
+        return PlayerControlState.readyForDisplayChanged;
       default:
         return PlayerControlState.none;
     }

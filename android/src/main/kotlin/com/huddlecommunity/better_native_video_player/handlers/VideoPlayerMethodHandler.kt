@@ -87,6 +87,7 @@ class VideoPlayerMethodHandler(
             "disconnectAirPlay" -> handleDisconnectAirPlay(result)
             "dispose" -> handleDispose(result)
             "updateTrackNavFlags" -> handleUpdateTrackNavFlags(call, result)
+            "setMediaInfo" -> handleSetMediaInfo(call, result)
             // No-op on Android: PiP for the floating player is handled by the Flutter package.
             "setAutomaticPipView" -> result.success(true)
             else -> result.notImplemented()
@@ -116,6 +117,35 @@ class VideoPlayerMethodHandler(
             showSystemNextTrackControl = showNext,
             showSystemPreviousTrackControl = showPrev,
         )
+        result.success(null)
+    }
+
+    /**
+     * Adds or drops the media session after load, so one player can move between a
+     * surface that should publish to the notification and system controls and one
+     * that should publish nothing.
+     *
+     * A null `mediaInfo` also clears the view's copy, or the observer would rebuild
+     * the session from it the next time playback starts.
+     */
+    private fun handleSetMediaInfo(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val rawMediaInfo = args?.get("mediaInfo")
+        if (args == null || (rawMediaInfo != null && rawMediaInfo !is Map<*, *>)) {
+            // An explicit null is the clear; anything else that isn't a Map is malformed,
+            // and taking the clearing branch for it costs the user their controls silently.
+            result.error("INVALID_ARGS", "setMediaInfo expects a Map with an optional mediaInfo Map", null)
+            return
+        }
+        @Suppress("UNCHECKED_CAST")
+        val mediaInfo = rawMediaInfo as? Map<String, Any>
+        updateMediaInfo?.invoke(mediaInfo)
+        if (mediaInfo == null) {
+            notificationHandler.releaseMediaSession()
+        } else {
+            notificationHandler.enableMediaSession()
+            notificationHandler.setupMediaSession(mediaInfo)
+        }
         result.success(null)
     }
 
@@ -153,6 +183,12 @@ class VideoPlayerMethodHandler(
         // Cache track nav flags early so getAvailableCommands() reflects them when
         // setMediaSource() triggers onAvailableCommandsChanged below.
         notificationHandler.cacheTrackNavFlags(mediaInfo)
+
+        // Loading with media info asks to publish, so lift the drop a silent load
+        // latched: the latch is otherwise only cleared by setMediaInfo.
+        if (mediaInfo != null) {
+            notificationHandler.enableMediaSession()
+        }
 
         // Store media info in the VideoPlayerView
         updateMediaInfo?.invoke(mediaInfo)

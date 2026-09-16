@@ -28,6 +28,8 @@ class NativeVideoPlayer extends StatefulWidget {
     this.overlayBuilder,
     this.overlayFadeDuration = const Duration(milliseconds: 300),
     this.isFullscreenContext = false,
+    this.onViewCreated,
+    this.onReadyForDisplay,
     this.useTextureView = false,
     this.maxVideoHeight,
     super.key,
@@ -52,6 +54,16 @@ class NativeVideoPlayer extends StatefulWidget {
   /// Passed to the platform view as [isDartFullscreen] so iOS can use a dedicated
   /// AVPlayerViewController and avoid moving the shared view away from the inline slot.
   final bool isFullscreenContext;
+
+  /// Called with this view's platform view id once it exists. Lets a host that
+  /// shares a controller between several views tell them apart — to claim the
+  /// method channel with [NativeVideoPlayerController.setPrimaryPlatformView],
+  /// which otherwise stays with whichever view registered first.
+  final void Function(int platformViewId)? onViewCreated;
+
+  /// iOS-only. Called when this view gains or loses a picture. A host covering
+  /// the player with a poster can lift it the moment there is a frame.
+  final void Function(bool isReadyForDisplay)? onReadyForDisplay;
 
   /// Android only: back the view with a TextureView instead of a SurfaceView, so Flutter
   /// composites it as a texture layer rather than falling back to hybrid composition.
@@ -126,6 +138,16 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
   }
 
   void _handleControlEvent(PlayerControlEvent event) {
+    if (event.state == PlayerControlState.readyForDisplayChanged) {
+      final int? viewId = (event.data?['viewId'] as num?)?.toInt();
+      if (viewId != null && viewId == _platformViewId) {
+        widget.onReadyForDisplay?.call(
+          event.data?['isReadyForDisplay'] as bool? ?? false,
+        );
+      }
+      return;
+    }
+
     // Hide custom overlay when entering PiP (Android only)
     if (defaultTargetPlatform == TargetPlatform.android) {
       if (event.state == PlayerControlState.pipStarted && _overlayVisible) {
@@ -222,6 +244,7 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
       context,
       isFullscreenContext: widget.isFullscreenContext,
     );
+    widget.onViewCreated?.call(id);
   }
 
   Map<String, dynamic> _getCreationParams() {
@@ -230,6 +253,9 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     );
     if (widget.isFullscreenContext) {
       params['isDartFullscreen'] = true;
+    }
+    if (widget.onReadyForDisplay != null) {
+      params['observesReadyForDisplay'] = true;
     }
     if (widget.useTextureView) {
       params['useTextureView'] = true;
