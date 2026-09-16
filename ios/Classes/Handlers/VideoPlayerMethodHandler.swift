@@ -424,6 +424,12 @@ extension VideoPlayerView {
         if let args = call.arguments as? [String: Any],
            let volume = args["volume"] as? Double {
             player?.volume = Float(volume)
+            // A player with no media info never claims the session, which is right
+            // while it is silent: unmuting is where it starts making sound, and the
+            // default category dies on the ring switch and at the lock screen.
+            if volume > 0 {
+                prepareAudioSession()
+            }
         }
         result(nil)
     }

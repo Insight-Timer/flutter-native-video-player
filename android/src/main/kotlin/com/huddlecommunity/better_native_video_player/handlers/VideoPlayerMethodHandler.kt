@@ -129,8 +129,16 @@ class VideoPlayerMethodHandler(
      * the session from it the next time playback starts.
      */
     private fun handleSetMediaInfo(call: MethodCall, result: MethodChannel.Result) {
+        val args = call.arguments as? Map<*, *>
+        val rawMediaInfo = args?.get("mediaInfo")
+        if (args == null || (rawMediaInfo != null && rawMediaInfo !is Map<*, *>)) {
+            // An explicit null is the clear; anything else that isn't a Map is malformed,
+            // and taking the clearing branch for it costs the user their controls silently.
+            result.error("INVALID_ARGS", "setMediaInfo expects a Map with an optional mediaInfo Map", null)
+            return
+        }
         @Suppress("UNCHECKED_CAST")
-        val mediaInfo = (call.arguments as? Map<*, *>)?.get("mediaInfo") as? Map<String, Any>
+        val mediaInfo = rawMediaInfo as? Map<String, Any>
         updateMediaInfo?.invoke(mediaInfo)
         if (mediaInfo == null) {
             notificationHandler.releaseMediaSession()
@@ -175,6 +183,12 @@ class VideoPlayerMethodHandler(
         // Cache track nav flags early so getAvailableCommands() reflects them when
         // setMediaSource() triggers onAvailableCommandsChanged below.
         notificationHandler.cacheTrackNavFlags(mediaInfo)
+
+        // Loading with media info asks to publish, so lift the drop a silent load
+        // latched: the latch is otherwise only cleared by setMediaInfo.
+        if (mediaInfo != null) {
+            notificationHandler.enableMediaSession()
+        }
 
         // Store media info in the VideoPlayerView
         updateMediaInfo?.invoke(mediaInfo)

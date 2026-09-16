@@ -3,7 +3,10 @@ import UIKit
 import AVKit
 import AVFoundation
 import MediaPlayer
+import ObjectiveC
 import QuartzCore
+
+private var videoGravityAppliedKey: UInt8 = 0
 
 // MARK: - Main Video Player View
 
@@ -145,9 +148,20 @@ import QuartzCore
     /// with a poster can lift it on the frame the video appears on.
     private var readyForDisplayObservation: NSKeyValueObservation?
 
-    /// Whether this view has ever set a video gravity. False for one that shares
-    /// another view's controller, which skips the creation-param gravity.
-    private var hasAppliedVideoGravity: Bool = false
+    /// Whether a gravity has ever been set on this controller. Kept on the controller
+    /// rather than the view because several views can share one, and a second view
+    /// starting clear would let a redundant set write over a picture already showing.
+    private var hasAppliedVideoGravity: Bool {
+        get { (objc_getAssociatedObject(playerViewController, &videoGravityAppliedKey) as? Bool) ?? false }
+        set {
+            objc_setAssociatedObject(
+                playerViewController,
+                &videoGravityAppliedKey,
+                newValue,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
+    }
 
     // Player and audio-route observers register at most once (the player is
     // stable for this view's lifetime).
@@ -503,6 +517,7 @@ import QuartzCore
             controller.showsPlaybackControls = collapsed ? false : showNativeControls
             if !collapsed {
                 controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
+                hasAppliedVideoGravity = true
             }
             // c46460b arm: only READ allowsPictureInPicturePlayback (never write it).
             var armFlag = false
@@ -851,7 +866,9 @@ import QuartzCore
     private func observeReadyForDisplay() {
         readyForDisplayObservation = playerViewController.observe(
             \.isReadyForDisplay,
-            options: [.new]
+            // [.initial] as well: a shared controller can already be showing a
+            // picture, which then never changes and so never reports.
+            options: [.initial, .new]
         ) { [weak self] _, _ in
             self?.sendReadyForDisplay()
         }
@@ -879,11 +896,24 @@ import QuartzCore
                 result(nil)
                 return
             }
+            // A PiP window or the AVKit fullscreen view holds the layer deliberately,
+            // and both are on screen: taking it back blanks what is being watched.
+            let isPipActiveForController = self.controllerId
+                .flatMap { SharedPlayerManager.shared.isPipActiveForController($0) } ?? false
+            if self.isPipCurrentlyActive || self.isPipRestoringUI || isPipActiveForController
+                || self.fullscreenPlayerViewController?.player === player {
+                result(nil)
+                return
+            }
+            let hasSiblingView = self.controllerId
+                .flatMap { SharedPlayerManager.shared.findAnotherViewForController($0, excluding: self.viewId) } != nil
             if self.playerViewController.player !== player {
                 self.playerViewController.player = player
-            } else if !self.playerViewController.isReadyForDisplay {
+            } else if !self.playerViewController.isReadyForDisplay && hasSiblingView {
                 // Bound but blank: another view took the picture. AVKit ignores an
-                // assignment that doesn't change, so it has to go through nil.
+                // assignment that doesn't change, so it has to go through nil. Only
+                // worth it where a sibling exists — otherwise this is buffering, and
+                // rebinding would flash the surface black for nothing.
                 self.playerViewController.player = nil
                 self.playerViewController.player = player
             }
@@ -1033,6 +1063,14 @@ import QuartzCore
     /// Controller teardown: siblings die too, so transferring ownership would
     /// republish info nothing clears. Clear only what this controller's views own.
     func clearNowPlayingOnControllerDispose() {
+        // A PiP window is still on screen with this player in it, and its transport
+        // reads the entry this would wipe. Teardown is not the only caller any more:
+        // a host can drop the media session on a player that goes on playing.
+        let isPipActiveForController = controllerId.flatMap { SharedPlayerManager.shared.isPipActiveForController(/bin/zsh) } ?? false
+        if isPipCurrentlyActive || isPipRestoringUI || isPipActiveForController {
+            return
+        }
+
         var controllerViewIds: Set<Int64> = [viewId]
         if let controllerIdValue = controllerId {
             for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue) {

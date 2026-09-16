@@ -841,9 +841,11 @@ class NativeVideoPlayerController {
   ///
   /// Applies to the running player, so a shared player can move between a
   /// surface that should own the system controls and one that should not.
-  Future<void> setMediaInfo(NativeVideoPlayerMediaInfo? info) async {
+  /// The field is set either way, since [creationParams] re-reads it for the next
+  /// view; the result says whether the player that is up took it too.
+  Future<bool> setMediaInfo(NativeVideoPlayerMediaInfo? info) async {
     mediaInfo = info;
-    await _methodChannel?.setMediaInfo(info?.toMap());
+    return await _methodChannel?.setMediaInfo(info?.toMap()) ?? false;
   }
 
   /// Sets the overlay builder for fullscreen mode

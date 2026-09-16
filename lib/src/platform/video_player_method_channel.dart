@@ -639,14 +639,18 @@ class VideoPlayerMethodChannel {
   /// Lets one player move between a surface that should own the system controls
   /// and one that should publish nothing, without reloading — `mediaInfo` given
   /// at `load` time can otherwise never be added or taken away.
-  Future<void> setMediaInfo(Map<String, dynamic>? mediaInfo) async {
+  /// Whether native applied it: there may be no view attached yet, and the call
+  /// is a silent no-op then.
+  Future<bool> setMediaInfo(Map<String, dynamic>? mediaInfo) async {
     try {
       await _methodChannel.invokeMethod<void>('setMediaInfo', <String, Object?>{
         'viewId': primaryPlatformViewId,
         'mediaInfo': mediaInfo,
       });
+      return true;
     } catch (e) {
       debugPrint('Error calling setMediaInfo: $e');
+      return false;
     }
   }
 
