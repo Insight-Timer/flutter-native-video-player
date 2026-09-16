@@ -319,10 +319,9 @@ extension VideoPlayerView {
         }
 
         if let mediaInfo = mediaInfo {
-            // Activated only for a player that publishes: doing it before knowing
-            // means a player with no media info still claims the audio session, and
-            // iOS then renders it as a blank Now Playing tile on the lock screen.
-            // Must still happen BEFORE play(), or audio stops when the screen locks.
+            // Only for a player that publishes, and still before play(): a silent
+            // one claiming the session gets a blank Now Playing tile, and a publishing
+            // one that claims it late loses its audio at the lock screen.
             prepareAudioSession()
 
             let title = mediaInfo["title"] ?? "Unknown"

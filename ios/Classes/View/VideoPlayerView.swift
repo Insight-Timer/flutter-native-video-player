@@ -751,7 +751,18 @@ private var videoGravityAppliedKey: UInt8 = 0
     /// no-op once ownership is cleared). Removing targets here would take every other
     /// player's controls with them: `MPRemoteCommandCenter` is process-wide.
     private func handleSetMediaInfo(call: FlutterMethodCall, result: @escaping FlutterResult) {
-        let mediaInfo = (call.arguments as? [String: Any])?["mediaInfo"] as? [String: Any]
+        guard let args = call.arguments as? [String: Any] else {
+            result(FlutterError(code: "INVALID_ARGS", message: "setMediaInfo expects a Map", details: nil))
+            return
+        }
+        let rawMediaInfo = args["mediaInfo"]
+        if let rawMediaInfo = rawMediaInfo, !(rawMediaInfo is NSNull), !(rawMediaInfo is [String: Any]) {
+            // An explicit null is the clear; anything else that isn't a Map is malformed,
+            // and taking the clearing branch for it costs the user their controls silently.
+            result(FlutterError(code: "INVALID_ARGS", message: "mediaInfo must be a Map or null", details: nil))
+            return
+        }
+        let mediaInfo = rawMediaInfo as? [String: Any]
         // Every view for this controller, not just this one: each keeps its own copy,
         // and the playback callbacks republish from it — a sibling would put back the
         // entry we just took away the next time playback starts.
@@ -1066,7 +1077,7 @@ private var videoGravityAppliedKey: UInt8 = 0
         // A PiP window is still on screen with this player in it, and its transport
         // reads the entry this would wipe. Teardown is not the only caller any more:
         // a host can drop the media session on a player that goes on playing.
-        let isPipActiveForController = controllerId.flatMap { SharedPlayerManager.shared.isPipActiveForController(/bin/zsh) } ?? false
+        let isPipActiveForController = controllerId.flatMap { SharedPlayerManager.shared.isPipActiveForController($0) } ?? false
         if isPipCurrentlyActive || isPipRestoringUI || isPipActiveForController {
             return
         }

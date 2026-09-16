@@ -839,10 +839,10 @@ class NativeVideoPlayerController {
   /// Adds or drops the system media session — the lock-screen entry and its
   /// transport controls — for the loaded media. Null publishes nothing.
   ///
-  /// Applies to the running player, so a shared player can move between a
-  /// surface that should own the system controls and one that should not.
-  /// The field is set either way, since [creationParams] re-reads it for the next
-  /// view; the result says whether the player that is up took it too.
+  /// Applies to the running player, so a shared player can move between a surface
+  /// that should own the system controls and one that should not. The field is set
+  /// either way for the next view's [creationParams]; the result says whether the
+  /// player that is up took it too.
   Future<bool> setMediaInfo(NativeVideoPlayerMediaInfo? info) async {
     mediaInfo = info;
     return await _methodChannel?.setMediaInfo(info?.toMap()) ?? false;
@@ -1701,13 +1701,9 @@ class NativeVideoPlayerController {
     }
   }
 
-  /// Points method-channel calls at [platformViewId].
-  ///
-  /// Calls carry the primary view's id, and that primary is whichever view
-  /// registered first — a fullscreen-context view is never adopted while one
-  /// exists. When several views share a controller and only one is on screen,
-  /// the on-screen one should claim it, or surface reconnects and media-session
-  /// updates land on a view nobody can see.
+  /// Points method-channel calls at [platformViewId], for a controller shared by
+  /// several views where only one is on screen — the primary is otherwise whichever
+  /// registered first, so updates land on a view nobody can see.
   ///
   /// Ignores an id this controller doesn't know, so a view being disposed can't
   /// take the channel with it.
