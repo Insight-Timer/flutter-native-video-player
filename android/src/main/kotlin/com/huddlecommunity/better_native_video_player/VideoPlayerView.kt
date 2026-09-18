@@ -1,8 +1,10 @@
 package com.huddlecommunity.better_native_video_player
 
 import android.app.Activity
+import android.app.Application
 import android.app.Dialog
 import android.content.Context
+import android.os.Bundle
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.util.Log
@@ -90,6 +92,17 @@ class VideoPlayerView(
     private var enableHDR: Boolean = false
     private var useAspectFill: Boolean = false
 
+    // Whether playback may take audio focus from other apps. False for a silent
+    // preview: muting alone still requests focus and pauses their music.
+    private var interruptsOtherAudio: Boolean = true
+
+    // Whether playback survives the app being backgrounded. False for a preview that is only
+    // ever meant to play on screen; ExoPlayer otherwise plays on with the app gone.
+    private var continuesInBackground: Boolean = true
+
+    // Registered only while [continuesInBackground] is false, and only to pause on the way out.
+    private var backgroundPauseCallbacks: Application.ActivityLifecycleCallbacks? = null
+
 
     init {
         Log.d(TAG, "Creating VideoPlayerView with id: $viewId")
@@ -104,6 +117,8 @@ class VideoPlayerView(
         // Extract native controls setting from args
         showNativeControlsOriginal = args?.get("showNativeControls") as? Boolean ?: true
         useAspectFill = args?.get("useAspectFill") as? Boolean ?: false
+        interruptsOtherAudio = args?.get("interruptsOtherAudio") as? Boolean ?: true
+        continuesInBackground = args?.get("continuesInBackground") as? Boolean ?: true
 
         // Extract HDR setting from args
         enableHDR = args?.get("enableHDR") as? Boolean ?: false
@@ -147,6 +162,12 @@ class VideoPlayerView(
                 .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
+
+        // After the player is resolved, so a shared one created for an audible surface
+        // picks this up too; focus is only requested on play, never at construction.
+        SharedPlayerManager.applyAudioFocus(player, interruptsOtherAudio)
+
+        observeBackgroundForPause()
 
         // A shared player takes the cap of whichever view shows it: an inline preview caps
         // itself, and the full-screen view that follows clears it again.
@@ -848,8 +869,42 @@ class VideoPlayerView(
         }
     }
 
+    /**
+     * Pauses a player that is not meant to outlive the app being on screen. Android keeps
+     * ExoPlayer running once the app goes away, and a pause sent from Dart at that moment is
+     * racing the app's own teardown, so the platform side stops it too.
+     *
+     * Only the activity's stop counts: onPause also fires for a dialog or a permission prompt
+     * sitting over the app, which the video is still visible behind.
+     */
+    private fun observeBackgroundForPause() {
+        if (continuesInBackground) return
+        val application = context.applicationContext as? Application ?: return
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStopped(activity: Activity) {
+                if (isDisposed || !player.isPlaying) return
+                Log.d(TAG, "App stopped - pausing view $viewId, which does not play in the background")
+                player.pause()
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        }
+        application.registerActivityLifecycleCallbacks(callbacks)
+        backgroundPauseCallbacks = callbacks
+    }
+
     override fun dispose() {
         Log.d(TAG, "VideoPlayerView dispose for id: $viewId")
+
+        backgroundPauseCallbacks?.let { callbacks ->
+            (context.applicationContext as? Application)?.unregisterActivityLifecycleCallbacks(callbacks)
+        }
+        backgroundPauseCallbacks = null
 
         // Mark as disposed to prevent any further events
         isDisposed = true

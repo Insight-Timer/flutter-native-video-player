@@ -38,6 +38,20 @@ object SharedPlayerManager {
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
 
     /**
+     * Attributes every video player runs with. [handleAudioFocus] false leaves audio focus
+     * to whoever holds it, so a silent preview doesn't pause another app's music.
+     */
+    fun applyAudioFocus(player: ExoPlayer, handleAudioFocus: Boolean) {
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(),
+            handleAudioFocus
+        )
+    }
+
+    /**
      * Gets or creates a player for the given controller ID
      * Returns a Pair<ExoPlayer, Boolean> where the Boolean indicates if the player already existed (true) or was newly created (false)
      */

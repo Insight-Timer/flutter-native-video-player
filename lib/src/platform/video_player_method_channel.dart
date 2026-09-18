@@ -251,6 +251,21 @@ class VideoPlayerMethodChannel {
     );
   }
 
+  /// Sets whether playback takes the audio channel from other apps.
+  ///
+  /// When [interrupts] is false the native player leaves the audio session
+  /// (iOS) and audio focus (Android) to whoever holds them, so a muted preview
+  /// no longer pauses another app's music.
+  Future<void> setInterruptsOtherAudio(bool interrupts) async {
+    await _methodChannel.invokeMethod<void>(
+      'setInterruptsOtherAudio',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'interrupts': interrupts,
+      },
+    );
+  }
+
   /// Checks if Picture-in-Picture is available
   Future<bool> isPictureInPictureAvailable() async {
     try {
