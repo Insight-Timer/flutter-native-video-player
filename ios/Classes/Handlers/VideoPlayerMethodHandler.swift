@@ -305,6 +305,10 @@ extension VideoPlayerView {
     /// Prepares the player for playback by setting up audio session, Now Playing info, and PiP
     /// This should be called before starting playback to ensure proper background audio and lock screen controls
     private func prepareForPlayback() {
+        // CRITICAL: Activate audio session BEFORE calling player.play()
+        // This ensures audio continues when the screen locks
+        prepareAudioSession()
+
         // ALWAYS set media item on play to ensure this player has control
         // This is critical for both normal playback and PiP mode
         var mediaInfo = currentMediaInfo
@@ -319,11 +323,6 @@ extension VideoPlayerView {
         }
 
         if let mediaInfo = mediaInfo {
-            // Only for a player that publishes, and still before play(): a silent
-            // one claiming the session gets a blank Now Playing tile, and a publishing
-            // one that claims it late loses its audio at the lock screen.
-            prepareAudioSession()
-
             let title = mediaInfo["title"] ?? "Unknown"
             print("📱 Setting Now Playing info for: \(title)")
             setupNowPlayingInfo(mediaInfo: mediaInfo)
@@ -336,7 +335,7 @@ extension VideoPlayerView {
             }
         } else {
             // No media info is a deliberate state for a muted preview, not a fault:
-            // it publishes nothing and leaves the audio session to whoever owns it.
+            // it simply publishes nothing.
             print("ℹ️  No media info - this player publishes no Now Playing entry")
         }
 
@@ -423,12 +422,6 @@ extension VideoPlayerView {
         if let args = call.arguments as? [String: Any],
            let volume = args["volume"] as? Double {
             player?.volume = Float(volume)
-            // A player with no media info never claims the session, which is right
-            // while it is silent: unmuting is where it starts making sound, and the
-            // default category dies on the ring switch and at the lock screen.
-            if volume > 0 {
-                prepareAudioSession()
-            }
         }
         result(nil)
     }
