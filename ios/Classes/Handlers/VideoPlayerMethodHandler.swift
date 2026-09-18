@@ -422,6 +422,8 @@ extension VideoPlayerView {
         if let args = call.arguments as? [String: Any],
            let volume = args["volume"] as? Double {
             player?.volume = Float(volume)
+            // An audible mixing player needs the playback category now; a claiming one already holds it.
+            if volume > 0 && !interruptsOtherAudio { prepareAudioSession() }
         }
         result(nil)
     }

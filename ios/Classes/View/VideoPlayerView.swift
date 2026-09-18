@@ -645,10 +645,9 @@ private var videoGravityAppliedKey: UInt8 = 0
     func prepareAudioSession() {
         do {
             guard interruptsOtherAudio else {
-                // Mixing, and deliberately not activated: the category is process-wide, so an
-                // audible player takes exclusivity back on its own next play.
+                // A silent player needs no category; changing the shared one costs a library track its Now Playing status.
+                guard (player?.volume ?? 0) > 0 else { return }
                 try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
-                print("✅ AVAudioSession set to mix with other audio (silent playback)")
                 return
             }
             try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])
