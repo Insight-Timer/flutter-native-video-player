@@ -3,7 +3,10 @@ import UIKit
 import AVKit
 import AVFoundation
 import MediaPlayer
+import ObjectiveC
 import QuartzCore
+
+private var videoGravityAppliedKey: UInt8 = 0
 
 // MARK: - Main Video Player View
 
@@ -149,6 +152,25 @@ import QuartzCore
     // never registered, so `deinit` safely skips removal.
     weak var observedPlayerItem: AVPlayerItem?
 
+    /// Reports when this view's controller has a picture, so a host covering it
+    /// with a poster can lift it on the frame the video appears on.
+    private var readyForDisplayObservation: NSKeyValueObservation?
+
+    /// Whether a gravity has ever been set on this controller. Kept on the controller
+    /// rather than the view because several views can share one, and a second view
+    /// starting clear would let a redundant set write over a picture already showing.
+    private var hasAppliedVideoGravity: Bool {
+        get { (objc_getAssociatedObject(playerViewController, &videoGravityAppliedKey) as? Bool) ?? false }
+        set {
+            objc_setAssociatedObject(
+                playerViewController,
+                &videoGravityAppliedKey,
+                newValue,
+                .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+            )
+        }
+    }
+
     // Player and audio-route observers register at most once (the player is
     // stable for this view's lifetime).
     var didRegisterPlayerObservers: Bool = false
@@ -248,12 +270,20 @@ import QuartzCore
             playerViewController.showsPlaybackControls = showControls
             playerViewController.delegate = self
             applyVideoGravity(useAspectFill)
-            // Disable automatic Now Playing updates - we'll handle it manually
-            playerViewController.updatesNowPlayingInfoCenter = false
         }
+
+        // Every view, including a Dart-fullscreen or handoff one: this only stops AVKit
+        // publishing its own Now Playing entry, which the plugin sets manually. Left on,
+        // AVKit puts the app name, a progress bar and transport controls in Control Center
+        // for players that are meant to publish nothing at all.
+        playerViewController.updatesNowPlayingInfoCenter = false
 
         // Extract configuration from Flutter args
         if let args = args as? [String: Any] {
+            if args["observesReadyForDisplay"] as? Bool == true {
+                observeReadyForDisplay()
+            }
+
             // PiP configuration from args
             let argsAllowsPiP = args["allowsPictureInPicture"] as? Bool ?? true
             let argsCanStartAutomatically = args["canStartPictureInPictureAutomatically"] as? Bool ?? true
@@ -498,6 +528,7 @@ import QuartzCore
             controller.showsPlaybackControls = collapsed ? false : showNativeControls
             if !collapsed {
                 controller.videoGravity = useAspectFill ? .resizeAspectFill : .resizeAspect
+                hasAppliedVideoGravity = true
             }
             // c46460b arm: only READ allowsPictureInPicturePlayback (never write it).
             var armFlag = false
@@ -721,6 +752,8 @@ import QuartzCore
         case "ensureSurfaceConnected":
             // No-op on iOS; each platform view uses its own AVPlayerViewController when shared.
             result(nil)
+        case "reclaimVideoSurface":
+            handleReclaimVideoSurface(result: result)
         case "isAirPlayAvailable":
             handleIsAirPlayAvailable(result: result)
         case "showAirPlayPicker":
@@ -735,9 +768,64 @@ import QuartzCore
             handleDispose(result: result)
         case "updateTrackNavFlags":
             handleUpdateTrackNavFlags(call: call, result: result)
+        case "setMediaInfo":
+            handleSetMediaInfo(call: call, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    /// Adds or drops this player's Now Playing entry after load, so one player can
+    /// move between a surface that should own the lock screen and Control Center and
+    /// one that should publish nothing — a muted preview playing behind a tile.
+    ///
+    /// Clearing goes through the identity-guarded path, which only wipes info this
+    /// controller's views actually wrote and leaves command targets registered (they
+    /// no-op once ownership is cleared). Removing targets here would take every other
+    /// player's controls with them: `MPRemoteCommandCenter` is process-wide.
+    private func handleSetMediaInfo(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard let args = call.arguments as? [String: Any] else {
+            result(FlutterError(code: "INVALID_ARGS", message: "setMediaInfo expects a Map", details: nil))
+            return
+        }
+        let rawMediaInfo = args["mediaInfo"]
+        if let rawMediaInfo = rawMediaInfo, !(rawMediaInfo is NSNull), !(rawMediaInfo is [String: Any]) {
+            // An explicit null is the clear; anything else that isn't a Map is malformed,
+            // and taking the clearing branch for it costs the user their controls silently.
+            result(FlutterError(code: "INVALID_ARGS", message: "mediaInfo must be a Map or null", details: nil))
+            return
+        }
+        let mediaInfo = rawMediaInfo as? [String: Any]
+        // Every view for this controller, not just this one: each keeps its own copy,
+        // and the playback callbacks republish from it — a sibling would put back the
+        // entry we just took away the next time playback starts.
+        var viewsForController: [VideoPlayerView] = [self]
+        if let controllerIdValue = controllerId {
+            viewsForController = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            if !viewsForController.contains(where: { $0.viewId == viewId }) {
+                viewsForController.append(self)
+            }
+        }
+
+        guard let mediaInfo = mediaInfo else {
+            for view in viewsForController {
+                view.currentMediaInfo = nil
+            }
+            if let controllerIdValue = controllerId {
+                SharedPlayerManager.shared.clearMediaInfo(for: controllerIdValue)
+            }
+            clearNowPlayingOnControllerDispose()
+            result(nil)
+            return
+        }
+        for view in viewsForController {
+            view.currentMediaInfo = mediaInfo
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.setMediaInfo(for: controllerIdValue, mediaInfo: mediaInfo)
+        }
+        setupNowPlayingInfo(mediaInfo: mediaInfo)
+        result(nil)
     }
 
     /// Refreshes the lock-screen / Control Center prev-next button availability
@@ -808,7 +896,9 @@ import QuartzCore
     private func handleSetUseAspectFill(call: FlutterMethodCall, result: @escaping FlutterResult) {
         let args = call.arguments as? [String: Any]
         let enabled = args?["enabled"] as? Bool ?? false
-        if useAspectFill == enabled {
+        // A view that skipped the creation-param gravity has none yet, so its first
+        // set has to go through even when the flag already matches.
+        if useAspectFill == enabled && hasAppliedVideoGravity {
             result(nil)
             return
         }
@@ -832,8 +922,76 @@ import QuartzCore
         result(nil)
     }
 
+    private func observeReadyForDisplay() {
+        readyForDisplayObservation = playerViewController.observe(
+            \.isReadyForDisplay,
+            // [.initial] as well: a shared controller can already be showing a
+            // picture, which then never changes and so never reports.
+            options: [.initial, .new]
+        ) { [weak self] _, _ in
+            self?.sendReadyForDisplay()
+        }
+    }
+
+    private func sendReadyForDisplay() {
+        sendEvent(
+            "readyForDisplayChanged",
+            data: ["isReadyForDisplay": playerViewController.isReadyForDisplay, "viewId": viewId]
+        )
+    }
+
+    /// Gives this view's controller the picture back, for a host that renders one
+    /// player in several views and knows which of them should be showing it.
+    ///
+    /// AVKit renders in whichever controller the player was assigned to last, and
+    /// offers no attach API, so reassigning is the only way back in.
+    private func handleReclaimVideoSurface(result: @escaping FlutterResult) {
+        guard let player = player else {
+            result(nil)
+            return
+        }
+        let reconnect = { [weak self] in
+            guard let self = self, !self.isDisposed else {
+                result(nil)
+                return
+            }
+            // A PiP window or the AVKit fullscreen view holds the layer deliberately,
+            // and both are on screen: taking it back blanks what is being watched.
+            let isPipActiveForController = self.controllerId
+                .flatMap { SharedPlayerManager.shared.isPipActiveForController($0) } ?? false
+            if self.isPipCurrentlyActive || self.isPipRestoringUI || isPipActiveForController
+                || self.fullscreenPlayerViewController?.player === player {
+                result(nil)
+                return
+            }
+            let hasSiblingView = self.controllerId
+                .flatMap { SharedPlayerManager.shared.findAnotherViewForController($0, excluding: self.viewId) } != nil
+            if self.playerViewController.player !== player {
+                self.playerViewController.player = player
+            } else if !self.playerViewController.isReadyForDisplay && hasSiblingView {
+                // Bound but blank: another view took the picture. AVKit ignores an
+                // assignment that doesn't change, so it has to go through nil. Only
+                // worth it where a sibling exists — otherwise this is buffering, and
+                // rebinding would flash the surface black for nothing.
+                self.playerViewController.player = nil
+                self.playerViewController.player = player
+            }
+            self.applyVideoGravity(self.useAspectFill)
+            if let controllerId = self.controllerId {
+                SharedPlayerManager.shared.setPlayerOwningView(self.viewId, for: controllerId)
+            }
+            result(nil)
+        }
+        if Thread.isMainThread {
+            reconnect()
+            return
+        }
+        DispatchQueue.main.async(execute: reconnect)
+    }
+
     private func applyVideoGravity(_ enabled: Bool) {
         if Thread.isMainThread {
+            hasAppliedVideoGravity = true
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             UIView.performWithoutAnimation {
@@ -964,6 +1122,14 @@ import QuartzCore
     /// Controller teardown: siblings die too, so transferring ownership would
     /// republish info nothing clears. Clear only what this controller's views own.
     func clearNowPlayingOnControllerDispose() {
+        // A PiP window is still on screen with this player in it, and its transport
+        // reads the entry this would wipe. Teardown is not the only caller any more:
+        // a host can drop the media session on a player that goes on playing.
+        let isPipActiveForController = controllerId.flatMap { SharedPlayerManager.shared.isPipActiveForController($0) } ?? false
+        if isPipCurrentlyActive || isPipRestoringUI || isPipActiveForController {
+            return
+        }
+
         var controllerViewIds: Set<Int64> = [viewId]
         if let controllerIdValue = controllerId {
             for view in SharedPlayerManager.shared.findAllViewsForController(controllerIdValue) {
@@ -1055,6 +1221,11 @@ import QuartzCore
         isDisposed = false
         isEventChannelActive = true
         self.eventSink = events
+
+        // A view that already has a picture reported it before Dart was listening.
+        if readyForDisplayObservation != nil {
+            sendReadyForDisplay()
+        }
 
         // Send initial state event when listener is attached
         if isSharedPlayer {
@@ -1173,6 +1344,8 @@ import QuartzCore
         print("VideoPlayerView deinit for channel: \(channelName), viewId: \(viewId)")
         isDisposed = true
         invalidateEventChannel()
+        readyForDisplayObservation?.invalidate()
+        readyForDisplayObservation = nil
 
         // Clean up rotation container if still on root view.
         if isUsingNativeLayout {
