@@ -94,6 +94,7 @@ class VideoPlayerView(
     // HDR setting
     private var enableHDR: Boolean = false
     private var useAspectFill: Boolean = false
+    private var observesReadyForDisplay: Boolean = false
 
     // PlayerView sizes its content frame only once the first frame reports a video size, so a
     // zoomed view grows after playback starts; preset it from the selected track instead.
@@ -128,6 +129,7 @@ class VideoPlayerView(
         // Extract native controls setting from args
         showNativeControlsOriginal = args?.get("showNativeControls") as? Boolean ?: true
         useAspectFill = args?.get("useAspectFill") as? Boolean ?: false
+        observesReadyForDisplay = args?.get("observesReadyForDisplay") as? Boolean ?: false
         interruptsOtherAudio = args?.get("interruptsOtherAudio") as? Boolean ?: true
         continuesInBackground = args?.get("continuesInBackground") as? Boolean ?: true
 
@@ -232,6 +234,7 @@ class VideoPlayerView(
 
             Log.d(TAG, "PlayerView configured")
         }
+        claimSurface()
 
         // For shared players that already existed, ensure surface is properly connected
         // This is crucial when returning to a video after calling releaseResources()
@@ -243,6 +246,7 @@ class VideoPlayerView(
                 if (currentPlayer != null) {
                     playerView.player = null
                     playerView.player = currentPlayer
+                    claimSurface()
                     presetContentAspectRatio()
                     Log.d(TAG, "Surface reconnected for shared player on init")
                 }
@@ -353,7 +357,8 @@ class VideoPlayerView(
             notificationHandler = notificationHandler,
             getMediaInfo = { currentMediaInfo },
             controllerId = controllerId,
-            viewId = viewId
+            viewId = viewId,
+            observesReadyForDisplay = observesReadyForDisplay
         )
         player.addListener(observer)
         player.addListener(contentAspectRatioPreset)
@@ -363,7 +368,8 @@ class VideoPlayerView(
         // This allows other views to notify us when they're disposed
         if (controllerId != null) {
             SharedPlayerManager.registerView(controllerId, viewId) {
-                reconnectSurface()
+                // A surviving owner is still drawing; re-attaching it would blank its surface for a frame.
+                if (!SharedPlayerManager.hasSurfaceOwner(controllerId)) reconnectSurface()
                 // Emit current state after reconnecting to ensure UI stays in sync
                 emitCurrentState()
             }
@@ -673,6 +679,7 @@ class VideoPlayerView(
             if (currentPlayer != null) {
                 playerView.player = null
                 playerView.player = currentPlayer
+                claimSurface()
                 presetContentAspectRatio()
                 Log.d(TAG, "Reattached player to surface after exiting fullscreen")
             }
@@ -871,6 +878,7 @@ class VideoPlayerView(
             if (currentPlayer != null) {
                 playerView.player = null
                 playerView.player = currentPlayer
+                claimSurface()
                 presetContentAspectRatio()
                 Log.d(TAG, "Surface reconnected successfully for view $viewId")
             } else {
@@ -905,7 +913,13 @@ class VideoPlayerView(
                 is android.view.TextureView -> player.setVideoTextureView(surfaceView)
                 else -> Log.w(TAG, "forceReattachSurfaceToPlayer: unexpected view type")
             }
+            claimSurface()
         }
+    }
+
+    /** The player now draws into this view, so a sibling's disposal must not make it re-attach. */
+    private fun claimSurface() {
+        controllerId?.let { SharedPlayerManager.claimSurface(it, viewId) }
     }
 
     /**
@@ -993,6 +1007,7 @@ class VideoPlayerView(
             // disconnecting the surface. Another platform view may still be using the player.
             // If we don't detach here, disposing this view will disconnect the player's surface,
             // leaving other views without video frames.
+            SharedPlayerManager.releaseSurface(controllerId, viewId)
             playerView.player = null
             Log.d(TAG, "Detached player from PlayerView to preserve surface for other views")
 

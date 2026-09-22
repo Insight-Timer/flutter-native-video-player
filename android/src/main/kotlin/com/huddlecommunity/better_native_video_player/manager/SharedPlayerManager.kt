@@ -26,6 +26,11 @@ object SharedPlayerManager {
     // Map<ControllerId, Map<ViewId, SurfaceReconnectCallback>>
     private val activeViews = mutableMapOf<Int, MutableMap<Long, () -> Unit>>()
 
+    // The view whose surface the player draws into. Only that view's disposal leaves the player
+    // without a surface; re-attaching a view that is already drawing blanks it for a frame.
+    // Map<ControllerId, ViewId>
+    private val surfaceOwners = mutableMapOf<Int, Long>()
+
     // Per-view event handlers for each controller, so an event emitted from a view
     // with no Flutter listener (e.g. the floating player's secondary shared view) can
     // be routed to whichever sibling view IS subscribed. Mirrors the iOS sendEvent
@@ -95,6 +100,16 @@ object SharedPlayerManager {
         val views = activeViews.getOrPut(controllerId) { mutableMapOf() }
         views[viewId] = reconnectCallback
         Log.d(TAG, "Registered view $viewId for controller $controllerId (total views: ${views.size})")
+    }
+
+    fun claimSurface(controllerId: Int, viewId: Long) {
+        surfaceOwners[controllerId] = viewId
+    }
+
+    fun hasSurfaceOwner(controllerId: Int): Boolean = surfaceOwners.containsKey(controllerId)
+
+    fun releaseSurface(controllerId: Int, viewId: Long) {
+        if (surfaceOwners[controllerId] == viewId) surfaceOwners.remove(controllerId)
     }
 
     /**
@@ -211,6 +226,7 @@ object SharedPlayerManager {
         // Clear active views for this controller
         activeViews.remove(controllerId)
         eventHandlers.remove(controllerId)
+        surfaceOwners.remove(controllerId)
 
         Log.d(TAG, "Removed player for controller $controllerId")
 
@@ -234,6 +250,7 @@ object SharedPlayerManager {
 
         // Clear qualities cache
         qualitiesCache.clear()
+        surfaceOwners.clear()
 
         // Stop the service when clearing all players
         stopMediaSessionService(context)
