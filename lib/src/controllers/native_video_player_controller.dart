@@ -2444,6 +2444,18 @@ class NativeVideoPlayerController {
   }
 
   /// Sets native render mode to aspect-fill (true) or aspect-fit (false).
+  /// Repaints what the view [platformViewId] shows behind its rounded corners; see
+  /// `NativeVideoPlayer.cornerBackgroundColor`.
+  Future<void> setCornerBackgroundColor({
+    required int platformViewId,
+    required Color color,
+  }) async {
+    await _methodChannel?.setCornerBackgroundColor(
+      platformViewId: platformViewId,
+      argb: color.toARGB32(),
+    );
+  }
+
   Future<void> setUseAspectFill(bool enabled) async {
     // Persist so a platform view created after this call (e.g. the surface is
     // reparented between inline and full-screen) comes up in the current mode.

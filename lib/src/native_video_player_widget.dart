@@ -32,6 +32,8 @@ class NativeVideoPlayer extends StatefulWidget {
     this.onReadyForDisplay,
     this.useTextureView = false,
     this.maxVideoHeight,
+    this.cornerRadius = 0,
+    this.cornerBackgroundColor,
     super.key,
   });
 
@@ -73,6 +75,16 @@ class NativeVideoPlayer extends StatefulWidget {
   /// Android only: caps adaptive track selection at this video height in pixels while this
   /// view is the one showing the player. Null lifts any cap a previous view set.
   final int? maxVideoHeight;
+
+  /// iOS only: rounds the native view's own corners, so a host can keep a rectangular
+  /// Flutter clip around it. A rounded Flutter clip over a platform view mis-layers the
+  /// content above it on Flutter 3.47 (flutter/flutter#182662); drop both corner
+  /// properties once the app runs on an SDK with that reverted.
+  final double cornerRadius;
+
+  /// iOS only: painted a point past the frame behind the rounded corners, since Flutter
+  /// paints nothing under a platform view. Follows changes.
+  final Color? cornerBackgroundColor;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -236,6 +248,22 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant NativeVideoPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final Color? color = widget.cornerBackgroundColor;
+    final int? viewId = _platformViewId;
+    if (color == null ||
+        viewId == null ||
+        color == oldWidget.cornerBackgroundColor)
+      return;
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    widget.controller.setCornerBackgroundColor(
+      platformViewId: viewId,
+      color: color,
+    );
+  }
+
   /// Called when the platform view is created
   Future<void> _onPlatformViewCreated(int id) async {
     _platformViewId = id;
@@ -262,6 +290,13 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     }
     if (widget.maxVideoHeight != null) {
       params['maxVideoHeight'] = widget.maxVideoHeight;
+    }
+    if (widget.cornerRadius > 0) {
+      params['cornerRadius'] = widget.cornerRadius;
+      final Color? background = widget.cornerBackgroundColor;
+      if (background != null) {
+        params['cornerBackgroundColor'] = background.toARGB32();
+      }
     }
     return params;
   }
