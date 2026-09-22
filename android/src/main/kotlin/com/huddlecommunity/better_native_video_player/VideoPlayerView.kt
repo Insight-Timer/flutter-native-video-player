@@ -19,7 +19,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
@@ -92,6 +95,14 @@ class VideoPlayerView(
     private var enableHDR: Boolean = false
     private var useAspectFill: Boolean = false
     private var observesReadyForDisplay: Boolean = false
+
+    // PlayerView sizes its content frame only once the first frame reports a video size, so a
+    // zoomed view grows after playback starts; preset it from the selected track instead.
+    private val contentAspectRatioPreset = object : Player.Listener {
+        override fun onTracksChanged(tracks: Tracks) {
+            presetContentAspectRatio()
+        }
+    }
 
     // Whether playback may take audio focus from other apps. False for a silent
     // preview: muting alone still requests focus and pauses their music.
@@ -236,6 +247,7 @@ class VideoPlayerView(
                     playerView.player = null
                     playerView.player = currentPlayer
                     claimSurface()
+                    presetContentAspectRatio()
                     Log.d(TAG, "Surface reconnected for shared player on init")
                 }
             }
@@ -349,6 +361,8 @@ class VideoPlayerView(
             observesReadyForDisplay = observesReadyForDisplay
         )
         player.addListener(observer)
+        player.addListener(contentAspectRatioPreset)
+        presetContentAspectRatio()
 
         // Register this view with SharedPlayerManager if using a shared player
         // This allows other views to notify us when they're disposed
@@ -666,6 +680,7 @@ class VideoPlayerView(
                 playerView.player = null
                 playerView.player = currentPlayer
                 claimSurface()
+                presetContentAspectRatio()
                 Log.d(TAG, "Reattached player to surface after exiting fullscreen")
             }
         }
@@ -808,6 +823,29 @@ class VideoPlayerView(
         }
     }
 
+    private fun presetContentAspectRatio() {
+        if (isDisposed || player.videoSize != VideoSize.UNKNOWN) return
+        val format = selectedVideoFormat() ?: return
+        if (format.width <= 0 || format.height <= 0) return
+        // The decoder applies rotation, so mirror MediaCodecVideoRenderer: swap sides and invert PAR.
+        val rotated = format.rotationDegrees == 90 || format.rotationDegrees == 270
+        val width = if (rotated) format.height else format.width
+        val height = if (rotated) format.width else format.height
+        val pixelRatio = if (rotated) 1f / format.pixelWidthHeightRatio else format.pixelWidthHeightRatio
+        playerView.findViewById<AspectRatioFrameLayout>(androidx.media3.ui.R.id.exo_content_frame)
+            ?.setAspectRatio(width * pixelRatio / height)
+    }
+
+    private fun selectedVideoFormat(): Format? {
+        for (group in player.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (i in 0 until group.length) {
+                if (group.isTrackSelected(i)) return group.getTrackFormat(i)
+            }
+        }
+        return null
+    }
+
     private fun resolveResizeMode(useAspectFill: Boolean): Int {
         return if (useAspectFill) {
             AspectRatioFrameLayout.RESIZE_MODE_ZOOM
@@ -841,6 +879,7 @@ class VideoPlayerView(
                 playerView.player = null
                 playerView.player = currentPlayer
                 claimSurface()
+                presetContentAspectRatio()
                 Log.d(TAG, "Surface reconnected successfully for view $viewId")
             } else {
                 Log.w(TAG, "Cannot reconnect surface - player is null")
@@ -942,6 +981,7 @@ class VideoPlayerView(
 
         // Remove listeners and stop periodic updates
         player.removeListener(observer)
+        player.removeListener(contentAspectRatioPreset)
         observer.release()
 
         // Clean up channels
