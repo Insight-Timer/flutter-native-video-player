@@ -19,7 +19,8 @@ class VideoPlayerObserver(
     private val notificationHandler: com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler? = null,
     private val getMediaInfo: (() -> Map<String, Any>?)? = null,
     private val controllerId: Int? = null,
-    private val viewId: Long? = null
+    private val viewId: Long? = null,
+    private val observesReadyForDisplay: Boolean = false
 ) : Player.Listener {
 
     companion object {
@@ -271,6 +272,13 @@ class VideoPlayerObserver(
     override fun onRenderedFirstFrame() {
         resolveCurrentVideoDimensions()?.let { (width, height) ->
             maybeEmitVideoDimensions(width, height)
+        }
+        // Mirrors iOS's isReadyForDisplay: the first frame after a surface change has landed on this view's output.
+        if (observesReadyForDisplay && viewId != null) {
+            eventHandler.sendEvent(
+                "readyForDisplayChanged",
+                mapOf("isReadyForDisplay" to true, "viewId" to viewId)
+            )
         }
     }
 
