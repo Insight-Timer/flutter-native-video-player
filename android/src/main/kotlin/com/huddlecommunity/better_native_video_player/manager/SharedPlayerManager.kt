@@ -3,6 +3,7 @@ package com.huddlecommunity.better_native_video_player.manager
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.AudioAttributes
 import androidx.media3.exoplayer.ExoPlayer
 import com.huddlecommunity.better_native_video_player.VideoPlayerMediaSessionService
@@ -16,6 +17,7 @@ import com.huddlecommunity.better_native_video_player.handlers.VideoPlayerEventH
  */
 object SharedPlayerManager {
     private const val TAG = "SharedPlayerManager"
+    private const val SEEK_INCREMENT_MS = 15_000L
 
     private val players = mutableMapOf<Int, ExoPlayer>()
     private val notificationHandlers = mutableMapOf<Int, VideoPlayerNotificationHandler>()
@@ -24,9 +26,35 @@ object SharedPlayerManager {
     // Map<ControllerId, Map<ViewId, SurfaceReconnectCallback>>
     private val activeViews = mutableMapOf<Int, MutableMap<Long, () -> Unit>>()
 
+    // The view whose surface the player draws into. Only that view's disposal leaves the player
+    // without a surface; re-attaching a view that is already drawing blanks it for a frame.
+    // Map<ControllerId, ViewId>
+    private val surfaceOwners = mutableMapOf<Int, Long>()
+
+    // Per-view event handlers for each controller, so an event emitted from a view
+    // with no Flutter listener (e.g. the floating player's secondary shared view) can
+    // be routed to whichever sibling view IS subscribed. Mirrors the iOS sendEvent
+    // sibling-routing fix (FLTR-20471).
+    // Map<ControllerId, Map<ViewId, VideoPlayerEventHandler>>
+    private val eventHandlers = mutableMapOf<Int, MutableMap<Long, VideoPlayerEventHandler>>()
+
     // Store available qualities for each controller
     // This ensures qualities persist across view recreations
     private val qualitiesCache = mutableMapOf<Int, List<Map<String, Any>>>()
+
+    /**
+     * Attributes every video player runs with. [handleAudioFocus] false leaves audio focus
+     * to whoever holds it, so a silent preview doesn't pause another app's music.
+     */
+    fun applyAudioFocus(player: ExoPlayer, handleAudioFocus: Boolean) {
+        player.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(C.USAGE_MEDIA)
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .build(),
+            handleAudioFocus
+        )
+    }
 
     /**
      * Gets or creates a player for the given controller ID
@@ -36,7 +64,15 @@ object SharedPlayerManager {
         val alreadyExisted = players.containsKey(controllerId)
         val player = players.getOrPut(controllerId) {
             ExoPlayer.Builder(context)
-                .setAudioAttributes(AudioAttributes.DEFAULT, false)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(C.USAGE_MEDIA)
+                        .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                        .build(),
+                    true
+                )
+                .setSeekBackIncrementMs(SEEK_INCREMENT_MS)
+                .setSeekForwardIncrementMs(SEEK_INCREMENT_MS)
                 .build()
         }
         return Pair(player, alreadyExisted)
@@ -64,6 +100,55 @@ object SharedPlayerManager {
         val views = activeViews.getOrPut(controllerId) { mutableMapOf() }
         views[viewId] = reconnectCallback
         Log.d(TAG, "Registered view $viewId for controller $controllerId (total views: ${views.size})")
+    }
+
+    fun claimSurface(controllerId: Int, viewId: Long) {
+        surfaceOwners[controllerId] = viewId
+    }
+
+    fun hasSurfaceOwner(controllerId: Int): Boolean = surfaceOwners.containsKey(controllerId)
+
+    fun releaseSurface(controllerId: Int, viewId: Long) {
+        if (surfaceOwners[controllerId] == viewId) surfaceOwners.remove(controllerId)
+    }
+
+    /**
+     * Registers a view's event handler so events can be re-routed to a subscribed
+     * sibling when the emitting view has no Flutter listener.
+     */
+    fun registerEventHandler(controllerId: Int, viewId: Long, handler: VideoPlayerEventHandler) {
+        eventHandlers.getOrPut(controllerId) { mutableMapOf() }[viewId] = handler
+    }
+
+    fun unregisterEventHandler(controllerId: Int, viewId: Long) {
+        eventHandlers[controllerId]?.let { handlers ->
+            handlers.remove(viewId)
+            if (handlers.isEmpty()) eventHandlers.remove(controllerId)
+        }
+    }
+
+    /**
+     * Routes an event to whichever sibling view for [controllerId] currently has a
+     * live Flutter listener (single delivery), skipping [excludingViewId] (the view
+     * that tried to emit but had no listener). Returns true if delivered. Mirrors the
+     * iOS sendEvent findAllViewsForController fallback so system-control play/pause
+     * still reaches the Dart controller when the floating player owns playback.
+     */
+    fun routeEventToSubscribedView(
+        controllerId: Int,
+        excludingViewId: Long?,
+        name: String,
+        data: Map<String, Any>?
+    ): Boolean {
+        val handlers = eventHandlers[controllerId] ?: return false
+        for ((viewId, handler) in handlers) {
+            if (viewId == excludingViewId) continue
+            if (handler.hasActiveSink()) {
+                handler.sendEvent(name, data)
+                return true
+            }
+        }
+        return false
     }
 
     /**
@@ -140,6 +225,8 @@ object SharedPlayerManager {
 
         // Clear active views for this controller
         activeViews.remove(controllerId)
+        eventHandlers.remove(controllerId)
+        surfaceOwners.remove(controllerId)
 
         Log.d(TAG, "Removed player for controller $controllerId")
 
@@ -163,6 +250,7 @@ object SharedPlayerManager {
 
         // Clear qualities cache
         qualitiesCache.clear()
+        surfaceOwners.clear()
 
         // Stop the service when clearing all players
         stopMediaSessionService(context)
@@ -172,7 +260,10 @@ object SharedPlayerManager {
      * Stops the MediaSessionService
      */
     private fun stopMediaSessionService(context: Context) {
-        VideoPlayerMediaSessionService.setMediaSession(null)
+        // Nuclear reset — clearAll() / last-player-removed code paths only.
+        // Per-handler cleanup is handled by VideoPlayerNotificationHandler.release()
+        // via clearActiveSessionIfMatches().
+        VideoPlayerMediaSessionService.setActiveSession(null)
         val serviceIntent = Intent(context, VideoPlayerMediaSessionService::class.java)
         context.stopService(serviceIntent)
     }

@@ -28,6 +28,12 @@ class NativeVideoPlayer extends StatefulWidget {
     this.overlayBuilder,
     this.overlayFadeDuration = const Duration(milliseconds: 300),
     this.isFullscreenContext = false,
+    this.onViewCreated,
+    this.onReadyForDisplay,
+    this.useTextureView = false,
+    this.maxVideoHeight,
+    this.cornerRadius = 0,
+    this.cornerBackgroundColor,
     super.key,
   });
 
@@ -50,6 +56,35 @@ class NativeVideoPlayer extends StatefulWidget {
   /// Passed to the platform view as [isDartFullscreen] so iOS can use a dedicated
   /// AVPlayerViewController and avoid moving the shared view away from the inline slot.
   final bool isFullscreenContext;
+
+  /// Called with this view's platform view id once it exists. Lets a host that
+  /// shares a controller between several views tell them apart — to claim the
+  /// method channel with [NativeVideoPlayerController.setPrimaryPlatformView],
+  /// which otherwise stays with whichever view registered first.
+  final void Function(int platformViewId)? onViewCreated;
+
+  /// iOS-only. Called when this view gains or loses a picture. A host covering
+  /// the player with a poster can lift it the moment there is a frame.
+  final void Function(bool isReadyForDisplay)? onReadyForDisplay;
+
+  /// Android only: back the view with a TextureView instead of a SurfaceView, so Flutter
+  /// composites it as a texture layer rather than falling back to hybrid composition.
+  /// Use it for inline previews inside scrolling content; leave false for full-screen playback.
+  final bool useTextureView;
+
+  /// Android only: caps adaptive track selection at this video height in pixels while this
+  /// view is the one showing the player. Null lifts any cap a previous view set.
+  final int? maxVideoHeight;
+
+  /// iOS only: rounds the native view's own corners, so a host can keep a rectangular
+  /// Flutter clip around it. A rounded Flutter clip over a platform view mis-layers the
+  /// content above it on Flutter 3.47 (flutter/flutter#182662); drop both corner
+  /// properties once the app runs on an SDK with that reverted.
+  final double cornerRadius;
+
+  /// iOS only: painted a point past the frame behind the rounded corners, since Flutter
+  /// paints nothing under a platform view. Follows changes.
+  final Color? cornerBackgroundColor;
 
   @override
   State<NativeVideoPlayer> createState() => _NativeVideoPlayerState();
@@ -115,6 +150,16 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
   }
 
   void _handleControlEvent(PlayerControlEvent event) {
+    if (event.state == PlayerControlState.readyForDisplayChanged) {
+      final int? viewId = (event.data?['viewId'] as num?)?.toInt();
+      if (viewId != null && viewId == _platformViewId) {
+        widget.onReadyForDisplay?.call(
+          event.data?['isReadyForDisplay'] as bool? ?? false,
+        );
+      }
+      return;
+    }
+
     // Hide custom overlay when entering PiP (Android only)
     if (defaultTargetPlatform == TargetPlatform.android) {
       if (event.state == PlayerControlState.pipStarted && _overlayVisible) {
@@ -203,10 +248,31 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant NativeVideoPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final Color? color = widget.cornerBackgroundColor;
+    final int? viewId = _platformViewId;
+    if (color == null ||
+        viewId == null ||
+        color == oldWidget.cornerBackgroundColor)
+      return;
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    widget.controller.setCornerBackgroundColor(
+      platformViewId: viewId,
+      color: color,
+    );
+  }
+
   /// Called when the platform view is created
   Future<void> _onPlatformViewCreated(int id) async {
     _platformViewId = id;
-    await widget.controller.onPlatformViewCreated(id, context);
+    await widget.controller.onPlatformViewCreated(
+      id,
+      context,
+      isFullscreenContext: widget.isFullscreenContext,
+    );
+    widget.onViewCreated?.call(id);
   }
 
   Map<String, dynamic> _getCreationParams() {
@@ -215,6 +281,22 @@ class _NativeVideoPlayerState extends State<NativeVideoPlayer>
     );
     if (widget.isFullscreenContext) {
       params['isDartFullscreen'] = true;
+    }
+    if (widget.onReadyForDisplay != null) {
+      params['observesReadyForDisplay'] = true;
+    }
+    if (widget.useTextureView) {
+      params['useTextureView'] = true;
+    }
+    if (widget.maxVideoHeight != null) {
+      params['maxVideoHeight'] = widget.maxVideoHeight;
+    }
+    if (widget.cornerRadius > 0) {
+      params['cornerRadius'] = widget.cornerRadius;
+      final Color? background = widget.cornerBackgroundColor;
+      if (background != null) {
+        params['cornerBackgroundColor'] = background.toARGB32();
+      }
     }
     return params;
   }

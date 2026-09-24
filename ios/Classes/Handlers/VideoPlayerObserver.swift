@@ -3,23 +3,48 @@ import Foundation
 
 extension VideoPlayerView {
     func addObservers(to item: AVPlayerItem) {
+        // (Re)register item-scoped observers, moving them off any previously
+        // observed item — safe to call again on a reload or quality switch.
+        registerItemObservers(on: item)
+
+        // Player-scoped observers register once; re-adding would duplicate them.
+        if !didRegisterPlayerObservers {
+            // Observe player's timeControlStatus to track play/pause state changes
+            player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
+
+            // Observe AirPlay connection status
+            player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
+            didRegisterPlayerObservers = true
+        }
+
+        // Audio route changes (AirPlay). Not item-scoped — register once.
+        if !didRegisterRouteChangeObserver {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAudioRouteChange),
+                name: AVAudioSession.routeChangeNotification,
+                object: nil
+            )
+            didRegisterRouteChangeObserver = true
+        }
+    }
+
+    /// Registers item-scoped KVO/notification observers on `item`, moving them
+    /// off any previously observed item first. No-op if already on `item`.
+    private func registerItemObservers(on item: AVPlayerItem) {
+        // Already observing this exact item — nothing to do.
+        if observedPlayerItem === item { return }
+
+        // Moving to a new item: tear down observers on the previous one so we
+        // don't leak them and so `deinit` removes from the right item.
+        if let previous = observedPlayerItem {
+            removeItemObservers(from: previous)
+        }
+
         item.addObserver(self, forKeyPath: "status", options: [.new, .old], context: nil)
         item.addObserver(self, forKeyPath: "playbackBufferEmpty", options: [.new], context: nil)
         item.addObserver(self, forKeyPath: "playbackLikelyToKeepUp", options: [.new], context: nil)
-
-        // Observe player's timeControlStatus to track play/pause state changes
-        player?.addObserver(self, forKeyPath: "timeControlStatus", options: [.new, .old], context: nil)
-
-        // Observe AirPlay connection status
-        player?.addObserver(self, forKeyPath: "externalPlaybackActive", options: [.new, .initial], context: nil)
-
-        // Observe audio route changes to detect AirPlay device changes
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleAudioRouteChange),
-            name: AVAudioSession.routeChangeNotification,
-            object: nil
-        )
+        item.addObserver(self, forKeyPath: "presentationSize", options: [.new, .initial], context: nil)
 
         NotificationCenter.default.addObserver(
             self,
@@ -27,6 +52,29 @@ extension VideoPlayerView {
             name: .AVPlayerItemFailedToPlayToEndTime,
             object: item
         )
+
+        // Register end-of-media observer on every view (including shared/Dart-fullscreen views)
+        // so the notification is handled even when the view that originally called handleLoad
+        // has been disposed or no longer has an active Flutter listener.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(videoDidEnd),
+            name: .AVPlayerItemDidPlayToEndTime,
+            object: item
+        )
+
+        observedPlayerItem = item
+    }
+
+    /// Removes the item-scoped KVO and notification observers from `item`.
+    /// Must mirror `registerItemObservers(on:)` exactly.
+    func removeItemObservers(from item: AVPlayerItem) {
+        item.removeObserver(self, forKeyPath: "status")
+        item.removeObserver(self, forKeyPath: "playbackBufferEmpty")
+        item.removeObserver(self, forKeyPath: "playbackLikelyToKeepUp")
+        item.removeObserver(self, forKeyPath: "presentationSize")
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemFailedToPlayToEndTime, object: item)
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: item)
     }
 
     public override func observeValue(
@@ -76,6 +124,8 @@ extension VideoPlayerView {
                         }
                     }
                 }
+            case "presentationSize":
+                emitVideoDimensionsIfAvailable(from: item)
             default: break
             }
         }
@@ -88,6 +138,7 @@ extension VideoPlayerView {
 
                 switch player.timeControlStatus {
                 case .playing:
+                    isPlaybackActive = true
                     // ALWAYS update Now Playing info when playback starts
                     // This ensures media controls show the correct info whether in normal view or PiP
                     var mediaInfo = currentMediaInfo
@@ -108,54 +159,16 @@ extension VideoPlayerView {
                         print("⚠️ [Observer] No media info available when playing - media controls may not show correctly")
                     }
 
-                    // Enable automatic PiP when playback starts (even from native controls)
-                    // This ensures auto PiP works whether the user taps Flutter controls or native controls
-                    if #available(iOS 14.2, *) {
-                        if let controllerIdValue = controllerId {
-                            // Check if there's already a primary view for this controller
-                            let hasPrimaryView = SharedPlayerManager.shared.getPrimaryViewId(for: controllerIdValue) != nil
-
-                            if !hasPrimaryView {
-                                // No primary view set yet - this means the user started playback via native controls
-                                // Set THIS view as primary
-                                SharedPlayerManager.shared.setPrimaryView(viewId, for: controllerIdValue)
-                                print("📱 [Observer] No primary view set, making this view (ViewId \(viewId)) primary for controller \(controllerIdValue)")
-                            }
-
-                            // Check if THIS view is the primary view for this controller
-                            if SharedPlayerManager.shared.isPrimaryView(viewId, for: controllerIdValue) {
-                                // For shared players, check the shared settings instead of instance variable
-                                // This ensures the second view uses the same PiP settings as the first view
-                                let shouldEnableAutoPiP: Bool
-                                if let sharedSettings = SharedPlayerManager.shared.getPipSettings(for: controllerIdValue) {
-                                    shouldEnableAutoPiP = sharedSettings.canStartPictureInPictureAutomatically
-                                    print("📱 [Observer] Using shared PiP settings for controller \(controllerIdValue): \(shouldEnableAutoPiP)")
-                                } else {
-                                    shouldEnableAutoPiP = canStartPictureInPictureAutomatically
-                                    print("📱 [Observer] Using instance PiP settings: \(shouldEnableAutoPiP)")
-                                }
-
-                                if shouldEnableAutoPiP {
-                                    print("📱 [Observer] Enabling automatic PiP for controller \(controllerIdValue) (triggered by native controls)")
-                                    SharedPlayerManager.shared.setAutomaticPiPEnabled(for: controllerIdValue, enabled: true)
-
-                                    // Ensure media info is set again after enabling PiP
-                                    // This guarantees media controls work correctly in PiP mode
-                                    if let mediaInfo = currentMediaInfo {
-                                        setupNowPlayingInfo(mediaInfo: mediaInfo)
-                                        print("✅ [Observer] Media info updated for PiP mode")
-                                    }
-                                } else {
-                                    print("📱 [Observer] Automatic PiP not enabled (canStartPictureInPictureAutomatically = false)")
-                                }
-                            } else {
-                                print("📱 [Observer] Skipping auto PiP enable - this view (ViewId \(viewId)) is not primary for controller \(controllerIdValue)")
-                            }
-                        }
-                    }
+                    // No auto-PiP arming here — setAutomaticPipView is the single
+                    // source of truth; arming on play raced and disarmed the handoff.
 
                     sendEvent("play")
                 case .paused:
+                    // Timestamp the playing→paused edge for the PIP willStop check.
+                    if isPlaybackActive {
+                        lastPlayingToPausedAt = Date()
+                    }
+                    isPlaybackActive = false
                     // Only send pause if not waiting to play (buffering)
                     // This prevents sending pause when seeking to unbuffered position
                     if player.reasonForWaitingToPlay == nil {
@@ -269,21 +282,58 @@ extension VideoPlayerView {
         }
     }
 
+    private func emitVideoDimensionsIfAvailable(from item: AVPlayerItem) {
+        let size = item.presentationSize
+        let width = Int(size.width.rounded())
+        let height = Int(size.height.rounded())
+        if width <= 0 || height <= 0 { return }
+        if width == lastEmittedVideoWidth && height == lastEmittedVideoHeight { return }
+        lastEmittedVideoWidth = width
+        lastEmittedVideoHeight = height
+        sendEvent("videoDimensions", data: ["videoWidth": width, "videoHeight": height])
+    }
+
     @objc func videoDidEnd() {
-        if enableLooping {
-            // For smooth looping, seek to beginning and continue playing
+        // Read looping state from shared storage so it stays consistent across
+        // the inline and Dart-fullscreen views (setLooping on one view must
+        // affect whichever view actually handles end-of-media).
+        let isLooping: Bool
+        if let controllerIdValue = controllerId {
+            isLooping = SharedPlayerManager.shared.isLoopingEnabled(for: controllerIdValue)
+        } else {
+            isLooping = enableLooping
+        }
+
+        if isLooping {
+            // For smooth looping, seek to beginning and continue playing.
+            // iOS AVPlayer does not auto-resume after seeking, so play()
+            // must be called explicitly from the seek completion handler.
+            // Calls from multiple views for the same shared player are idempotent.
             player?.seek(to: .zero) { [weak self] finished in
                 if finished {
-                    // Continue playing for seamless loop
                     self?.player?.play()
                 }
             }
             // Don't send completed event when looping to match Android behavior
             // (Android with REPEAT_MODE_ONE doesn't reach STATE_ENDED)
         } else {
-            // Reset video to the beginning and pause
+            // Reset video to the beginning and pause. These are idempotent on a
+            // shared player so letting every registered view run them is safe.
             player?.seek(to: .zero)
             player?.pause()
+
+            // Emit `completed` from a view whose event channel is live. Views
+            // whose channel has been torn down (e.g. inline view whose widget
+            // is currently hidden behind a Dart fullscreen route) skip emission
+            // so the event lands on the view Dart is actually subscribed to.
+            guard isEventChannelActive, !isDisposed else { return }
+
+            // Dedupe in the rare case that multiple views for the same controller
+            // both have active listeners; only the first claimer emits.
+            if let controllerIdValue = controllerId,
+               !SharedPlayerManager.shared.claimCompletionEmission(for: controllerIdValue) {
+                return
+            }
             sendEvent("completed")
         }
     }
