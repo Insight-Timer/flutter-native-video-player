@@ -1638,7 +1638,8 @@ private var clipsToBoundsBeforeRoundingKey: UInt8 = 0
     /// Keeps audio session active to allow background playback
     @objc func handleAppDidEnterBackground() {
         guard shouldHoldAudioSession, continuesInBackground else {
-            releaseAudioSessionForBackground()
+            // A mixing (silent) player never activated the session, so it must not deactivate it (FLTR-21175).
+            if interruptsOtherAudio { releaseAudioSessionForBackground() }
             return
         }
 
@@ -1668,10 +1669,8 @@ private var clipsToBoundsBeforeRoundingKey: UInt8 = 0
         }
     }
 
-    /// Lets go of the audio session for a player that may not hold it — in-app only, or silent —
-    /// once it is paused with the app in the background. A silent player never activated the
-    /// session in the first place, so for it this is a no-op. Fails harmlessly while any other
-    /// audio in the app is still playing.
+    /// Releases the session for a claiming player with no media info once it is paused in the
+    /// background, so the app doesn't stay Now Playing with an empty entry (FLTR-20912).
     private func releaseAudioSessionForBackground() {
         // The Dart pause may land just before or after backgrounding, and the player's audio I/O
         // takes a moment to wind down after it, so decide once both have settled.
