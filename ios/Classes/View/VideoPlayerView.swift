@@ -7,6 +7,7 @@ import ObjectiveC
 import QuartzCore
 
 private var videoGravityAppliedKey: UInt8 = 0
+private var clipsToBoundsBeforeRoundingKey: UInt8 = 0
 
 // MARK: - Main Video Player View
 
@@ -29,6 +30,13 @@ private var videoGravityAppliedKey: UInt8 = 0
     /// Stable container returned from view(). The one shared controller's view is
     /// reparented into whichever on-screen host is current (inline ↔ floating).
     let hostContainer = UIView()
+
+    /// Applied to the player view on mount: it is shared between hosts, so each host sets its own.
+    var cornerRadius: CGFloat = 0
+
+    /// Host colour a point past the frame, behind the rounded corners: Flutter paints nothing under a
+    /// platform view, and the frame's antialiased edge would show the hole beneath.
+    private var backdrop: UIView?
 
     /// Native-controls visibility for the inline slot, restored after the floating
     /// slot hides them.
@@ -259,6 +267,12 @@ private var videoGravityAppliedKey: UInt8 = 0
         let showControls = (args as? [String: Any])?["showNativeControls"] as? Bool ?? true
         showNativeControls = showControls
         useAspectFill = (args as? [String: Any])?["useAspectFill"] as? Bool ?? false
+        if let radius = argsDict?["cornerRadius"] as? Double, radius > 0 {
+            cornerRadius = CGFloat(radius)
+            if let argb = argsDict?["cornerBackgroundColor"] as? Int {
+                setCornerBackgroundColor(argb: argb)
+            }
+        }
         interruptsOtherAudio = (args as? [String: Any])?["interruptsOtherAudio"] as? Bool ?? true
         continuesInBackground = (args as? [String: Any])?["continuesInBackground"] as? Bool ?? true
         applyBackgroundPlaybackPolicy()
@@ -519,6 +533,8 @@ private var videoGravityAppliedKey: UInt8 = 0
             hostContainer.addSubview(playerView)
             CATransaction.commit()
         }
+        applyCornerRadius(to: playerView)
+        clearBackgroundsIfRounded(of: playerView)
 
         // Slot config only on the handoff path, not at init — arming every
         // controller at init would re-arm two controllers in the list↔detail case.
@@ -740,6 +756,11 @@ private var videoGravityAppliedKey: UInt8 = 0
             handleSetShowNativeControls(call: call, result: result)
         case "setUseAspectFill":
             handleSetUseAspectFill(call: call, result: result)
+        case "setCornerBackgroundColor":
+            if let args = call.arguments as? [String: Any], let argb = args["argb"] as? Int {
+                setCornerBackgroundColor(argb: argb)
+            }
+            result(nil)
         case "setInterruptsOtherAudio":
             handleSetInterruptsOtherAudio(call: call, result: result)
         case "getVideoDimensions":
@@ -988,9 +1009,56 @@ private var videoGravityAppliedKey: UInt8 = 0
         DispatchQueue.main.async(execute: reconnect)
     }
 
+    /// The view is shared between hosts, so one without a radius hands it back exactly as it found it.
+    private func applyCornerRadius(to playerView: UIView) {
+        if cornerRadius > 0 {
+            if objc_getAssociatedObject(playerView, &clipsToBoundsBeforeRoundingKey) == nil {
+                objc_setAssociatedObject(
+                    playerView, &clipsToBoundsBeforeRoundingKey, playerView.clipsToBounds, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+                )
+            }
+            playerView.layer.cornerRadius = cornerRadius
+            playerView.clipsToBounds = true
+            return
+        }
+        guard let original = objc_getAssociatedObject(playerView, &clipsToBoundsBeforeRoundingKey) as? Bool else { return }
+        playerView.layer.cornerRadius = 0
+        playerView.clipsToBounds = original
+        objc_setAssociatedObject(playerView, &clipsToBoundsBeforeRoundingKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+
+    private func setCornerBackgroundColor(argb: Int) {
+        guard cornerRadius > 0 else { return }
+        let color = UIColor(
+            red: CGFloat((argb >> 16) & 0xFF) / 255,
+            green: CGFloat((argb >> 8) & 0xFF) / 255,
+            blue: CGFloat(argb & 0xFF) / 255,
+            alpha: CGFloat((argb >> 24) & 0xFF) / 255
+        )
+        if let backdrop = backdrop {
+            backdrop.backgroundColor = color
+            return
+        }
+        let view = UIView(frame: hostContainer.bounds.insetBy(dx: -1, dy: -1))
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        view.backgroundColor = color
+        hostContainer.insertSubview(view, at: 0)
+        backdrop = view
+    }
+
+    /// A rounded player view shows the host's page colour, not AVKit's black, at its edge and in any bars.
+    /// The whole hierarchy: the view holding the video layer is black in its own right.
+    private func clearBackgroundsIfRounded(of root: UIView) {
+        guard cornerRadius > 0 else { return }
+        root.backgroundColor = .clear
+        root.isOpaque = false
+        root.subviews.forEach(clearBackgroundsIfRounded)
+    }
+
     private func applyVideoGravity(_ enabled: Bool) {
         if Thread.isMainThread {
             hasAppliedVideoGravity = true
+            if let root = playerViewController.viewIfLoaded { clearBackgroundsIfRounded(of: root) }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             UIView.performWithoutAnimation {

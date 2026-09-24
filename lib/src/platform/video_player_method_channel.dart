@@ -453,6 +453,21 @@ class VideoPlayerMethodChannel {
   }
 
   /// Sets whether video should use aspect-fill (zoom/crop) instead of aspect-fit.
+  /// Repaints what a rounded view shows behind its corners; addressed to the view, not the primary.
+  Future<void> setCornerBackgroundColor({
+    required int platformViewId,
+    required int argb,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setCornerBackgroundColor',
+        <String, Object>{'viewId': platformViewId, 'argb': argb},
+      );
+    } catch (e) {
+      debugPrint('Error calling setCornerBackgroundColor: $e');
+    }
+  }
+
   Future<void> setUseAspectFill(bool enabled) async {
     try {
       await _methodChannel.invokeMethod<void>(
