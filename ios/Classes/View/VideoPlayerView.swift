@@ -1039,7 +1039,8 @@ private var clipsToBoundsBeforeRoundingKey: UInt8 = 0
             backdrop.backgroundColor = color
             return
         }
-        let view = UIView(frame: hostContainer.bounds.insetBy(dx: -1, dy: -1))
+        // Within the frame: Flutter only covers a platform view's own bounds, so paint past them shows over its content.
+        let view = UIView(frame: hostContainer.bounds)
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.backgroundColor = color
         hostContainer.insertSubview(view, at: 0)
