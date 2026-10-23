@@ -409,11 +409,23 @@ extension VideoPlayerView {
             if let controllerIdValue = controllerId {
                 SharedPlayerManager.shared.resetCompletionClaim(for: controllerIdValue)
             }
-            let seconds = Double(milliseconds) / 1000.0
-            player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 1000)) { _ in
+            guard let player = player else {
+                result(nil)
+                return
+            }
+            let exact = args["exact"] as? Bool ?? false
+            let time = CMTime(seconds: Double(milliseconds) / 1000.0, preferredTimescale: 1000)
+            let completion: (Bool) -> Void = { _ in
                 self.sendEvent("seek", data: ["position": milliseconds])
                 self.updateNowPlayingPlaybackTime()
+                if exact { result(nil) }
             }
+            if exact {
+                // The default tolerance lets HLS land on a segment start, up to a whole segment early.
+                player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: completion)
+                return
+            }
+            player.seek(to: time, completionHandler: completion)
         }
         result(nil)
     }

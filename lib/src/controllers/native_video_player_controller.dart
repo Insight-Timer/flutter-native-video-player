@@ -1914,9 +1914,11 @@ class NativeVideoPlayerController {
     await _methodChannel?.pause();
   }
 
-  /// Seeks to a specific position
-  Future<void> seekTo(Duration position) async {
-    await _methodChannel?.seekTo(position);
+  /// Seeks to a specific position. On iOS the default may land on the start
+  /// of an HLS segment; [exact] lands on the frame at [position] and completes
+  /// once there. Android always seeks exactly.
+  Future<void> seekTo(Duration position, {bool exact = false}) async {
+    await _methodChannel?.seekTo(position, exact: exact);
   }
 
   /// Sets the volume
