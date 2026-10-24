@@ -64,12 +64,13 @@ class VideoPlayerMethodChannel {
     }
   }
 
-  /// Seeks to a specific position
-  Future<void> seekTo(Duration position) async {
+  /// Seeks to a specific position; [exact] lands on that frame (iOS)
+  Future<void> seekTo(Duration position, {bool exact = false}) async {
     try {
       await _methodChannel.invokeMethod<void>('seekTo', <String, Object>{
         'viewId': primaryPlatformViewId,
         'milliseconds': position.inMilliseconds,
+        'exact': exact,
       });
     } catch (e) {
       debugPrint('Error calling seekTo: $e');
