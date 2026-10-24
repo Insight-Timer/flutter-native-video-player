@@ -7,6 +7,7 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.C
+import androidx.media3.common.Tracks
 
 /**
  * Observes ExoPlayer state changes and reports them via EventHandler
@@ -18,7 +19,8 @@ class VideoPlayerObserver(
     private val notificationHandler: com.huddlecommunity.better_native_video_player.handlers.VideoPlayerNotificationHandler? = null,
     private val getMediaInfo: (() -> Map<String, Any>?)? = null,
     private val controllerId: Int? = null,
-    private val viewId: Long? = null
+    private val viewId: Long? = null,
+    private val observesReadyForDisplay: Boolean = false
 ) : Player.Listener {
 
     companion object {
@@ -31,6 +33,8 @@ class VideoPlayerObserver(
 
     // Track Cast/external playback connection state
     private var wasExternalPlaybackActive = false
+    private var lastVideoWidth = 0
+    private var lastVideoHeight = 0
 
     private val handler = Handler(Looper.getMainLooper())
     private val timeUpdateRunnable = object : Runnable {
@@ -72,14 +76,18 @@ class VideoPlayerObserver(
 
             // Check if currently buffering
             val isBuffering = player.playbackState == Player.STATE_BUFFERING
+            val videoWidth = player.videoSize.width
+            val videoHeight = player.videoSize.height
 
             if (duration > 0) {
-                eventHandler.sendEvent("timeUpdate", mapOf(
+                val payload = mutableMapOf<String, Any>(
                     "position" to position.toInt(),
                     "duration" to duration.toInt(),
                     "bufferedPosition" to bufferedPosition,
                     "isBuffering" to isBuffering
-                ))
+                )
+                addVideoDimensionsToPayload(payload, videoWidth, videoHeight)
+                eventHandler.sendEvent("timeUpdate", payload)
             }
 
             // Schedule next update
@@ -97,8 +105,50 @@ class VideoPlayerObserver(
         handler.removeCallbacks(timeUpdateRunnable)
     }
 
+    private fun addVideoDimensionsToPayload(payload: MutableMap<String, Any>, width: Int, height: Int) {
+        if (width > 0 && height > 0) {
+            payload["videoWidth"] = width
+            payload["videoHeight"] = height
+        }
+    }
+
+    private fun maybeEmitVideoDimensions(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        if (width == lastVideoWidth && height == lastVideoHeight) return
+        lastVideoWidth = width
+        lastVideoHeight = height
+        eventHandler.sendEvent(
+            "videoDimensions",
+            mapOf("videoWidth" to width, "videoHeight" to height)
+        )
+    }
+
+    private fun resolveCurrentVideoDimensions(): Pair<Int, Int>? {
+        val currentVideoSize = player.videoSize
+        if (currentVideoSize.width > 0 && currentVideoSize.height > 0) {
+            return currentVideoSize.width to currentVideoSize.height
+        }
+
+        val currentTracks = player.currentTracks
+        for (group in currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_VIDEO || !group.isSelected) continue
+            for (index in 0 until group.length) {
+                if (!group.isTrackSelected(index)) continue
+                val format = group.getTrackFormat(index)
+                if (format.width > 0 && format.height > 0) {
+                    return format.width to format.height
+                }
+            }
+        }
+
+        return null
+    }
+
     override fun onPlaybackStateChanged(playbackState: Int) {
         Log.d(TAG, "Playback state changed: $playbackState, isLoading: ${player.isLoading}")
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
         when (playbackState) {
             Player.STATE_IDLE -> {
                 // Player is idle
@@ -207,6 +257,29 @@ class VideoPlayerObserver(
             "error",
             mapOf("message" to (error.message ?: "Unknown error"))
         )
+    }
+
+    override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+        maybeEmitVideoDimensions(videoSize.width, videoSize.height)
+    }
+
+    override fun onTracksChanged(tracks: Tracks) {
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
+    }
+
+    override fun onRenderedFirstFrame() {
+        resolveCurrentVideoDimensions()?.let { (width, height) ->
+            maybeEmitVideoDimensions(width, height)
+        }
+        // Mirrors iOS's isReadyForDisplay: the first frame after a surface change has landed on this view's output.
+        if (observesReadyForDisplay && viewId != null) {
+            eventHandler.sendEvent(
+                "readyForDisplayChanged",
+                mapOf("isReadyForDisplay" to true, "viewId" to viewId)
+            )
+        }
     }
 
     override fun onDeviceInfoChanged(deviceInfo: androidx.media3.common.DeviceInfo) {

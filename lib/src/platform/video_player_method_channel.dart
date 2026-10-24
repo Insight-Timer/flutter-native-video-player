@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../models/native_video_player_quality.dart';
 import '../models/native_video_player_subtitle_track.dart';
+import '../models/native_video_player_track_disable_result.dart';
 
 /// Handles all method channel communication with the native platform
 class VideoPlayerMethodChannel {
@@ -188,6 +189,83 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Disables or enables the video track in the native player.
+  ///
+  /// When [disabled] is true, the native player stops downloading video segments
+  /// from HLS demuxed streams, saving bandwidth during background playback.
+  /// Audio continues uninterrupted.
+  ///
+  /// When [disabled] is false, video segment downloads resume from the current position.
+  ///
+  /// Returns a [VideoTrackDisableResult] describing what happened:
+  /// - [VideoTrackDisableStatus.ok] — the toggle was applied.
+  /// - [VideoTrackDisableStatus.skippedNoDemuxedAudio] — the stream has no
+  ///   separate audio rendition, so disabling video would kill audio too.
+  ///   The caller should either pick a different stream or not disable.
+  /// Propagates [PlatformException] on native errors so callers can react.
+  Future<VideoTrackDisableResult> setVideoTrackDisabled(bool disabled) async {
+    final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+      'setVideoTrackDisabled',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'disabled': disabled,
+      },
+    );
+    if (result is Map && result['skipped'] == true) {
+      final reason = result['reason'];
+      if (reason == 'no_demuxed_audio') {
+        return const VideoTrackDisableResult(
+          VideoTrackDisableStatus.skippedNoDemuxedAudio,
+        );
+      }
+      return const VideoTrackDisableResult(VideoTrackDisableStatus.skipped);
+    }
+    return const VideoTrackDisableResult(VideoTrackDisableStatus.ok);
+  }
+
+  /// Starts or stops the foreground media notification for background playback.
+  Future<void> setBackgroundPlaybackActive(bool active) {
+    return _methodChannel.invokeMethod<void>(
+      'setBackgroundPlaybackActive',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'active': active,
+      },
+    );
+  }
+
+  /// Hides or restores the lock-screen / notification "Now Playing" entry for
+  /// the current media without stopping playback.
+  ///
+  /// When [suppressed] is true, the native media notification / Control Center
+  /// info is cleared but playback continues; when false, it is republished.
+  /// Used when the floating player is hidden behind another surface (the sleep
+  /// mixer) so the OS controls don't linger on a track the user can't see.
+  Future<void> setNowPlayingSuppressed(bool suppressed) async {
+    await _methodChannel.invokeMethod<dynamic>(
+      'setNowPlayingSuppressed',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'suppressed': suppressed,
+      },
+    );
+  }
+
+  /// Sets whether playback takes the audio channel from other apps.
+  ///
+  /// When [interrupts] is false the native player leaves the audio session
+  /// (iOS) and audio focus (Android) to whoever holds them, so a muted preview
+  /// no longer pauses another app's music.
+  Future<void> setInterruptsOtherAudio(bool interrupts) async {
+    await _methodChannel.invokeMethod<void>(
+      'setInterruptsOtherAudio',
+      <String, Object>{
+        'viewId': primaryPlatformViewId,
+        'interrupts': interrupts,
+      },
+    );
+  }
+
   /// Checks if Picture-in-Picture is available
   Future<bool> isPictureInPictureAvailable() async {
     try {
@@ -244,6 +322,35 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Arms auto-PiP on the inline or Dart-fullscreen (floating) view (iOS 14.2+)
+  ///
+  /// [controllerId], when provided, lets the native dispatcher fall back to any
+  /// live view of that controller if [primaryPlatformViewId] is stale (e.g. the
+  /// inline view was disposed while the floating preview is on screen). This
+  /// call is controller-scoped natively, so any live view of the controller can
+  /// service it — without the fallback a stale viewId yields NO_VIEW and the
+  /// collapse/expand context is silently lost.
+  Future<void> setAutomaticPipView({
+    required bool fullscreenContext,
+    int? controllerId,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setAutomaticPipView',
+        <String, Object>{
+          // Used by the plugin-level `native_video_player` dispatcher
+          // (VideoPlayerViewFactory) to route the call to the right view —
+          // NOT read by handleSetAutomaticPipView itself.
+          'viewId': primaryPlatformViewId,
+          'controllerId': ?controllerId,
+          'fullscreenContext': fullscreenContext,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setAutomaticPipView: $e');
+    }
+  }
+
   /// Disables automatic inline Picture-in-Picture mode (iOS 14.2+)
   Future<bool> disableAutomaticInlinePip() async {
     try {
@@ -255,6 +362,57 @@ class VideoPlayerMethodChannel {
     } catch (e) {
       debugPrint('Error calling disableAutomaticInlinePip: $e');
       return false;
+    }
+  }
+
+  /// Hard-toggles AVKit's `allowsPictureInPicturePlayback`. `false` blocks all
+  /// PIP entry paths and survives view reconstruction (vs the lighter-weight
+  /// [enableAutomaticInlinePip] / [disableAutomaticInlinePip]).
+  Future<bool> setAllowsPictureInPicture(bool allows) async {
+    try {
+      final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+        'setAllowsPictureInPicture',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'allows': allows,
+        },
+      );
+      return result == true;
+    } catch (e) {
+      debugPrint('Error calling setAllowsPictureInPicture: $e');
+      return false;
+    }
+  }
+
+  /// Toggles AVPlayer's `allowsExternalPlayback` (iOS-only).
+  Future<void> setAllowsExternalPlayback(bool allows) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setAllowsExternalPlayback',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'allows': allows,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setAllowsExternalPlayback: $e');
+    }
+  }
+
+  /// Toggles `AVPlayerViewController.requiresLinearPlayback` (iOS-only).
+  /// When `true`, AVKit hides the scrubber and 15s skip-back/forward
+  /// controls in both inline and PIP UIs. No-op on Android.
+  Future<void> setRequiresLinearPlayback(bool required) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setRequiresLinearPlayback',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'required': required,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling setRequiresLinearPlayback: $e');
     }
   }
 
@@ -291,6 +449,54 @@ class VideoPlayerMethodChannel {
       );
     } catch (e) {
       debugPrint('Error calling setShowNativeControls: $e');
+    }
+  }
+
+  /// Sets whether video should use aspect-fill (zoom/crop) instead of aspect-fit.
+  /// Repaints what a rounded view shows behind its corners; addressed to the view, not the primary.
+  Future<void> setCornerBackgroundColor({
+    required int platformViewId,
+    required int argb,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setCornerBackgroundColor',
+        <String, Object>{'viewId': platformViewId, 'argb': argb},
+      );
+    } catch (e) {
+      debugPrint('Error calling setCornerBackgroundColor: $e');
+    }
+  }
+
+  Future<void> setUseAspectFill(bool enabled) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'setUseAspectFill',
+        <String, Object>{'viewId': primaryPlatformViewId, 'enabled': enabled},
+      );
+    } catch (e) {
+      debugPrint('Error calling setUseAspectFill: $e');
+    }
+  }
+
+  /// Gets current video dimensions if available.
+  Future<Map<String, int>?> getVideoDimensions() async {
+    try {
+      final dynamic result = await _methodChannel.invokeMethod<dynamic>(
+        'getVideoDimensions',
+        <String, Object>{'viewId': primaryPlatformViewId},
+      );
+      if (result is Map) {
+        final width = (result['width'] as num?)?.toInt();
+        final height = (result['height'] as num?)?.toInt();
+        if (width != null && height != null && width > 0 && height > 0) {
+          return <String, int>{'width': width, 'height': height};
+        }
+      }
+      return null;
+    } catch (e) {
+      debugPrint('Error calling getVideoDimensions: $e');
+      return null;
     }
   }
 
@@ -374,6 +580,31 @@ class VideoPlayerMethodChannel {
     }
   }
 
+  /// Reparents the native player view from Flutter's container to the root
+  /// UIViewController's view with Auto Layout constraints (edge-pinned).
+  /// Use this before an orientation change so iOS animates the view smoothly.
+  Future<void> useNativeLayout() async {
+    try {
+      await _methodChannel.invokeMethod<void>('useNativeLayout', <String, Object>{
+        'viewId': primaryPlatformViewId,
+      });
+    } catch (e) {
+      debugPrint('Error calling useNativeLayout: $e');
+    }
+  }
+
+  /// Returns the native player view to Flutter's layout control.
+  /// Call this after the orientation transition settles.
+  Future<void> useFlutterLayout() async {
+    try {
+      await _methodChannel.invokeMethod<void>('useFlutterLayout', <String, Object>{
+        'viewId': primaryPlatformViewId,
+      });
+    } catch (e) {
+      debugPrint('Error calling useFlutterLayout: $e');
+    }
+  }
+
   /// Asks the native side to ensure the player surface is connected to this view.
   /// Called when reconnecting after all platform views were disposed (e.g. list→detail→back).
   Future<void> ensureSurfaceConnected() async {
@@ -384,6 +615,71 @@ class VideoPlayerMethodChannel {
       );
     } catch (e) {
       debugPrint('Error calling ensureSurfaceConnected: $e');
+    }
+  }
+
+  /// iOS-only. Rebinds the shared player to this view's controller, for a host
+  /// that renders one player in more than one view and knows which of them
+  /// should have the picture. Android connects its surface on its own.
+  Future<void> reclaimVideoSurface() async {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'reclaimVideoSurface',
+        <String, Object>{'viewId': primaryPlatformViewId},
+      );
+    } catch (e) {
+      debugPrint('Error calling reclaimVideoSurface: $e');
+    }
+  }
+
+  /// Refreshes the system media controls (lock-screen / notification next/prev
+  /// availability) for the currently-loaded media, without restarting playback.
+  ///
+  /// Used by playlist hosts after the playing item is reordered/shuffled to a
+  /// new position — the `mediaInfo` set at `load` time has gone stale and the
+  /// OS-rendered buttons need to follow the item's new queue neighbours.
+  ///
+  /// Only the two track-navigation booleans are updated; other `mediaInfo`
+  /// fields (title, artwork, etc.) are left untouched. No-op on platforms that
+  /// don't implement the method (errors are swallowed; callers shouldn't make
+  /// this their only path to update controls).
+  Future<void> updateTrackNavFlags({
+    required bool showSystemNextTrackControl,
+    required bool showSystemPreviousTrackControl,
+  }) async {
+    try {
+      await _methodChannel.invokeMethod<void>(
+        'updateTrackNavFlags',
+        <String, Object>{
+          'viewId': primaryPlatformViewId,
+          'showSystemNextTrackControl': showSystemNextTrackControl,
+          'showSystemPreviousTrackControl': showSystemPreviousTrackControl,
+        },
+      );
+    } catch (e) {
+      debugPrint('Error calling updateTrackNavFlags: $e');
+    }
+  }
+
+  /// Adds or drops the system media session for the currently-loaded media:
+  /// the lock-screen / Control Center entry on iOS, the media notification on
+  /// Android. A null [mediaInfo] drops it.
+  ///
+  /// Lets one player move between a surface that should own the system controls
+  /// and one that should publish nothing, without reloading — `mediaInfo` given
+  /// at `load` time can otherwise never be added or taken away.
+  /// Returns whether native took it: with no view attached the call is a no-op.
+  Future<bool> setMediaInfo(Map<String, dynamic>? mediaInfo) async {
+    try {
+      await _methodChannel.invokeMethod<void>('setMediaInfo', <String, Object?>{
+        'viewId': primaryPlatformViewId,
+        'mediaInfo': mediaInfo,
+      });
+      return true;
+    } catch (e) {
+      debugPrint('Error calling setMediaInfo: $e');
+      return false;
     }
   }
 

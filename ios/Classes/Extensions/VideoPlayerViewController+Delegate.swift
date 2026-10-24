@@ -1,5 +1,26 @@
 import AVKit
 
+extension VideoPlayerView {
+    /// Playback intent for the PIP `willStop` check. The delegate handling the
+    /// stop may be the floating (fullscreen-context) view, whose per-view
+    /// `isPlaybackActive` never saw the shared player's `.playing` edge —
+    /// `timeControlStatus` is observed without `.initial`, and a view created
+    /// before the item loaded registers no KVO at all. Fall back to any sibling
+    /// view for this controller (the inline view always tracks the live state)
+    /// so a PIP entered from the floating player still resumes on close.
+    func pipWasPlayingAcrossViews() -> Bool {
+        func reads(_ view: VideoPlayerView) -> Bool {
+            return view.isPlaybackActive ||
+                (view.lastPlayingToPausedAt.map { Date().timeIntervalSince($0) < 0.4 } ?? false)
+        }
+        if reads(self) { return true }
+        guard let controllerIdValue = controllerId else { return false }
+        return SharedPlayerManager.shared
+            .findAllViewsForController(controllerIdValue)
+            .contains { $0 !== self && reads($0) }
+    }
+}
+
 extension VideoPlayerView: AVPlayerViewControllerDelegate {
     public func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
         print("🎬 PiP will start (AVPlayerViewController delegate - automatic or system triggered)")
@@ -74,20 +95,26 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             print("🎬 This is an AUTOMATIC PiP stop")
         }
 
+        // Active, or only just dismiss-paused. An earlier user pause has an
+        // older timestamp → reads as not-playing, so a paused PIP won't resume.
+        // Aggregated across sibling views so a floating-view delegate (stale
+        // per-view state) still reports the inline view's live playback intent.
+        let isPlaying = pipWasPlayingAcrossViews()
+
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes
 
         // Send through per-view event channel (legacy)
         if eventSink != nil {
             print("✅ View \(viewId) is active - sending pipStop event to per-view channel (before stop)")
-            sendEvent("pipStop", data: ["isPictureInPicture": false])
+            sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
         } else if let controllerIdValue = controllerId {
             // Try any view for this controller
             let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
             var eventSent = false
             for view in allViews where view.eventSink != nil {
                 print("✅ Sending pipStop event to per-view channel on view \(view.viewId) (before stop)")
-                view.sendEvent("pipStop", data: ["isPictureInPicture": false])
+                view.sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
                 eventSent = true
                 break
             }
@@ -101,7 +128,7 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             print("✅ Sending pipStop event to controller-level channel for controller \(controllerIdValue)")
             SharedPlayerManager.shared.sendControllerEvent(
                 "pipStop",
-                data: ["isPictureInPicture": false],
+                data: ["isPictureInPicture": false, "isPlaying": isPlaying],
                 for: controllerIdValue
             )
         }
@@ -166,6 +193,26 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
             }
         }
 
+        // pipDidStop — fires AFTER AVKit's restore animation completes,
+        // so Flutter listeners can perform navigation safely (vs `pipStop`
+        // from willStop which lands mid-animation).
+        if eventSink != nil {
+            sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+        } else if let controllerIdValue = controllerId {
+            let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            for view in allViews where view.eventSink != nil {
+                view.sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+                break
+            }
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent(
+                "pipDidStop",
+                data: ["isPictureInPicture": false],
+                for: controllerIdValue
+            )
+        }
+
         // Emit current state to sync UI after PiP stops
         // Note: pipStop event was already sent in willStopPictureInPicture
         if eventSink != nil {
@@ -196,7 +243,7 @@ extension VideoPlayerView: AVPlayerViewControllerDelegate {
     }
     
     // Handle when the user dismisses fullscreen by swiping down or tapping Done
-    @available(iOS 13.0, *)
+    @available(iOS 12.0, *)
     public func playerViewController(_ playerViewController: AVPlayerViewController, willEndFullScreenPresentationWithAnimationCoordinator coordinator: UIViewControllerTransitionCoordinator) {
         // Store the playback state before dismissing
         let wasPlaying = self.player?.rate != 0
@@ -298,20 +345,26 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
     public func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         print("🎬 Custom PiP controller will stop on view \(viewId)")
 
+        // Active, or only just dismiss-paused. An earlier user pause has an
+        // older timestamp → reads as not-playing, so a paused PIP won't resume.
+        // Aggregated across sibling views so a floating-view delegate (stale
+        // per-view state) still reports the inline view's live playback intent.
+        let isPlaying = pipWasPlayingAcrossViews()
+
         // Send pipStop event BEFORE PiP actually stops
         // This gives Flutter time to react before the native PiP window closes
 
         // Send through per-view event channel (legacy)
         if eventSink != nil {
             print("✅ View \(viewId) is active - sending pipStop event to per-view channel (before stop)")
-            sendEvent("pipStop", data: ["isPictureInPicture": false])
+            sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
         } else if let controllerIdValue = controllerId {
             // Try any view for this controller
             let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
             var eventSent = false
             for view in allViews where view.eventSink != nil {
                 print("✅ Sending pipStop event to per-view channel on view \(view.viewId) (before stop)")
-                view.sendEvent("pipStop", data: ["isPictureInPicture": false])
+                view.sendEvent("pipStop", data: ["isPictureInPicture": false, "isPlaying": isPlaying])
                 eventSent = true
                 break
             }
@@ -325,7 +378,7 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
             print("✅ Sending pipStop event to controller-level channel for controller \(controllerIdValue)")
             SharedPlayerManager.shared.sendControllerEvent(
                 "pipStop",
-                data: ["isPictureInPicture": false],
+                data: ["isPictureInPicture": false, "isPlaying": isPlaying],
                 for: controllerIdValue
             )
         }
@@ -442,6 +495,24 @@ extension VideoPlayerView: AVPictureInPictureControllerDelegate {
                     print("⚠️ NOT re-enabling automatic PiP - neither view nor shared settings allow it")
                 }
             }
+        }
+
+        // pipDidStop — post-transition. See playerViewControllerDidStop above.
+        if eventSink != nil {
+            sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+        } else if let controllerIdValue = controllerId {
+            let allViews = SharedPlayerManager.shared.findAllViewsForController(controllerIdValue)
+            for view in allViews where view.eventSink != nil {
+                view.sendEvent("pipDidStop", data: ["isPictureInPicture": false])
+                break
+            }
+        }
+        if let controllerIdValue = controllerId {
+            SharedPlayerManager.shared.sendControllerEvent(
+                "pipDidStop",
+                data: ["isPictureInPicture": false],
+                for: controllerIdValue
+            )
         }
 
         // Emit current state to sync UI after PiP stops

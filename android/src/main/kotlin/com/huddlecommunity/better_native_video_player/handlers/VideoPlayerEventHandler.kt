@@ -3,6 +3,7 @@ package com.huddlecommunity.better_native_video_player.handlers
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.huddlecommunity.better_native_video_player.manager.SharedPlayerManager
 import io.flutter.plugin.common.EventChannel
 
 /**
@@ -17,6 +18,14 @@ class VideoPlayerEventHandler(private val isSharedPlayer: Boolean = false) : Eve
     private var eventSink: EventChannel.EventSink? = null
     private var initialStateCallback: (() -> Unit)? = null
     private var hasSentInitialState: Boolean = false
+
+    // Set by the owning VideoPlayerView so an event emitted from a view with no
+    // Flutter listener can be re-routed to a subscribed sibling view (floating player).
+    var controllerId: Int? = null
+    var viewId: Long? = null
+
+    /** True while a Flutter listener is attached to this view's event channel. */
+    fun hasActiveSink(): Boolean = eventSink != null
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         Log.d(TAG, "onListen called - isSharedPlayer: $isSharedPlayer, hasCallback: ${initialStateCallback != null}")
@@ -74,7 +83,17 @@ class VideoPlayerEventHandler(private val isSharedPlayer: Boolean = false) : Eve
                 eventSink?.success(event)
             }
         } else {
-            Log.w(TAG, "Cannot send event: $name - eventSink is null (EventChannel not ready yet)")
+            // No Flutter listener on this view — e.g. the floating player owns playback
+            // on a shared view while Flutter is subscribed to a sibling view. Route to
+            // whichever sibling IS subscribed so system-control play/pause still reaches
+            // the Dart controller (single delivery). Mirrors the iOS sendEvent fix.
+            val cid = controllerId
+            if (cid != null &&
+                SharedPlayerManager.routeEventToSubscribedView(cid, viewId, name, data)) {
+                Log.d(TAG, "Routed event: $name to subscribed sibling view")
+            } else {
+                Log.w(TAG, "Cannot send event: $name - eventSink is null (EventChannel not ready yet)")
+            }
         }
     }
 }
