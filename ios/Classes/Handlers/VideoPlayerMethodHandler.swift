@@ -1234,6 +1234,7 @@ extension VideoPlayerView {
             let currentTime = player.currentTime()
             var positionSeconds = CMTimeGetSeconds(currentTime)
             var durationSeconds: Double = 0.0
+            var livePositionSeconds: Double?
 
             // For HLS live streams (indefinite duration), use seekableTimeRanges to get duration
             // Regular VOD content (including VOD HLS) uses the item's duration
@@ -1253,6 +1254,8 @@ extension VideoPlayerView {
 
                     // Position is relative to the start of the seekable window
                     positionSeconds = CMTimeGetSeconds(CMTimeSubtract(currentTime, rangeStart))
+                    // The seekable range ends three target durations short of the live edge, which playback can pass.
+                    livePositionSeconds = max(0, positionSeconds)
 
                     // Ensure position is within valid range
                     if positionSeconds < 0 {
@@ -1293,6 +1296,9 @@ extension VideoPlayerView {
                     "bufferedPosition": bufferedPosition,
                     "isBuffering": isBuffering
                 ]
+                if let livePositionSeconds = livePositionSeconds, livePositionSeconds.isFinite {
+                    payload["livePosition"] = Int(livePositionSeconds * 1000)
+                }
                 self.appendVideoDimensions(to: &payload)
                 self.sendEvent("timeUpdate", data: payload)
             }
